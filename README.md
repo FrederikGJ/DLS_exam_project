@@ -12,8 +12,7 @@ Et lufthavnssystem bestående af én frontend og fem uafhængige backend-microse
 - registrere bagage og binde den til en passager/booking
 - vise lufthavnens butikker og navigere passageren til dem (Dijkstra)
 
-Dokumentation: [docs/kravspec.md](docs/kravspec.md) (kravspecifikationen, ordret) ·
-[docs/architecture.md](docs/architecture.md) (diagram, flows, designvalg) ·
+Dokumentation: [docs/architecture.md](docs/architecture.md) (diagram, flows, designvalg) ·
 [docs/events.md](docs/events.md) (alle events med eksempler) · [k8s/README.md](k8s/README.md) (minikube/kind).
 
 ## Tech stack
@@ -137,8 +136,8 @@ cd shop-service    && mvn test
 Manifests ligger i `k8s/` (Kustomize): namespace `airport`, Deployment (2 replicas) + Service + ConfigMap +
 Secret pr. backend-service, StatefulSet + PVC + Service pr. database, RabbitMQ StatefulSet, frontend og én Ingress.
 
-Manifests er verificeret på et **kind**-cluster (17/17 pods Ready, alle flows grønne gennem Ingress – se
-[docs/STATUS.md](docs/STATUS.md#6-kubernetes-verifikation-kind--resultat)). Kort version for minikube – se
+Manifests er verificeret på et **kind**-cluster (17/17 pods Ready, alle flows grønne gennem Ingress). Kort version for
+minikube – se
 [k8s/README.md](k8s/README.md) for detaljer og kind-alternativet:
 
 ```bash
@@ -190,7 +189,7 @@ Alle services konfigureres via environment variables. Defaults i `application.ym
 ```
 /
   README.md                docker-compose.yml
-  docs/                    kravspec.md, architecture.md, events.md, STATUS.md
+  docs/                    architecture.md, events.md
   frontend/                Dockerfile, nginx.conf, index.html, css/, js/ (config.js, api.js, app.js, pages/)
   flight-service/          pom.xml, Dockerfile, src/main/java/dk/airport/flight/{domain,repository,service,graphql,messaging,config}
   booking-service/         ... dk/airport/booking/...
@@ -219,3 +218,10 @@ De vigtigste:
   credentials fra `Secret`-objekter (dev-værdier i repoet, udskiftes i et rigtigt miljø).
 # DLS_exam_project
 # DLS_exam_project
+
+## Licens
+
+Copyright © 2026 Mahdi Karimi, Lukas Rønberg og Frederik Johannessen.
+
+Projektet er fri software under **GNU General Public License v3.0 (GPL-3.0)** – se [LICENSE](LICENSE).
+Det må frit bruges, ændres og videredistribueres, så længe afledte værker udgives under samme licens.
