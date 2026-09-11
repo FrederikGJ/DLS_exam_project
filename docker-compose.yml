@@ -1,0 +1,198 @@
+# Airport system - local development stack.
+# Start everything with:  docker compose up --build
+#
+# Ports on host:
+#   8080  frontend (nginx)
+#   8081  flight-service     -> http://localhost:8081/api/flights/graphql   (GraphiQL: /graphiql)
+#   8082  booking-service    -> http://localhost:8082/api/bookings/graphql
+#   8083  payment-service    -> http://localhost:8083/api/payments/graphql
+#   8084  baggage-service    -> http://localhost:8084/api/baggage/graphql
+#   8085  shop-service       -> http://localhost:8085/api/shops/graphql
+#   15672 RabbitMQ management UI (airport / airport)
+#   5433-5437 the five PostgreSQL instances (only for debugging with psql)
+#
+# Credentials below are DEV DEFAULTS ONLY. In Kubernetes they come from Secrets.
+
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  environment: &service-env
+    SPRING_PROFILES_ACTIVE: dev
+    RABBITMQ_HOST: rabbitmq
+    RABBITMQ_PORT: "5672"
+    RABBITMQ_USERNAME: airport
+    RABBITMQ_PASSWORD: airport
+    CORS_ALLOWED_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
+    JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=75.0
+  healthcheck:
+    test: ["CMD", "wget", "-qO-", "http://localhost:8080/actuator/health/readiness"]
+    interval: 10s
+    timeout: 5s
+    retries: 12
+    start_period: 40s
+
+x-postgres-defaults: &postgres-defaults
+  image: postgres:16-alpine
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+    interval: 5s
+    timeout: 5s
+    retries: 10
+
+services:
+  # ------------------------------------------------------------------ infra
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: airport
+      RABBITMQ_DEFAULT_PASS: airport
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+
+  flight-db:
+    <<: *postgres-defaults
+    environment:
+      POSTGRES_DB: flight_db
+      POSTGRES_USER: flight
+      POSTGRES_PASSWORD: flight
+    ports: ["5433:5432"]
+    volumes: [flight-db-data:/var/lib/postgresql/data]
+
+  booking-db:
+    <<: *postgres-defaults
+    environment:
+      POSTGRES_DB: booking_db
+      POSTGRES_USER: booking
+      POSTGRES_PASSWORD: booking
+    ports: ["5434:5432"]
+    volumes: [booking-db-data:/var/lib/postgresql/data]
+
+  payment-db:
+    <<: *postgres-defaults
+    environment:
+      POSTGRES_DB: payment_db
+      POSTGRES_USER: payment
+      POSTGRES_PASSWORD: payment
+    ports: ["5435:5432"]
+    volumes: [payment-db-data:/var/lib/postgresql/data]
+
+  baggage-db:
+    <<: *postgres-defaults
+    environment:
+      POSTGRES_DB: baggage_db
+      POSTGRES_USER: baggage
+      POSTGRES_PASSWORD: baggage
+    ports: ["5436:5432"]
+    volumes: [baggage-db-data:/var/lib/postgresql/data]
+
+  shop-db:
+    <<: *postgres-defaults
+    environment:
+      POSTGRES_DB: shop_db
+      POSTGRES_USER: shop
+      POSTGRES_PASSWORD: shop
+    ports: ["5437:5432"]
+    volumes: [shop-db-data:/var/lib/postgresql/data]
+
+  # -------------------------------------------------------------- services
+  flight-service:
+    <<: *service-defaults
+    build: ./flight-service
+    image: airport/flight-service:local
+    environment:
+      <<: *service-env
+      DB_URL: jdbc:postgresql://flight-db:5432/flight_db
+      DB_USERNAME: flight
+      DB_PASSWORD: flight
+    ports: ["8081:8080"]
+    depends_on:
+      flight-db: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+
+  booking-service:
+    <<: *service-defaults
+    build: ./booking-service
+    image: airport/booking-service:local
+    environment:
+      <<: *service-env
+      DB_URL: jdbc:postgresql://booking-db:5432/booking_db
+      DB_USERNAME: booking
+      DB_PASSWORD: booking
+      FLIGHT_SERVICE_URL: http://flight-service:8080/api/flights/graphql
+    ports: ["8082:8080"]
+    depends_on:
+      booking-db: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+      flight-service: { condition: service_healthy }
+
+  payment-service:
+    <<: *service-defaults
+    build: ./payment-service
+    image: airport/payment-service:local
+    environment:
+      <<: *service-env
+      DB_URL: jdbc:postgresql://payment-db:5432/payment_db
+      DB_USERNAME: payment
+      DB_PASSWORD: payment
+    ports: ["8083:8080"]
+    depends_on:
+      payment-db: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+
+  baggage-service:
+    <<: *service-defaults
+    build: ./baggage-service
+    image: airport/baggage-service:local
+    environment:
+      <<: *service-env
+      DB_URL: jdbc:postgresql://baggage-db:5432/baggage_db
+      DB_USERNAME: baggage
+      DB_PASSWORD: baggage
+    ports: ["8084:8080"]
+    depends_on:
+      baggage-db: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+
+  shop-service:
+    <<: *service-defaults
+    build: ./shop-service
+    image: airport/shop-service:local
+    environment:
+      <<: *service-env
+      DB_URL: jdbc:postgresql://shop-db:5432/shop_db
+      DB_USERNAME: shop
+      DB_PASSWORD: shop
+    ports: ["8085:8080"]
+    depends_on:
+      shop-db: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+
+  # -------------------------------------------------------------- frontend
+  frontend:
+    build: ./frontend
+    image: airport/frontend:local
+    restart: unless-stopped
+    ports: ["8080:80"]
+    depends_on:
+      - flight-service
+      - booking-service
+      - payment-service
+      - baggage-service
+      - shop-service
+
+volumes:
+  rabbitmq-data:
+  flight-db-data:
+  booking-db-data:
+  payment-db-data:
+  baggage-db-data:
+  shop-db-data:

@@ -1,0 +1,56 @@
+scalar DateTime
+scalar Date
+scalar BigDecimal
+
+type Query {
+  booking(id: ID!): Booking
+  bookingByReference(reference: String!): Booking
+  bookingsByPassenger(email: String!): [Booking!]!
+  passenger(id: ID!): Passenger
+}
+
+type Mutation {
+  "Creates a booking in status PENDING_PAYMENT. Price is fetched from flight-service."
+  createBooking(flightId: ID!, seatNumber: String!, passenger: PassengerInput!): Booking!
+  cancelBooking(reference: String!): Booking!
+  checkIn(reference: String!): Booking!
+}
+
+enum BookingStatus { PENDING_PAYMENT CONFIRMED CANCELLED CHECKED_IN }
+
+type Passenger {
+  id: ID!
+  firstName: String!
+  lastName: String!
+  email: String!
+  passportNumber: String!
+  dateOfBirth: Date
+  bookings: [Booking!]!
+}
+
+type Booking {
+  id: ID!
+  "6 character unique reference, e.g. K7Q2ZP"
+  bookingReference: String!
+  passenger: Passenger!
+  flightId: ID!
+  "Snapshot of flight data at booking time, kept up to date via flight.* events"
+  flightNumber: String!
+  departureTime: DateTime!
+  gate: String
+  flightStatus: String
+  seatNumber: String!
+  price: BigDecimal!
+  currency: String!
+  status: BookingStatus!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+input PassengerInput {
+  firstName: String!
+  lastName: String!
+  email: String!
+  passportNumber: String!
+  dateOfBirth: Date
+}

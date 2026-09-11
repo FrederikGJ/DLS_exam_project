@@ -1,0 +1,108 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: payment-service-config
+  labels:
+    app.kubernetes.io/name: payment-service
+    app.kubernetes.io/part-of: airport
+data:
+  SPRING_PROFILES_ACTIVE: prod
+  DB_URL: jdbc:postgresql://payment-db:5432/payment_db
+  RABBITMQ_HOST: rabbitmq
+  RABBITMQ_PORT: "5672"
+  # Frontend and APIs share the Ingress host, so CORS is only relevant for external tooling.
+  CORS_ALLOWED_ORIGINS: "http://airport.local,http://localhost"
+  GRAPHQL_PATH: /api/payments/graphql
+
+---
+# DEV VALUES ONLY - replace before any shared cluster.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: payment-service-secret
+  labels:
+    app.kubernetes.io/name: payment-service
+    app.kubernetes.io/part-of: airport
+type: Opaque
+stringData:
+  DB_USERNAME: payment
+  DB_PASSWORD: payment
+  RABBITMQ_USERNAME: airport
+  RABBITMQ_PASSWORD: airport
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-service
+  labels:
+    app.kubernetes.io/name: payment-service
+    app.kubernetes.io/part-of: airport
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: payment-service
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service
+  labels:
+    app.kubernetes.io/name: payment-service
+    app.kubernetes.io/part-of: airport
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: payment-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: payment-service
+        app.kubernetes.io/part-of: airport
+    spec:
+      containers:
+        - name: payment-service
+          image: airport/payment-service:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: payment-service-config
+            - secretRef:
+                name: payment-service-secret
+          env:
+            - name: JAVA_TOOL_OPTIONS
+              value: "-XX:MaxRAMPercentage=75.0"
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            initialDelaySeconds: 40
+            periodSeconds: 10
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 12
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi

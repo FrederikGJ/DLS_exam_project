@@ -1,0 +1,86 @@
+type Query {
+  shops(filter: ShopFilter): [Shop!]!
+  shop(id: ID!): Shop
+  "Free text search in name, category and description"
+  searchShops(text: String!): [Shop!]!
+  "Navigation nodes, optionally limited to a terminal and/or floor"
+  navNodes(terminal: String, floor: Int): [NavNode!]!
+  "All edges (optionally for one terminal) - lets a client draw the map. Edges are bidirectional."
+  navEdges(terminal: String): [NavEdge!]!
+  "Shortest route (Dijkstra over nav_edge). accessibleOnly=true skips stairs etc."
+  route(fromNodeId: ID!, toNodeId: ID!, accessibleOnly: Boolean = false): Route!
+}
+
+type Mutation {
+  createShop(input: ShopInput!): Shop!
+  updateShop(id: ID!, input: ShopInput!): Shop!
+  deleteShop(id: ID!): Boolean!
+}
+
+enum ShopCategory { FOOD RETAIL DUTY_FREE SERVICE LOUNGE }
+enum NodeType { SHOP GATE SECURITY ENTRANCE JUNCTION ELEVATOR }
+
+type Shop {
+  id: ID!
+  name: String!
+  category: ShopCategory!
+  terminal: String!
+  zone: String!
+  floor: Int!
+  "e.g. 06:00-22:00"
+  openingHours: String!
+  description: String
+  node: NavNode
+  openNow: Boolean!
+}
+
+type NavNode {
+  id: ID!
+  name: String!
+  terminal: String!
+  floor: Int!
+  x: Int!
+  y: Int!
+  type: NodeType!
+  shops: [Shop!]!
+}
+
+type NavEdge {
+  id: ID!
+  from: NavNode!
+  to: NavNode!
+  distanceM: Int!
+  accessible: Boolean!
+}
+
+type RouteStep {
+  node: NavNode!
+  instruction: String!
+  "Distance in metres from the previous step"
+  distance: Int!
+}
+
+type Route {
+  steps: [RouteStep!]!
+  totalDistanceM: Int!
+  estimatedMinutes: Int!
+  "Shops located at a node that is part of the route"
+  shopsAlongRoute: [Shop!]!
+}
+
+input ShopFilter {
+  terminal: String
+  category: ShopCategory
+  openNow: Boolean
+}
+
+input ShopInput {
+  name: String!
+  category: ShopCategory!
+  terminal: String!
+  zone: String!
+  floor: Int!
+  openingHours: String!
+  description: String
+  nodeId: ID
+}

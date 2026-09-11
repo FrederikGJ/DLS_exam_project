@@ -1,0 +1,144 @@
+# ---------------------------------------------------------------------------
+# Build output (Maven / Java)
+# ---------------------------------------------------------------------------
+**/target/
+out/
+*.class
+*.jar
+*.war
+*.ear
+!**/.mvn/wrapper/maven-wrapper.jar
+dependency-reduced-pom.xml
+.flattened-pom.xml
+buildNumber.properties
+release.properties
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+pom.xml.tag
+.mvn/timing.properties
+
+# JVM crash/replay files (land where mvn/java was started)
+hs_err_pid*
+replay_pid*
+
+# ---------------------------------------------------------------------------
+# Environment, credentials and local overrides - never in the repo
+# ---------------------------------------------------------------------------
+.env
+.env.*
+*.env
+!.env.example
+!*.env.example
+.envrc
+**/application-local.*
+**/application-*-local.*
+*.local.*
+docker-compose.override.y*ml
+compose.override.y*ml
+kubeconfig*
+*.kubeconfig
+secrets/
+.secrets/
+*.secret
+*.secrets
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+# ---------------------------------------------------------------------------
+# Data: database volumes, dumps and local databases
+# ---------------------------------------------------------------------------
+/data/
+/volumes/
+**/pgdata/
+**/*-db-data/
+**/rabbitmq-data/
+*.dump
+*.sql.gz
+*.backup
+dumps/
+backups/
+*.db
+*.sqlite
+*.sqlite3
+*.mv.db
+*.trace.db
+
+# ---------------------------------------------------------------------------
+# Logs, temp and test output
+# ---------------------------------------------------------------------------
+*.log
+*.log.*
+logs/
+tmp/
+temp/
+.tmp/
+*.tmp
+*.pid
+coverage/
+test-output/
+/scratch/
+
+# ---------------------------------------------------------------------------
+# Tooling that may be added later
+# ---------------------------------------------------------------------------
+node_modules/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Claude Code (kept local, not shared via the repo)
+.claude/
+CLAUDE.md
+**/CLAUDE.md
+
+# ---------------------------------------------------------------------------
+# IDE
+# ---------------------------------------------------------------------------
+.idea/
+*.iml
+*.iws
+*.ipr
+.fleet/
+.vscode/
+*.code-workspace
+.settings/
+.project
+.classpath
+.factorypath
+nbproject/
+nb-configuration.xml
+nbactions.xml
+
+# Editor and merge leftovers
+*.swp
+*.swo
+*~
+*.bak
+*.orig
+*.rej
+
+# ---------------------------------------------------------------------------
+# OS: Windows, macOS, Linux
+# ---------------------------------------------------------------------------
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.lnk
+*.stackdump
+nul
+*:Zone.Identifier
+.DS_Store
+._*
+.AppleDouble
+.Spotlight-V100
+.Trashes
+.directory
+.Trash-*
+.nfs*

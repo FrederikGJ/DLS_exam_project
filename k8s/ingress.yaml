@@ -1,0 +1,57 @@
+# Single entry point. No host is set so the cluster IP (e.g. `minikube ip`) works directly.
+# Each Spring service serves GraphQL at its own /api/<x>/graphql path (GRAPHQL_PATH), so no rewrite is needed.
+# /graphiql and /actuator of the services are deliberately not exposed.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: airport
+  labels:
+    app.kubernetes.io/name: airport-ingress
+    app.kubernetes.io/part-of: airport
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: /api/flights
+            pathType: Prefix
+            backend:
+              service:
+                name: flight-service
+                port:
+                  number: 8080
+          - path: /api/bookings
+            pathType: Prefix
+            backend:
+              service:
+                name: booking-service
+                port:
+                  number: 8080
+          - path: /api/payments
+            pathType: Prefix
+            backend:
+              service:
+                name: payment-service
+                port:
+                  number: 8080
+          - path: /api/baggage
+            pathType: Prefix
+            backend:
+              service:
+                name: baggage-service
+                port:
+                  number: 8080
+          - path: /api/shops
+            pathType: Prefix
+            backend:
+              service:
+                name: shop-service
+                port:
+                  number: 8080
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80

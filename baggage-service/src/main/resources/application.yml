@@ -1,0 +1,86 @@
+# All values can be overridden with environment variables.
+# Defaults are ONLY meant for local development (docker-compose / IDE).
+spring:
+  application:
+    name: baggage-service
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5436/baggage_db}
+    username: ${DB_USERNAME:baggage}
+    password: ${DB_PASSWORD:baggage}
+  jpa:
+    hibernate:
+      ddl-auto: validate          # schema is owned by Flyway - never "update"
+    open-in-view: false
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USERNAME:airport}
+    password: ${RABBITMQ_PASSWORD:airport}
+    listener:
+      simple:
+        acknowledge-mode: auto
+        default-requeue-rejected: false     # after retries -> reject -> dead-letter queue
+        retry:
+          enabled: true
+          max-attempts: 3
+          initial-interval: 500ms
+          multiplier: 2.0
+          max-interval: 3s
+  graphql:
+    path: ${GRAPHQL_PATH:/api/baggage/graphql}
+    graphiql:
+      enabled: true
+      path: /graphiql
+    cors:
+      allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:8080}
+      allowed-methods: GET,POST,OPTIONS
+      allowed-headers: "*"
+      max-age: 3600
+
+server:
+  port: ${SERVER_PORT:8080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: always
+      group:
+        readiness:
+          include: readinessState,db,rabbit
+
+app:
+  messaging:
+    exchange: airport.events
+    dead-letter-exchange: airport.events.dlx
+    producer: baggage-service
+    queues:
+      booking-events: baggage-service.booking-events
+      flight-events: baggage-service.flight-events
+      dead-letter: baggage-service.dlq
+
+logging:
+  level:
+    dk.airport: INFO
+    org.springframework.amqp: WARN
+
+---
+spring:
+  config:
+    activate:
+      on-profile: prod
+  graphql:
+    graphiql:
+      enabled: false
+logging:
+  structured:
+    format:
+      console: logstash          # JSON logs in prod, human readable in dev

@@ -1,0 +1,98 @@
+scalar DateTime
+scalar Date
+scalar BigDecimal
+
+type Query {
+  airlines: [Airline!]!
+  airline(id: ID!): Airline
+  flights(filter: FlightFilter): [Flight!]!
+  flight(id: ID!): Flight
+  flightByNumber(flightNumber: String!, date: Date!): Flight
+  availableSeats(flightId: ID!): [Seat!]!
+}
+
+type Mutation {
+  createAirline(input: CreateAirlineInput!): Airline!
+  createAircraft(input: CreateAircraftInput!): Aircraft!
+  createFlight(input: CreateFlightInput!): Flight!
+  updateFlightStatus(flightId: ID!, status: FlightStatus!): Flight!
+  updateGate(flightId: ID!, gate: String!): Flight!
+}
+
+enum FlightStatus { SCHEDULED BOARDING DEPARTED DELAYED CANCELLED }
+enum SeatClass { ECONOMY BUSINESS FIRST }
+
+type Airline {
+  id: ID!
+  iataCode: String!
+  name: String!
+  country: String!
+  aircraft: [Aircraft!]!
+  flights: [Flight!]!
+}
+
+type Aircraft {
+  id: ID!
+  registration: String!
+  model: String!
+  totalSeats: Int!
+  airline: Airline!
+}
+
+type Flight {
+  id: ID!
+  flightNumber: String!
+  airline: Airline!
+  aircraft: Aircraft!
+  origin: String!
+  destination: String!
+  scheduledDeparture: DateTime!
+  scheduledArrival: DateTime!
+  gate: String
+  status: FlightStatus!
+  "Base price for an ECONOMY seat. Seat price = basePrice * class multiplier."
+  basePrice: BigDecimal!
+  currency: String!
+  seats(onlyAvailable: Boolean = false): [Seat!]!
+  seat(seatNumber: String!): Seat
+  availableSeatCount: Int!
+}
+
+type Seat {
+  id: ID!
+  seatNumber: String!
+  seatClass: SeatClass!
+  isAvailable: Boolean!
+  price: BigDecimal!
+}
+
+input FlightFilter {
+  destination: String
+  date: Date
+  status: FlightStatus
+}
+
+input CreateAirlineInput {
+  iataCode: String!
+  name: String!
+  country: String!
+}
+
+input CreateAircraftInput {
+  registration: String!
+  model: String!
+  totalSeats: Int!
+  airlineId: ID!
+}
+
+input CreateFlightInput {
+  flightNumber: String!
+  airlineId: ID!
+  aircraftId: ID!
+  origin: String!
+  destination: String!
+  scheduledDeparture: DateTime!
+  scheduledArrival: DateTime!
+  gate: String
+  basePrice: BigDecimal!
+}

@@ -1,0 +1,32 @@
+scalar DateTime
+scalar BigDecimal
+
+type Query {
+  payment(id: ID!): Payment
+  paymentsByBooking(reference: String!): [Payment!]!
+}
+
+type Mutation {
+  """
+  Simulated payment gateway.
+   - card number ending in 0000  -> FAILED ("Insufficient funds")
+   - expired expiry (MM/YY)      -> FAILED ("Card expired")
+   - everything else             -> COMPLETED
+  The full card number is never stored; only the last 4 digits.
+  """
+  pay(bookingReference: String!, amount: BigDecimal!, cardNumber: String!, expiry: String!, cvv: String!): Payment!
+  refund(paymentId: ID!): Payment!
+}
+
+enum PaymentStatus { PENDING COMPLETED FAILED REFUNDED }
+
+type Payment {
+  id: ID!
+  bookingReference: String!
+  amount: BigDecimal!
+  currency: String!
+  cardLast4: String!
+  status: PaymentStatus!
+  failureReason: String
+  createdAt: DateTime!
+}

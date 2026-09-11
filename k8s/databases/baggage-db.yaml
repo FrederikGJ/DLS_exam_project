@@ -1,0 +1,93 @@
+# DEV VALUES ONLY in the Secret below - replace before any shared cluster.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: baggage-db-secret
+  labels:
+    app.kubernetes.io/name: baggage-db
+    app.kubernetes.io/part-of: airport
+type: Opaque
+stringData:
+  POSTGRES_DB: baggage_db
+  POSTGRES_USER: baggage
+  POSTGRES_PASSWORD: baggage
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: baggage-db
+  labels:
+    app.kubernetes.io/name: baggage-db
+    app.kubernetes.io/part-of: airport
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: baggage-db
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: baggage-db
+  labels:
+    app.kubernetes.io/name: baggage-db
+    app.kubernetes.io/part-of: airport
+spec:
+  serviceName: baggage-db
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: baggage-db
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: baggage-db
+        app.kubernetes.io/part-of: airport
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - name: postgres
+              containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: baggage-db-secret
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "baggage", "-d", "baggage_db"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "baggage", "-d", "baggage_db"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

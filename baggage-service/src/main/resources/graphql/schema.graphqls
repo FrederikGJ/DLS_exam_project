@@ -1,0 +1,45 @@
+scalar DateTime
+scalar BigDecimal
+
+type Query {
+  baggage(tagNumber: String!): Baggage
+  baggageByBooking(reference: String!): [Baggage!]!
+  baggageByFlight(flightNumber: String!): [Baggage!]!
+  "Local snapshot of a booking as known from booking.* events (null if never seen)."
+  bookingSnapshot(reference: String!): BookingSnapshot
+}
+
+type Mutation {
+  """
+  Registers a piece of baggage on a booking. Rules:
+   - booking must be CONFIRMED or CHECKED_IN (known via booking events)
+   - max 3 CHECKED bags per booking
+   - max 32 kg per bag
+  """
+  registerBaggage(bookingReference: String!, weightKg: BigDecimal!, type: BaggageType!): Baggage!
+  updateBaggageStatus(tagNumber: String!, status: BaggageStatus!, location: String): Baggage!
+}
+
+enum BaggageType { CHECKED CABIN SPECIAL }
+enum BaggageStatus { REGISTERED SECURITY LOADED IN_TRANSIT ARRIVED LOST }
+
+type Baggage {
+  id: ID!
+  "Unique tag, format BAG-XXXXXXXX"
+  tagNumber: String!
+  bookingReference: String!
+  passengerName: String!
+  flightNumber: String!
+  weightKg: BigDecimal!
+  type: BaggageType!
+  status: BaggageStatus!
+  lastLocation: String
+  updatedAt: DateTime!
+}
+
+type BookingSnapshot {
+  bookingReference: String!
+  passengerName: String!
+  flightNumber: String!
+  status: String!
+}

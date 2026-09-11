@@ -1,0 +1,86 @@
+# All values can be overridden with environment variables.
+# Defaults are ONLY meant for local development (docker-compose / IDE).
+spring:
+  application:
+    name: shop-service
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5437/shop_db}
+    username: ${DB_USERNAME:shop}
+    password: ${DB_PASSWORD:shop}
+  jpa:
+    hibernate:
+      ddl-auto: validate          # schema is owned by Flyway - never "update"
+    open-in-view: false
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USERNAME:airport}
+    password: ${RABBITMQ_PASSWORD:airport}
+    listener:
+      simple:
+        acknowledge-mode: auto
+        default-requeue-rejected: false     # after retries -> reject -> dead-letter queue
+        retry:
+          enabled: true
+          max-attempts: 3
+          initial-interval: 500ms
+          multiplier: 2.0
+          max-interval: 3s
+  graphql:
+    path: ${GRAPHQL_PATH:/api/shops/graphql}
+    graphiql:
+      enabled: true
+      path: /graphiql
+    cors:
+      allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:8080}
+      allowed-methods: GET,POST,OPTIONS
+      allowed-headers: "*"
+      max-age: 3600
+
+server:
+  port: ${SERVER_PORT:8080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: always
+      group:
+        readiness:
+          include: readinessState,db,rabbit
+
+app:
+  timezone: ${APP_TIMEZONE:Europe/Copenhagen}
+  messaging:
+    exchange: airport.events
+    dead-letter-exchange: airport.events.dlx
+    producer: shop-service
+    queues:
+      flight-events: shop-service.flight-events
+      dead-letter: shop-service.dlq
+
+logging:
+  level:
+    dk.airport: INFO
+    org.springframework.amqp: WARN
+
+---
+spring:
+  config:
+    activate:
+      on-profile: prod
+  graphql:
+    graphiql:
+      enabled: false
+logging:
+  structured:
+    format:
+      console: logstash          # JSON logs in prod, human readable in dev
