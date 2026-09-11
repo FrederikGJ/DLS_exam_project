@@ -67,10 +67,15 @@ kubectl delete -k k8s/                                  # ryd op (PVC'er slettes
 
 ## Alternativ: kind
 
-```bash
-kind create cluster --name airport
+Clusteret oprettes med `kind-config.yaml`, som mapper ingress-nginx' port 80/443 på kind-noden til
+**localhost:8090 / 8443** på host-maskinen. Dermed kolliderer det ikke med docker-compose-stakken (frontend på 8080),
+og der er ikke brug for port-forward. Skal du bruge andre porte, så ret `hostPort` i `kind-config.yaml`.
 
-# Byg images lokalt og load dem ind i kind-noden (fra repo-roden)
+```bash
+kind create cluster --config k8s/kind-config.yaml
+
+# Byg images lokalt og load dem ind i kind-noden (fra repo-roden).
+# Har du allerede kørt `docker compose build`/`up --build`, kan build-trinnet springes over.
 docker compose build
 for img in flight-service booking-service payment-service baggage-service shop-service frontend; do
   kind load docker-image "airport/${img}:local" --name airport
@@ -82,8 +87,19 @@ kubectl -n ingress-nginx wait --for=condition=ready pod -l app.kubernetes.io/com
 
 kubectl apply -k k8s/
 kubectl -n airport get pods -w
-
-# Åbn frontenden via port-forward til ingress-controlleren
-kubectl -n ingress-nginx port-forward svc/ingress-nginx-controller 8080:80
-# -> http://localhost:8080/
 ```
+
+Åbn frontenden på <http://localhost:8090/> (alle `/api/<x>/graphql`-stier går gennem samme Ingress).
+
+Kør end-to-end-smoketesten mod Kubernetes-stakken gennem Ingress:
+
+```bash
+FLIGHT_URL=http://localhost:8090/api/flights/graphql \
+BOOKING_URL=http://localhost:8090/api/bookings/graphql \
+PAYMENT_URL=http://localhost:8090/api/payments/graphql \
+BAGGAGE_URL=http://localhost:8090/api/baggage/graphql \
+SHOP_URL=http://localhost:8090/api/shops/graphql \
+scripts/e2e-smoke.sh
+```
+
+Ryd op med `kind delete cluster --name airport`.

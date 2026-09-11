@@ -1,0 +1,24 @@
+# Kind-cluster til airport-stakken.
+# Ingress-nginx lytter på port 80/443 på kind-noden; her mappes de til
+# host-porte, der ikke kolliderer med docker-compose (frontend bruger 8080).
+#
+#   kind create cluster --config k8s/kind-config.yaml
+#   -> frontend via Ingress: http://localhost:8090/
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: airport
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 8090
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 8443
+        protocol: TCP
