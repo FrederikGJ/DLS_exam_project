@@ -10,8 +10,11 @@ data:
   DB_URL: jdbc:postgresql://flight-db:5432/flight_db
   RABBITMQ_HOST: rabbitmq
   RABBITMQ_PORT: "5672"
-  # Frontend and APIs share the Ingress host, so CORS is only relevant for external tooling.
-  CORS_ALLOWED_ORIGINS: "http://airport.local,http://localhost"
+  # Behind the Ingress, nginx forwards X-Forwarded-Port as the port it listens on inside the
+  # node (80), not the host port kind maps it to (8090). Spring Boot trusts forwarded headers
+  # on Kubernetes, so the browser origin http://localhost:8090 counts as cross-origin and must
+  # be allowed explicitly. Keep this in sync with hostPort in k8s/kind-config.yaml.
+  CORS_ALLOWED_ORIGINS: "http://airport.local,http://localhost,http://localhost:8090"
   GRAPHQL_PATH: /api/flights/graphql
 
 ---
