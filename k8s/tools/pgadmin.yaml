@@ -1,0 +1,222 @@
+# pgAdmin - dev/demo tool for browsing the five service databases from one UI.
+#
+# It is NOT part of the airport system (not in the requirements spec). To deploy without it,
+# remove the `tools/pgadmin.yaml` line from k8s/kustomization.yaml.
+#
+# How it fits together:
+# - Reached through the Ingress at /pgadmin. SCRIPT_NAME makes pgAdmin serve under that prefix,
+#   so no rewrite rule is needed (same approach as the services' GRAPHQL_PATH).
+# - Runs in pgAdmin's "desktop mode" (SERVER_MODE=False): no login page, the UI opens directly
+#   with the five databases ready. That is exactly why it is dev/demo only - anyone who can reach
+#   /pgadmin has full access to the databases.
+# - The five databases are pre-registered from servers.json (ConfigMap below). Their passwords
+#   come from a pgpass file (Secret below): on first start the image's entrypoint copies
+#   PGPASS_FILE to /var/lib/pgadmin/.pgpass with mode 0600, because libpq refuses password
+#   files that are group/world readable. "PassFile" in servers.json points at that copy.
+# - State (pgadmin4.db, sessions) lives in an emptyDir and is rebuilt on every pod start.
+#   For a demo tool that is a feature: it always comes up in a known state.
+#
+# DEV VALUES ONLY in the Secret - replace before any shared cluster.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pgadmin-secret
+  labels:
+    app.kubernetes.io/name: pgadmin
+    app.kubernetes.io/part-of: airport
+type: Opaque
+stringData:
+  # Required by the image's first-run setup even in desktop mode; there is no login page.
+  PGADMIN_DEFAULT_EMAIL: admin@example.com
+  PGADMIN_DEFAULT_PASSWORD: airport
+  # libpq pgpass format: hostname:port:database:username:password
+  # Must match POSTGRES_USER/POSTGRES_PASSWORD in k8s/databases/*-db.yaml.
+  pgpass: |
+    flight-db:5432:*:flight:flight
+    booking-db:5432:*:booking:booking
+    payment-db:5432:*:payment:payment
+    baggage-db:5432:*:baggage:baggage
+    shop-db:5432:*:shop:shop
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pgadmin-servers
+  labels:
+    app.kubernetes.io/name: pgadmin
+    app.kubernetes.io/part-of: airport
+data:
+  # Imported once, when pgAdmin initialises its config database (first pod start).
+  # Host = the ClusterIP Service of each database, MaintenanceDB/Username = the DB Secret values.
+  servers.json: |
+    {
+      "Servers": {
+        "1": {
+          "Name": "flight-db",
+          "Group": "Airport",
+          "Host": "flight-db",
+          "Port": 5432,
+          "MaintenanceDB": "flight_db",
+          "Username": "flight",
+          "SSLMode": "prefer",
+          "PassFile": "/var/lib/pgadmin/.pgpass"
+        },
+        "2": {
+          "Name": "booking-db",
+          "Group": "Airport",
+          "Host": "booking-db",
+          "Port": 5432,
+          "MaintenanceDB": "booking_db",
+          "Username": "booking",
+          "SSLMode": "prefer",
+          "PassFile": "/var/lib/pgadmin/.pgpass"
+        },
+        "3": {
+          "Name": "payment-db",
+          "Group": "Airport",
+          "Host": "payment-db",
+          "Port": 5432,
+          "MaintenanceDB": "payment_db",
+          "Username": "payment",
+          "SSLMode": "prefer",
+          "PassFile": "/var/lib/pgadmin/.pgpass"
+        },
+        "4": {
+          "Name": "baggage-db",
+          "Group": "Airport",
+          "Host": "baggage-db",
+          "Port": 5432,
+          "MaintenanceDB": "baggage_db",
+          "Username": "baggage",
+          "SSLMode": "prefer",
+          "PassFile": "/var/lib/pgadmin/.pgpass"
+        },
+        "5": {
+          "Name": "shop-db",
+          "Group": "Airport",
+          "Host": "shop-db",
+          "Port": 5432,
+          "MaintenanceDB": "shop_db",
+          "Username": "shop",
+          "SSLMode": "prefer",
+          "PassFile": "/var/lib/pgadmin/.pgpass"
+        }
+      }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pgadmin
+  labels:
+    app.kubernetes.io/name: pgadmin
+    app.kubernetes.io/part-of: airport
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: pgadmin
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pgadmin
+  labels:
+    app.kubernetes.io/name: pgadmin
+    app.kubernetes.io/part-of: airport
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pgadmin
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pgadmin
+        app.kubernetes.io/part-of: airport
+    spec:
+      containers:
+        - name: pgadmin
+          image: dpage/pgadmin4:9.17
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - secretRef:
+                name: pgadmin-secret
+          env:
+            # Unprivileged port, so the non-root pgadmin user needs no NET_BIND_SERVICE capability.
+            - name: PGADMIN_LISTEN_PORT
+              value: "8080"
+            # Serve under the Ingress path prefix.
+            - name: SCRIPT_NAME
+              value: /pgadmin
+            # Desktop mode: no login page and no master-password prompt. Dev/demo only.
+            - name: PGADMIN_CONFIG_SERVER_MODE
+              value: "False"
+            - name: PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED
+              value: "False"
+            # Copied by the entrypoint to /var/lib/pgadmin/.pgpass (mode 0600) on first start.
+            - name: PGPASS_FILE
+              value: /pgadmin4/pgpass
+            # No mail server for password resets, and no "new version available" call to pgadmin.org.
+            - name: PGADMIN_DISABLE_POSTFIX
+              value: "true"
+            - name: PGADMIN_CONFIG_UPGRADE_CHECK_ENABLED
+              value: "False"
+          volumeMounts:
+            - name: servers
+              mountPath: /pgadmin4/servers.json
+              subPath: servers.json
+              readOnly: true
+            - name: pgpass
+              mountPath: /pgadmin4/pgpass
+              subPath: pgpass
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/pgadmin
+          # First start builds pgAdmin's config DB and imports servers.json. On a cold boot of the whole
+          # stack (ten Java services starting at once) that can take several minutes, and killing it
+          # halfway would leave a half-initialised pgadmin4.db behind - so allow up to 10 minutes.
+          startupProbe:
+            httpGet:
+              path: /pgadmin/misc/ping
+              port: http
+            periodSeconds: 5
+            failureThreshold: 120
+          livenessProbe:
+            httpGet:
+              path: /pgadmin/misc/ping
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /pgadmin/misc/ping
+              port: http
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+      volumes:
+        - name: servers
+          configMap:
+            name: pgadmin-servers
+        - name: pgpass
+          secret:
+            secretName: pgadmin-secret
+            items:
+              - key: pgpass
+                path: pgpass
+        - name: data
+          emptyDir: {}

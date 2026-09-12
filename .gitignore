@@ -97,6 +97,9 @@ venv/
 CLAUDE.md
 **/CLAUDE.md
 
+# Local planning notes (kept local, not shared via the repo)
+/developmentplan.md
+
 # ---------------------------------------------------------------------------
 # IDE
 # ---------------------------------------------------------------------------

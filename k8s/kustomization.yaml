@@ -19,4 +19,5 @@ resources:
   - services/baggage-service.yaml
   - services/shop-service.yaml
   - frontend/frontend.yaml
+  - tools/pgadmin.yaml   # dev/demo: pgAdmin at /pgadmin - remove this line to deploy without it
   - ingress.yaml

@@ -135,6 +135,8 @@ cd shop-service    && mvn test
 
 Manifests ligger i `k8s/` (Kustomize): namespace `airport`, Deployment (2 replicas) + Service + ConfigMap +
 Secret pr. backend-service, StatefulSet + PVC + Service pr. database, RabbitMQ StatefulSet, frontend og én Ingress.
+Derudover pgAdmin som dev/demo-værktøj på `/pgadmin` (`k8s/tools/`, kan fjernes med én linje i `kustomization.yaml`);
+det er ikke en del af selve systemet.
 
 Manifests er verificeret på et **kind**-cluster (17/17 pods Ready, alle flows grønne gennem Ingress). Kort version for
 minikube – se
@@ -165,6 +167,7 @@ Ingress-routing:
 | `/api/payments`         | payment-service  | `/api/payments/graphql` |
 | `/api/baggage`          | baggage-service  | `/api/baggage/graphql`  |
 | `/api/shops`            | shop-service     | `/api/shops/graphql`    |
+| `/pgadmin`              | pgadmin          | dev/demo: pgAdmin UI, åbner uden login |
 
 I Kubernetes erstattes `frontend/js/config.js` af en ConfigMap med relative paths (`/api/.../graphql`),
 så frontend og API deler origin.
@@ -197,7 +200,7 @@ Alle services konfigureres via environment variables. Defaults i `application.ym
   baggage-service/         ... dk/airport/baggage/...
   shop-service/            ... dk/airport/shop/...
     (hver: src/main/resources/graphql/schema.graphqls, db/migration/V1__init.sql (+V2__seed.sql), src/test/java)
-  k8s/                     kustomization.yaml, namespace.yaml, rabbitmq/, databases/, services/, frontend/, ingress.yaml
+  k8s/                     kustomization.yaml, namespace.yaml, rabbitmq/, databases/, services/, frontend/, tools/ (pgAdmin), ingress.yaml
   scripts/e2e-smoke.sh     end-to-end smoke-test af Flow A-D mod en kørende compose-stak
 ```
 
