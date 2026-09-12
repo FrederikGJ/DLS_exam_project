@@ -216,8 +216,6 @@ De vigtigste:
   kan bygges alene med sin egen Dockerfile.
 - **Ingen hardcodede secrets**: compose-filen indeholder kun dev-defaults; i Kubernetes kommer alle
   credentials fra `Secret`-objekter (dev-værdier i repoet, udskiftes i et rigtigt miljø).
-# DLS_exam_project
-# DLS_exam_project
 
 ## Licens
 
