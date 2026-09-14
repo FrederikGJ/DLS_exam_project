@@ -43,6 +43,21 @@ beskeden uden requeue efter 3. fejl, hvorefter RabbitMQ flytter den til `<servic
 Idempotens: hver service gemmer behandlede `eventId` i tabellen `processed_event` i samme transaktion som
 den tilstandsændring eventet medfører. Et event med kendt `eventId` ignoreres (logges som "skipping").
 
+## Leveringsgarantier
+
+* **Atomisk med tilstanden.** Et event skrives til producentens `outbox_event`-tabel i samme
+  databasetransaktion som den ændring det beskriver. Rulles transaktionen tilbage, findes eventet ikke.
+* **At-least-once.** `OutboxRelay` sender rækkerne til RabbitMQ og markerer dem først som sendt, når brokeren
+  har bekræftet (publisher confirms). Er brokeren nede, bliver rækkerne liggende og sendes når den er tilbage.
+* **Duplikater er normale.** Crasher relayet mellem bekræftelse og markering, sendes eventet igen med
+  *samme* `eventId`. Consumers skal derfor være idempotente – `eventId` er dedup-nøglen, og
+  `processed_event` er implementeringen i alle services.
+* **Rækkefølge pr. producent bevares.** Kun ét relay er aktivt pr. service (Postgres advisory lock), rækker
+  sendes i `id`-orden, og en fejlet batch gentages som helhed. Det betyder fx at `booking.confirmed` aldrig
+  overhaler `booking.created` fra samme service. Rækkefølge *på tværs* af producenter garanteres ikke.
+* **Observerbarhed.** Ubekræftede events kan ses i `outbox_event` (`published_at IS NULL`, `attempts`,
+  `last_error`) og som gauge `outbox.pending` på `/actuator/metrics/outbox.pending`.
+
 ---
 
 ## Events fra flight-service

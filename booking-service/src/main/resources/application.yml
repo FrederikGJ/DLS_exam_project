@@ -19,6 +19,7 @@ spring:
     port: ${RABBITMQ_PORT:5672}
     username: ${RABBITMQ_USERNAME:airport}
     password: ${RABBITMQ_PASSWORD:airport}
+    publisher-confirm-type: simple      # OutboxRelay waits for broker confirms before marking rows as sent
     listener:
       simple:
         acknowledge-mode: auto
@@ -47,7 +48,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,metrics   # metrics: outbox.pending (unpublished events)
   endpoint:
     health:
       probes:
@@ -66,6 +67,12 @@ app:
       payment-events: booking-service.payment-events
       flight-events: booking-service.flight-events
       dead-letter: booking-service.dlq
+  outbox:                               # transactional outbox (see messaging/OutboxRelay)
+    poll-interval-ms: ${OUTBOX_POLL_INTERVAL_MS:500}
+    batch-size: 100
+    confirm-timeout-ms: 5000
+    retention: 7d                       # published rows older than this are deleted
+    cleanup-interval-ms: 3600000
   flight-service:
     url: ${FLIGHT_SERVICE_URL:http://localhost:8081/api/flights/graphql}
     timeout: ${FLIGHT_SERVICE_TIMEOUT:5s}

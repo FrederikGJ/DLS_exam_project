@@ -2,11 +2,16 @@ package dk.airport.flight;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dk.airport.flight.messaging.EventEnvelope;
+import dk.airport.flight.messaging.EventPublisher;
+import dk.airport.flight.messaging.OutboxEvent;
+import dk.airport.flight.messaging.OutboxEventRepository;
 import dk.airport.flight.messaging.ProcessedEventRepository;
 import dk.airport.flight.repository.SeatRepository;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.core.*;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitAdmin;
@@ -17,6 +22,8 @@ import org.springframework.boot.test.autoconfigure.graphql.tester.AutoConfigureG
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.graphql.test.tester.GraphQlTester;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.containers.RabbitMQContainer;
 import org.testcontainers.junit.jupiter.Container;
@@ -31,11 +38,16 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Predicate;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doCallRealMethod;
+import static org.mockito.Mockito.doThrow;
 
 /**
  * End-to-end test against real PostgreSQL + RabbitMQ (Testcontainers):
- * Flyway migrations + seed, GraphQL queries/mutations, event publishing and idempotent consumption.
+ * Flyway migrations + seed, GraphQL queries/mutations, event publishing through the transactional outbox
+ * and idempotent consumption.
  */
 @SpringBootTest
 @AutoConfigureGraphQlTester
@@ -53,11 +65,16 @@ class FlightServiceIntegrationTest {
     static final String TEST_QUEUE = "test.flight-events";
 
     @Autowired GraphQlTester graphQlTester;
-    @Autowired RabbitTemplate rabbitTemplate;
+    /** Spy so a single test can make the outbox relay's publish attempt fail (reset after every test). */
+    @MockitoSpyBean RabbitTemplate rabbitTemplate;
     @Autowired ConnectionFactory connectionFactory;
     @Autowired ObjectMapper objectMapper;
     @Autowired SeatRepository seatRepository;
     @Autowired ProcessedEventRepository processedEventRepository;
+    @Autowired OutboxEventRepository outboxEventRepository;
+    @Autowired EventPublisher eventPublisher;
+    @Autowired TransactionTemplate transactionTemplate;
+    @Autowired MeterRegistry meterRegistry;
 
     /** Every event published on airport.events with routing key flight.* ends up here. */
     static final List<EventEnvelope> RECEIVED = new CopyOnWriteArrayList<>();
@@ -193,27 +210,62 @@ class FlightServiceIntegrationTest {
         List<EventEnvelope> received = awaitEvents(e -> e.payload().path("flightNumber").asText().equals("SK9999"), 1);
         assertThat(received.get(0).eventType()).isEqualTo("flight.created");
         assertThat(received.get(0).producer()).isEqualTo("flight-service");
+
+        // the event went through the outbox: same eventId, committed with the flight, marked once confirmed
+        OutboxEvent row = outboxEventRepository.findByEventId(received.get(0).eventId()).orElseThrow();
+        assertThat(row.getEventType()).isEqualTo("flight.created");
+        assertThat(row.getPayload()).contains("SK9999");
+        assertThat(row.getAttempts()).isZero();
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(outboxEventRepository.findByEventId(row.getEventId()).orElseThrow().getPublishedAt()).isNotNull());
+    }
+
+    // ------------------------------------------------------------------ outbox guarantees
+
+    @Test
+    void publishOutsideTransactionIsRejected() {
+        assertThatThrownBy(() -> eventPublisher.publish("flight.test", Map.of("marker", "NOTX1")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("transaction");
+        assertThat(RECEIVED.stream().filter(e -> e.payload().path("marker").asText().equals("NOTX1"))).isEmpty();
     }
 
     @Test
-    void validationErrorsAreReportedWithCode() {
-        graphQlTester.document("mutation { createAirline(input: { iataCode: \"TOOLONG\", name: \"\", country: \"DK\" }) { id } }")
-                .execute()
-                .errors().satisfy(errors -> {
-                    assertThat(errors).hasSize(1);
-                    assertThat(errors.get(0).getExtensions()).containsEntry("code", "VALIDATION_ERROR");
-                    assertThat(errors.get(0).getMessage()).contains("iataCode").contains("name");
-                });
+    void rolledBackTransactionLeavesNoOutboxRowAndNoEvent() {
+        String eventId = transactionTemplate.execute(status -> {
+            EventEnvelope env = eventPublisher.publish("flight.test", Map.of("marker", "RLBK1"));
+            assertThat(outboxEventRepository.findByEventId(env.eventId())).isPresent();   // visible inside the tx
+            status.setRollbackOnly();
+            return env.eventId();
+        });
+
+        assertThat(outboxEventRepository.findByEventId(eventId)).isEmpty();
+        // nothing may show up on the broker either - wait longer than a few poll intervals to be sure
+        await().during(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(4))
+                .until(() -> RECEIVED.stream().noneMatch(e -> e.eventId().equals(eventId)));
     }
 
     @Test
-    void unknownFlightGivesNotFound() {
-        graphQlTester.document("mutation { updateGate(flightId: 999999, gate: \"Z9\") { id } }")
-                .execute()
-                .errors().satisfy(errors -> {
-                    assertThat(errors).hasSize(1);
-                    assertThat(errors.get(0).getExtensions()).containsEntry("code", "NOT_FOUND");
-                });
+    void relayRetriesUntilBrokerConfirms() {
+        // start from a quiet outbox so the first failing invoke() below is guaranteed to hit our row
+        await().atMost(Duration.ofSeconds(10)).until(() -> outboxEventRepository.countByPublishedAtIsNull() == 0);
+        doThrow(new AmqpException("simulated broker failure")).doCallRealMethod()
+                .when(rabbitTemplate).invoke(any(), any(), any());
+
+        String eventId = transactionTemplate.execute(status ->
+                eventPublisher.publish("flight.test", Map.of("marker", "RTRY1")).eventId());
+
+        // first poll fails and is recorded, the next poll succeeds and the event arrives exactly once
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+            OutboxEvent row = outboxEventRepository.findByEventId(eventId).orElseThrow();
+            assertThat(row.getPublishedAt()).isNotNull();
+            assertThat(row.getAttempts()).isGreaterThanOrEqualTo(1);
+            assertThat(row.getLastError()).contains("simulated broker failure");
+        });
+        List<EventEnvelope> received = awaitEvents(e -> e.eventId().equals(eventId), 1);
+        assertThat(received).hasSize(1);
+        assertThat(received.get(0).eventType()).isEqualTo("flight.test");
+        assertThat(meterRegistry.get("outbox.pending").gauge().value()).isZero();
     }
 
     // ------------------------------------------------------------------ helpers

@@ -103,6 +103,22 @@ curl -u airport:airport -H 'Content-Type: application/json' -X POST \
 # -> flight-service.dlq, payment-service.dlq og baggage-service.dlq har nu 1 besked hver (RabbitMQ UI -> Queues)
 ```
 
+### Test af transactional outbox (broker nede)
+
+Events skrives til tabellen `outbox_event` i samme transaktion som tilstandsændringen og sendes videre af et
+relay, så en mutation lykkes selv om RabbitMQ er nede – og eventet leveres når brokeren er tilbage:
+
+```bash
+docker compose stop rabbitmq
+# lav en booking i frontenden (lykkes: bookingen er PENDING_PAYMENT, men payment/baggage har ikke hørt om den)
+docker compose exec booking-db psql -U booking -d booking_db \
+  -c 'select id, event_type, attempts, published_at, last_error from outbox_event'
+# -> booking.created står med published_at = NULL og attempts der tæller op
+docker compose start rabbitmq
+# få sekunder senere: published_at er sat, og baggage-service kender bookingen (Flow B kan fortsætte)
+curl -s localhost:8082/actuator/metrics/outbox.pending | jq '.measurements[0].value'   # 0 = tom backlog
+```
+
 ### Kør en enkelt service uden Docker (udvikling)
 
 ```bash
@@ -125,7 +141,7 @@ cd shop-service    && mvn test
 
 | Service         | Unit tests                                     | Integrationstest dækker                                                 |
 |-----------------|------------------------------------------------|-------------------------------------------------------------------------|
-| flight-service  | `PricingService`, `SeatGenerator`              | seed, filtre, `booking.confirmed` → sæde optaget (idempotent), aflysning publicerer events, validering |
+| flight-service  | `PricingService`, `SeatGenerator`              | seed, filtre, `booking.confirmed` → sæde optaget (idempotent), aflysning publicerer events, validering, outbox (rollback, relay-retry, publish uden transaktion) |
 | booking-service | bookingreference, tilstandsovergange           | createBooking → `payment.completed` → CONFIRMED, SEAT_TAKEN, `flight.cancelled` |
 | payment-service | `PaymentSimulator` (0000, udløbet kort)        | pay → COMPLETED/FAILED events, refund ved `booking.cancelled`, kortnummer gemmes ikke |
 | baggage-service | `BaggageRules` (3 stk., 32 kg), tag-format     | snapshot via events, register/limit, statusopdatering, RETURN_DESK ved aflysning |
@@ -217,6 +233,9 @@ De vigtigste:
   frontenden kan vise årsagen; bookingen annulleres asynkront via `payment.failed`.
 - **Fælles event-envelope** er en identisk record i hver service (ingen delt bibliotek), så hver service
   kan bygges alene med sin egen Dockerfile.
+- **Transactional outbox**: events skrives til `outbox_event` i samme transaktion som tilstandsændringen og
+  sendes af et relay med publisher confirms. At-least-once + idempotente consumers (`processed_event`)
+  giver effektivt exactly-once, også når RabbitMQ er nede. Se [docs/events.md](docs/events.md#leveringsgarantier).
 - **Ingen hardcodede secrets**: compose-filen indeholder kun dev-defaults; i Kubernetes kommer alle
   credentials fra `Secret`-objekter (dev-værdier i repoet, udskiftes i et rigtigt miljø).
 

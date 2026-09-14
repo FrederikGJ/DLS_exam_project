@@ -4,44 +4,44 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.amqp.core.Message;
-import org.springframework.amqp.core.MessageDeliveryMode;
-import org.springframework.amqp.core.MessageProperties;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
-import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
-import java.util.Date;
 import java.util.UUID;
 
 /**
- * Publishes events wrapped in {@link EventEnvelope} to the topic exchange, using the event type as routing key.
- * The RabbitTemplate is channel-transacted, so when called inside a DB transaction the message is only
- * sent once the transaction commits.
+ * Publishes events wrapped in {@link EventEnvelope} - via the transactional outbox.
+ * <p>
+ * {@code publish} never talks to RabbitMQ. It serializes the envelope once and inserts it into
+ * {@code outbox_event} inside the caller's transaction, so the event is committed atomically with the state
+ * change it describes (or rolled back with it). {@link OutboxRelay} sends the rows to the broker afterwards.
+ * Calling this outside a read-write transaction is a programming error and fails fast.
  */
 @Component
 public class EventPublisher {
 
     private static final Logger log = LoggerFactory.getLogger(EventPublisher.class);
 
-    private final RabbitTemplate rabbitTemplate;
+    private final OutboxEventRepository outbox;
     private final ObjectMapper objectMapper;
-    private final String exchange;
     private final String producer;
 
-    public EventPublisher(RabbitTemplate rabbitTemplate, ObjectMapper objectMapper,
-                          @Value("${app.messaging.exchange}") String exchange,
+    public EventPublisher(OutboxEventRepository outbox, ObjectMapper objectMapper,
                           @Value("${app.messaging.producer}") String producer) {
-        this.rabbitTemplate = rabbitTemplate;
+        this.outbox = outbox;
         this.objectMapper = objectMapper;
-        this.exchange = exchange;
         this.producer = producer;
     }
 
     public EventEnvelope publish(String eventType, Object payload) {
+        if (!TransactionSynchronizationManager.isActualTransactionActive()
+                || TransactionSynchronizationManager.isCurrentTransactionReadOnly()) {
+            throw new IllegalStateException("publish(" + eventType + ") must be called inside a read-write transaction: "
+                    + "the outbox row has to commit together with the state change it describes");
+        }
         EventEnvelope envelope = new EventEnvelope(
                 UUID.randomUUID().toString(),
                 eventType,
@@ -49,16 +49,9 @@ public class EventPublisher {
                 producer,
                 objectMapper.valueToTree(payload));
         try {
-            byte[] body = objectMapper.writeValueAsBytes(envelope);
-            MessageProperties props = new MessageProperties();
-            props.setContentType(MessageProperties.CONTENT_TYPE_JSON);
-            props.setContentEncoding(StandardCharsets.UTF_8.name());
-            props.setDeliveryMode(MessageDeliveryMode.PERSISTENT);
-            props.setMessageId(envelope.eventId());
-            props.setType(eventType);
-            props.setTimestamp(new Date());
-            rabbitTemplate.send(exchange, eventType, new Message(body, props));
-            log.info("Published event {} eventId={}", eventType, envelope.eventId());
+            String json = objectMapper.writeValueAsString(envelope);
+            outbox.save(new OutboxEvent(envelope.eventId(), eventType, json, envelope.occurredAt()));
+            log.info("Queued event {} eventId={} in outbox", eventType, envelope.eventId());
             return envelope;
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("Could not serialize event " + eventType, e);

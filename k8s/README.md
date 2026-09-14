@@ -13,7 +13,7 @@ Indhold:
 | `namespace.yaml`     | Namespace `airport`                                                                       |
 | `rabbitmq/`          | StatefulSet + Service (5672/15672) + Secret                                               |
 | `databases/`         | 5 × PostgreSQL 16 StatefulSet (1 replica, PVC 1Gi) + Service + Secret, én pr. service     |
-| `services/`          | 5 × Deployment (2 replicas) + ClusterIP Service + ConfigMap + Secret, liveness/readiness  |
+| `services/`          | 5 × Deployment (2 replicas) + ClusterIP Service + ConfigMap + Secret, liveness/readiness. 2 replicas er ok for outbox-relayet: en Postgres advisory lock sikrer, at kun én pod ad gangen sender events |
 | `frontend/`          | nginx Deployment + Service + ConfigMap der overskriver `js/config.js` med Ingress-stier    |
 | `tools/`             | pgAdmin (dev/demo-værktøj, ikke en del af systemet): Deployment + Service + ConfigMap + Secret |
 | `ingress.yaml`       | Én Ingress: `/` → frontend, `/api/<x>/graphql` → den enkelte service, `/pgadmin` → pgAdmin |

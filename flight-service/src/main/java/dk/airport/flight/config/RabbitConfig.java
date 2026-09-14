@@ -1,9 +1,7 @@
 package dk.airport.flight.config;
 
 import org.springframework.amqp.core.*;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.autoconfigure.amqp.RabbitTemplateCustomizer;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -61,11 +59,5 @@ public class RabbitConfig {
     @Bean
     public Binding bookingEventsBinding() {
         return BindingBuilder.bind(bookingEventsQueue()).to(airportEventsExchange()).with("booking.#");
-    }
-
-    /** Synchronise publishing with the surrounding DB transaction (publish after commit). */
-    @Bean
-    public RabbitTemplateCustomizer transactedRabbitTemplate() {
-        return (RabbitTemplate template) -> template.setChannelTransacted(true);
     }
 }

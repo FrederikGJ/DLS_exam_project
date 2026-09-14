@@ -60,10 +60,11 @@ kopier af strukturen):
 | repository  | `.repository`| Spring Data JPA repositories (+ Specifications hvor der filtreres)      |
 | service     | `.service`   | Forretningslogik, transaktioner, ren domænelogik (pris, regler, Dijkstra) |
 | graphql     | `.graphql`   | `@Controller` med `@QueryMapping`/`@MutationMapping`/`@SchemaMapping`, input-records med Bean Validation, `GraphQlExceptionResolver` |
-| messaging   | `.messaging` | `EventEnvelope`, `EventPublisher`, consumers + transaktionelle handlers, `ProcessedEvent` (idempotens) |
+| messaging   | `.messaging` | `EventEnvelope`, `EventPublisher` + `OutboxEvent`/`OutboxRelay` (transactional outbox), consumers + transaktionelle handlers, `ProcessedEvent` (idempotens) |
 | config      | `.config`    | RabbitMQ-topologi (exchange, køer, DLQ), GraphQL-scalars                |
 
-Skema og seed-data styres af Flyway (`V1__init.sql`, `V2__seed.sql`); Hibernate kører med `ddl-auto=validate`.
+Skema og seed-data styres af Flyway (`V1__init.sql`, `V2__seed.sql`, `V{n}__outbox.sql`); Hibernate kører med
+`ddl-auto=validate`.
 
 ### GraphQL-fejl
 
@@ -81,8 +82,20 @@ Bean Validation-fejl (`ConstraintViolationException`) mappes til `VALIDATION_ERR
 * Retry: Spring AMQP stateless retry, 3 forsøg med eksponentiel backoff; derefter reject → dead-letter
   exchange `airport.events.dlx` → `<service>.dlq`.
 * Idempotens: `processed_event(event_id)` skrives i samme transaktion som tilstandsændringen.
-* Publicering er bundet til databasetransaktionen: `RabbitTemplate` er channel-transacted, så et event
-  først sendes når den omkringliggende `@Transactional` metode committer.
+* Publicering går gennem en **transactional outbox**: `EventPublisher.publish` rører ikke RabbitMQ, men
+  serialiserer envelopen og indsætter den i tabellen `outbox_event` i samme transaktion som
+  tilstandsændringen. Tilstand og event committes derfor atomisk (eller rulles tilbage sammen), og
+  `publish` fejler hårdt hvis den kaldes uden for en transaktion.
+* `OutboxRelay` (`@Scheduled`, hvert 500 ms) sender rækkerne videre: den tager en Postgres advisory lock
+  (`pg_try_advisory_xact_lock`), så kun ét relay er aktivt pr. service selv med flere replicas, læser de ældste
+  usendte rækker (`ORDER BY id ... FOR UPDATE`), sender batchen med publisher confirms
+  (`RabbitTemplate.invoke` + `waitForConfirmsOrDie`) og sætter først `published_at` når brokeren har
+  bekræftet. Fejler sendingen (broker nede, nack, timeout) tælles `attempts` op, `last_error` gemmes, og
+  rækkerne bliver liggende til næste poll. Backloggen ses som gauge `outbox.pending` (`/actuator/metrics`).
+* Garanti: at-least-once fra producent + idempotent consumer (`processed_event`) = effektivt exactly-once.
+  Dør relayet mellem bekræftelse og commit, sendes rækken igen med samme `eventId`, og modtageren
+  ignorerer duplikatet. Rækkefølgen pr. producent bevares (ét aktivt relay, `ORDER BY id`, en fejlet batch
+  gentages som helhed).
 * Consumeren parser selv envelope-JSON (ingen `__TypeId__`-magi), så services kan have hver sin kopi af
   `EventEnvelope` uden delt bibliotek.
 
@@ -174,6 +187,7 @@ sequenceDiagram
 | Sædepris | `basePrice` på flight × klassemultiplikator (ECONOMY 1.0, BUSINESS 2.5, FIRST 4.0) | Spec'ens seat-tabel har ingen pris; dette holder prisen i flight-service |
 | Sædelayout | Rækker á 6 (A–F), række 1–2 BUSINESS | Deterministisk, samme regel i SQL-seed og `SeatGenerator` |
 | Fælles event-envelope | Identisk record kopieret ind i hver service | Ingen delt Maven-modul → hver service bygger uafhængigt med én Dockerfile |
+| Event-publicering | Transactional outbox (`outbox_event`) med polling relay, publisher confirms og advisory lock | Dual-write-problemet: en channel-transacted `RabbitTemplate` sender beskeden i en separat AMQP-transaktion, der committes *efter* DB-commit, så et event kan gå tabt imellem de to (broker-genstart, tabt forbindelse, pod dræbt) – og i consumer-handlers maskeres tabet af `processed_event`, fordi det indgående event er registreret som behandlet. Med outboxen er DB-commit den eneste sandhed; relayet leverer at-least-once, og `processed_event` fjerner duplikater |
 | Topic-binding | `<prefix>.#` | `*` matcher kun ét segment; `flight.status.changed` har tre |
 | GraphQL-path | Hver service serverer på `/api/<x>/graphql` (`GRAPHQL_PATH`) | Samme path lokalt og bag Ingress → ingen rewrite-regler |
 | Fejlet betaling | `pay` returnerer `Payment` med `status: FAILED` og `failureReason` | Frontend kan vise årsagen; booking annulleres asynkront via `payment.failed` |

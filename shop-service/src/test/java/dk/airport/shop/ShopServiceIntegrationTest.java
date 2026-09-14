@@ -2,8 +2,13 @@ package dk.airport.shop;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dk.airport.shop.messaging.EventEnvelope;
+import dk.airport.shop.messaging.EventPublisher;
+import dk.airport.shop.messaging.OutboxEvent;
+import dk.airport.shop.messaging.OutboxEventRepository;
 import dk.airport.shop.messaging.ProcessedEventRepository;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.Test;
+import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
@@ -12,6 +17,8 @@ import org.springframework.boot.test.autoconfigure.graphql.tester.AutoConfigureG
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.graphql.test.tester.GraphQlTester;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.containers.RabbitMQContainer;
 import org.testcontainers.junit.jupiter.Container;
@@ -24,7 +31,11 @@ import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doCallRealMethod;
+import static org.mockito.Mockito.doThrow;
 
 /**
  * End-to-end test against real PostgreSQL + RabbitMQ (Testcontainers):
@@ -44,9 +55,14 @@ class ShopServiceIntegrationTest {
     static final RabbitMQContainer rabbit = new RabbitMQContainer("rabbitmq:3.13-management-alpine");
 
     @Autowired GraphQlTester graphQlTester;
-    @Autowired RabbitTemplate rabbitTemplate;
+    /** Spy so a single test can make the outbox relay's publish attempt fail (reset after every test). */
+    @MockitoSpyBean RabbitTemplate rabbitTemplate;
     @Autowired ObjectMapper objectMapper;
     @Autowired ProcessedEventRepository processedEventRepository;
+    @Autowired OutboxEventRepository outboxEventRepository;
+    @Autowired EventPublisher eventPublisher;
+    @Autowired TransactionTemplate transactionTemplate;
+    @Autowired MeterRegistry meterRegistry;
 
     @Test
     void seedDataIsLoadedByFlyway() {
@@ -218,6 +234,47 @@ class ShopServiceIntegrationTest {
                 assertThat(processedEventRepository.count()).isEqualTo(2));
         assertThat(processedEventRepository.existsById(eventId)).isTrue();
         assertThat(processedEventRepository.findById(eventId).orElseThrow().getEventType()).isEqualTo("flight.gate.changed");
+    }
+
+    // ------------------------------------------------------------------ outbox guarantees
+
+    @Test
+    void publishOutsideTransactionIsRejected() {
+        assertThatThrownBy(() -> eventPublisher.publish("shop.test", Map.of("marker", "NOTX1")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("transaction");
+    }
+
+    @Test
+    void rolledBackTransactionLeavesNoOutboxRowAndNoEvent() {
+        String eventId = transactionTemplate.execute(status -> {
+            EventEnvelope env = eventPublisher.publish("shop.test", Map.of("marker", "RLBK1"));
+            assertThat(outboxEventRepository.findByEventId(env.eventId())).isPresent();   // visible inside the tx
+            status.setRollbackOnly();
+            return env.eventId();
+        });
+
+        assertThat(outboxEventRepository.findByEventId(eventId)).isEmpty();
+    }
+
+    @Test
+    void relayRetriesUntilBrokerConfirms() {
+        // start from a quiet outbox so the first failing invoke() below is guaranteed to hit our row
+        await().atMost(Duration.ofSeconds(10)).until(() -> outboxEventRepository.countByPublishedAtIsNull() == 0);
+        doThrow(new AmqpException("simulated broker failure")).doCallRealMethod()
+                .when(rabbitTemplate).invoke(any(), any(), any());
+
+        String eventId = transactionTemplate.execute(status ->
+                eventPublisher.publish("shop.test", Map.of("marker", "RTRY1")).eventId());
+
+        // first poll fails and is recorded, the next poll succeeds
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+            OutboxEvent row = outboxEventRepository.findByEventId(eventId).orElseThrow();
+            assertThat(row.getPublishedAt()).isNotNull();
+            assertThat(row.getAttempts()).isGreaterThanOrEqualTo(1);
+            assertThat(row.getLastError()).contains("simulated broker failure");
+        });
+        assertThat(meterRegistry.get("outbox.pending").gauge().value()).isZero();
     }
 
     // ------------------------------------------------------------------ helpers
