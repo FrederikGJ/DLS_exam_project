@@ -98,7 +98,9 @@ CLAUDE.md
 **/CLAUDE.md
 
 # Local planning notes (kept local, not shared via the repo)
-/developmentplan.md
+reqs.md
+helikopter.md
+dev_plan.md
 
 # ---------------------------------------------------------------------------
 # IDE
