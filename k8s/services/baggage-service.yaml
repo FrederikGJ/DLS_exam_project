@@ -57,7 +57,7 @@ metadata:
     app.kubernetes.io/name: baggage-service
     app.kubernetes.io/part-of: airport
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: baggage-service
@@ -67,6 +67,29 @@ spec:
         app.kubernetes.io/name: baggage-service
         app.kubernetes.io/part-of: airport
     spec:
+      # Wait until Postgres accepts connections. The JVM now boots faster than the database on a
+      # cold start, and Flyway fails hard on "Connection refused" (exit 1 -> restart with back-off).
+      # postgres:16-alpine is already on the node (the databases use it), so nothing extra to pull.
+      initContainers:
+        - name: wait-for-db
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h baggage-db -p 5432 -U baggage -d baggage_db -q; do
+                echo "waiting for baggage-db:5432 ..."
+                sleep 2
+              done
+              echo "baggage-db:5432 accepts connections"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
       containers:
         - name: baggage-service
           image: airport/baggage-service:local
@@ -81,7 +104,7 @@ spec:
                 name: baggage-service-secret
           env:
             - name: JAVA_TOOL_OPTIONS
-              value: "-XX:MaxRAMPercentage=75.0"
+              value: "-XX:MaxRAMPercentage=75.0 -XX:TieredStopAtLevel=1 -XX:+UseSerialGC -Xss512k"
           startupProbe:
             httpGet:
               path: /actuator/health/liveness
@@ -104,8 +127,8 @@ spec:
             failureThreshold: 12
           resources:
             requests:
-              cpu: 250m
-              memory: 512Mi
+              cpu: 150m
+              memory: 256Mi
             limits:
-              cpu: 1000m
-              memory: 1Gi
+              cpu: 500m
+              memory: 640Mi

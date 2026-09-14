@@ -22,7 +22,7 @@ x-service-defaults: &service-defaults
     RABBITMQ_USERNAME: airport
     RABBITMQ_PASSWORD: airport
     CORS_ALLOWED_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
-    JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=75.0
+    JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=75.0 -XX:TieredStopAtLevel=1 -XX:+UseSerialGC -Xss512k
   healthcheck:
     test: ["CMD", "wget", "-qO-", "http://localhost:8080/actuator/health/readiness"]
     interval: 10s

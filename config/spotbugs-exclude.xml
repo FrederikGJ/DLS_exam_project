@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SpotBugs + find-sec-bugs exclusions for all airport services (dev plan DP-24). Used by the `ci` Maven profile:
+      mvn -Pci verify        (spotbugs:check, effort=Max, threshold=Medium, failOnError=true)
+
+  Rule: every <Match> has a reason. Nothing is silenced with @SuppressFBWarnings in the code - a false positive is
+  either fixed in the code or documented here, so the list of what we consciously do not act on stays reviewable
+  in one place.
+-->
+<FindBugsFilter>
+
+  <!-- EI_EXPOSE_REP / EI_EXPOSE_REP2: "may expose internal representation by returning/storing a mutable object".
+       Since SpotBugs 4.3 this fires on every JPA entity getter that returns a child entity or a collection, and on
+       every Spring bean that stores an injected collaborator (RabbitTemplate, ObjectMapper, repositories) in a
+       field. Entities are persistence models that are only mutated through the service layer, and injected beans
+       are shared singletons by design. Copying them would add code without removing a risk. -->
+  <Match>
+    <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+  </Match>
+
+  <!-- CRLF_INJECTION_LOGS (find-sec-bugs): "log injection" whenever a value that came from a request is logged.
+       Every value reaching the service layer has passed Bean Validation with a whitelist pattern (booking
+       references, seat numbers, tag numbers, e-mail), and the prod profile writes structured JSON logs
+       (logstash format) where newlines are escaped, so a forged log line cannot be injected. -->
+  <Match>
+    <Bug pattern="CRLF_INJECTION_LOGS"/>
+  </Match>
+
+</FindBugsFilter>

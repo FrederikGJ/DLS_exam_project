@@ -149,12 +149,12 @@ cd shop-service    && mvn test
 
 ## Kubernetes
 
-Manifests ligger i `k8s/` (Kustomize): namespace `airport`, Deployment (2 replicas) + Service + ConfigMap +
-Secret pr. backend-service, StatefulSet + PVC + Service pr. database, RabbitMQ StatefulSet, frontend og én Ingress.
+Manifests ligger i `k8s/` (Kustomize): namespace `airport`, Deployment (1 replica, dimensioneret til en laptop – se
+[Ressourcer på en laptop](k8s/README.md#ressourcer-på-en-laptop)) + Service + ConfigMap + Secret pr. backend-service, StatefulSet + PVC + Service pr. database, RabbitMQ StatefulSet, frontend og én Ingress.
 Derudover pgAdmin som dev/demo-værktøj på `/pgadmin` (`k8s/tools/`, kan fjernes med én linje i `kustomization.yaml`);
 det er ikke en del af selve systemet.
 
-Manifests er verificeret på et **kind**-cluster (17/17 pods Ready, alle flows grønne gennem Ingress). Kort version for
+Manifests er verificeret på et **kind**-cluster (13/13 pods Ready efter ca. 70 s på en laptop, alle flows grønne gennem Ingress). Kort version for
 minikube – se
 [k8s/README.md](k8s/README.md) for detaljer og kind-alternativet:
 
