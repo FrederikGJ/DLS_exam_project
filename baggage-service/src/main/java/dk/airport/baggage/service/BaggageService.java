@@ -62,10 +62,11 @@ public class BaggageService {
 
         BaggageRules.assertEligible(snapshot.getStatus());
         BaggageRules.assertWeight(weightKg);
-        BaggageRules.assertCheckedLimit(baggage.countByBookingReferenceIgnoreCaseAndType(ref, BaggageType.CHECKED), type);
+        BaggageRules.assertCheckedLimit(
+                baggage.countByBookingReferenceIgnoreCaseAndType(ref, BaggageType.CHECKED), type);
 
-        Baggage bag = baggage.save(new Baggage(uniqueTag(), ref, snapshot.getPassengerName(), snapshot.getFlightNumber(),
-                weightKg, type, CHECK_IN_LOCATION));
+        Baggage bag = baggage.save(new Baggage(uniqueTag(), ref, snapshot.getPassengerName(),
+                snapshot.getFlightNumber(), weightKg, type, CHECK_IN_LOCATION));
         events.publish(BaggageEvents.REGISTERED, BaggageEvents.registered(bag));
         log.info("Registered baggage {} ({} kg, {}) on booking {}", bag.getTagNumber(), weightKg, type, ref);
         return bag;
@@ -82,7 +83,7 @@ public class BaggageService {
         return bag;
     }
 
-    /** flight.cancelled: every bag on the flight that has not already arrived / been lost goes back to the return desk. */
+    /** flight.cancelled: every bag on the flight that has not arrived / been lost yet goes back to the return desk. */
     @Transactional
     public void returnBaggageForCancelledFlight(String flightNumber) {
         List<Baggage> affected = baggage.findByFlightNumberIgnoreCaseAndStatusNotIn(flightNumber,

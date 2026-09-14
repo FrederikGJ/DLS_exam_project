@@ -11,9 +11,14 @@ import java.util.Optional;
 
 public interface BaggageRepository extends JpaRepository<Baggage, Long> {
     Optional<Baggage> findByTagNumberIgnoreCase(String tagNumber);
+
     boolean existsByTagNumber(String tagNumber);
+
     List<Baggage> findByBookingReferenceIgnoreCaseOrderByCreatedAt(String bookingReference);
+
     List<Baggage> findByFlightNumberIgnoreCaseOrderByCreatedAt(String flightNumber);
+
     long countByBookingReferenceIgnoreCaseAndType(String bookingReference, BaggageType type);
+
     List<Baggage> findByFlightNumberIgnoreCaseAndStatusNotIn(String flightNumber, Collection<BaggageStatus> statuses);
 }

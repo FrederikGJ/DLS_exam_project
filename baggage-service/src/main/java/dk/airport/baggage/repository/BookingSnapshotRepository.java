@@ -8,6 +8,8 @@ import java.util.Optional;
 
 public interface BookingSnapshotRepository extends JpaRepository<BookingSnapshot, String> {
     Optional<BookingSnapshot> findByBookingReferenceIgnoreCase(String bookingReference);
+
     List<BookingSnapshot> findByFlightId(Long flightId);
+
     List<BookingSnapshot> findByFlightNumberIgnoreCase(String flightNumber);
 }

@@ -40,7 +40,8 @@ public class Payment {
 
     protected Payment() {}
 
-    public Payment(String bookingReference, BigDecimal amount, String cardLast4, PaymentStatus status, String failureReason) {
+    public Payment(String bookingReference, BigDecimal amount, String cardLast4, PaymentStatus status,
+                   String failureReason) {
         this.bookingReference = bookingReference;
         this.amount = amount;
         this.cardLast4 = cardLast4;

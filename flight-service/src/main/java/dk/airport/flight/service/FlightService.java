@@ -14,6 +14,7 @@ import dk.airport.flight.repository.SeatRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.jpa.domain.Specification;
+import org.springframework.data.domain.Limit;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -94,12 +95,14 @@ public class FlightService {
 
     public Optional<Flight> flightByNumber(String flightNumber, LocalDate date) {
         OffsetDateTime from = date.atStartOfDay().atOffset(ZoneOffset.UTC);
-        return flights.findFirstByFlightNumberIgnoreCaseAndScheduledDepartureGreaterThanEqualAndScheduledDepartureLessThanOrderByScheduledDeparture(
-                flightNumber.trim(), from, from.plusDays(1));
+        return flights.findByFlightNumberDepartingBetween(flightNumber.trim(), from, from.plusDays(1), Limit.of(1))
+                .stream().findFirst();
     }
 
     public List<Seat> seats(Long flightId, boolean onlyAvailable) {
-        return onlyAvailable ? seats.findAvailableByFlightIdOrdered(flightId) : seats.findAllByFlightIdOrdered(flightId);
+        return onlyAvailable
+                ? seats.findAvailableByFlightIdOrdered(flightId)
+                : seats.findAllByFlightIdOrdered(flightId);
     }
 
     public Optional<Seat> seat(Long flightId, String seatNumber) {
@@ -123,8 +126,10 @@ public class FlightService {
 
     @Transactional
     public Aircraft createAircraft(CreateAircraftInput in) {
-        Airline airline = airlines.findById(in.airlineId()).orElseThrow(() -> ApiException.notFound("Airline", in.airlineId()));
-        return aircraft.save(new Aircraft(in.registration().trim().toUpperCase(), in.model().trim(), in.totalSeats(), airline));
+        Airline airline = airlines.findById(in.airlineId())
+                .orElseThrow(() -> ApiException.notFound("Airline", in.airlineId()));
+        return aircraft.save(
+                new Aircraft(in.registration().trim().toUpperCase(), in.model().trim(), in.totalSeats(), airline));
     }
 
     @Transactional
@@ -132,8 +137,10 @@ public class FlightService {
         if (!in.scheduledArrival().isAfter(in.scheduledDeparture())) {
             throw new ApiException(ErrorCode.VALIDATION_ERROR, "scheduledArrival must be after scheduledDeparture");
         }
-        Airline airline = airlines.findById(in.airlineId()).orElseThrow(() -> ApiException.notFound("Airline", in.airlineId()));
-        Aircraft ac = aircraft.findById(in.aircraftId()).orElseThrow(() -> ApiException.notFound("Aircraft", in.aircraftId()));
+        Airline airline = airlines.findById(in.airlineId())
+                .orElseThrow(() -> ApiException.notFound("Airline", in.airlineId()));
+        Aircraft ac = aircraft.findById(in.aircraftId())
+                .orElseThrow(() -> ApiException.notFound("Aircraft", in.aircraftId()));
 
         Flight flight = flights.save(new Flight(in.flightNumber().trim().toUpperCase(), airline, ac,
                 in.origin().trim().toUpperCase(), in.destination().trim().toUpperCase(),
@@ -155,7 +162,8 @@ public class FlightService {
         Flight flight = requireFlight(flightId);
         FlightStatus old = flight.getStatus();
         if (old == FlightStatus.CANCELLED) {
-            throw new ApiException(ErrorCode.INVALID_STATE, "Flight " + flight.getFlightNumber() + " is already cancelled");
+            throw new ApiException(ErrorCode.INVALID_STATE,
+                    "Flight " + flight.getFlightNumber() + " is already cancelled");
         }
         if (old == newStatus) {
             return flight;

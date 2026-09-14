@@ -80,7 +80,8 @@ public class BookingService {
                     return p;
                 })
                 .orElseGet(() -> passengers.save(new Passenger(input.firstName().trim(), input.lastName().trim(),
-                        input.email().trim().toLowerCase(), input.passportNumber().trim().toUpperCase(), input.dateOfBirth())));
+                        input.email().trim().toLowerCase(), input.passportNumber().trim().toUpperCase(),
+                        input.dateOfBirth())));
 
         Booking booking = null;
         for (int attempt = 1; attempt <= REFERENCE_ATTEMPTS && booking == null; attempt++) {
@@ -95,7 +96,8 @@ public class BookingService {
             } catch (DataIntegrityViolationException e) {
                 String msg = String.valueOf(e.getMostSpecificCause().getMessage());
                 if (msg.contains("ux_booking_active_seat")) {
-                    throw new ApiException(ErrorCode.SEAT_TAKEN, "Seat " + seat + " is already taken on flight " + flightId);
+                    throw new ApiException(ErrorCode.SEAT_TAKEN,
+                            "Seat " + seat + " is already taken on flight " + flightId);
                 }
                 if (msg.contains("booking_reference")) {
                     log.warn("Booking reference collision on {}, retrying (attempt {})", reference, attempt);
@@ -153,6 +155,8 @@ public class BookingService {
                     booking.getBookingReference(), booking.getStatus());
             case CANCELLED -> log.warn("payment.completed received for CANCELLED booking {} - no state change",
                     booking.getBookingReference());
+            default -> log.warn("payment.completed for booking {} in unhandled status {} - ignoring",
+                    booking.getBookingReference(), booking.getStatus());
         }
     }
 
@@ -167,11 +171,13 @@ public class BookingService {
         Booking booking = found.get();
         if (booking.getStatus() == BookingStatus.PENDING_PAYMENT) {
             booking.cancel();
-            String reason = "Payment failed" + (failureReason == null || failureReason.isBlank() ? "" : ": " + failureReason);
+            String reason = "Payment failed"
+                    + (failureReason == null || failureReason.isBlank() ? "" : ": " + failureReason);
             events.publish(BookingEvents.CANCELLED, BookingEvents.payload(booking, reason));
             log.info("Booking {} cancelled: {}", booking.getBookingReference(), reason);
         } else {
-            log.info("payment.failed for booking {} in status {} - ignoring", booking.getBookingReference(), booking.getStatus());
+            log.info("payment.failed for booking {} in status {} - ignoring",
+                    booking.getBookingReference(), booking.getStatus());
         }
     }
 
@@ -195,7 +201,8 @@ public class BookingService {
     public void onFlightSnapshotChanged(Long flightId, String flightStatus, String gate) {
         List<Booking> affected = bookings.findByFlightId(flightId);
         affected.forEach(b -> b.updateFlightSnapshot(flightStatus, gate));
-        log.info("Flight {} snapshot updated on {} booking(s): status={}, gate={}", flightId, affected.size(), flightStatus, gate);
+        log.info("Flight {} snapshot updated on {} booking(s): status={}, gate={}",
+                flightId, affected.size(), flightStatus, gate);
     }
 
     private static String normalizeReference(String reference) {

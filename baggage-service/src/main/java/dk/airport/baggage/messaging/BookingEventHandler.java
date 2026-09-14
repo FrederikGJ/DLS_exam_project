@@ -38,7 +38,9 @@ public class BookingEventHandler {
         JsonNode p = envelope.payload();
         switch (envelope.eventType()) {
             case BOOKING_CREATED, BOOKING_CONFIRMED, BOOKING_CANCELLED, BOOKING_CHECKED_IN -> {
-                String status = p.hasNonNull("status") ? p.get("status").asText() : statusFromType(envelope.eventType());
+                String status = p.hasNonNull("status")
+                        ? p.get("status").asText()
+                        : statusFromType(envelope.eventType());
                 snapshots.upsert(
                         p.path("bookingReference").asText(),
                         passengerName(p.path("passenger")),

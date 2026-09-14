@@ -81,8 +81,8 @@ public class ShopService {
     @Transactional
     public Shop createShop(ShopInput in) {
         NavNode node = resolveNode(in.nodeId());
-        Shop shop = shops.save(new Shop(in.name().trim(), in.category(), in.terminal().trim().toUpperCase(), in.zone().trim(),
-                in.floor(), in.openingHours().trim(), trimToNull(in.description()), node));
+        Shop shop = shops.save(new Shop(in.name().trim(), in.category(), in.terminal().trim().toUpperCase(),
+                in.zone().trim(), in.floor(), in.openingHours().trim(), trimToNull(in.description()), node));
         log.info("Created shop {} ({})", shop.getName(), shop.getId());
         return shop;
     }

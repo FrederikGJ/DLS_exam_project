@@ -45,7 +45,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doThrow;
 
 /**
@@ -87,7 +86,8 @@ class PaymentServiceIntegrationTest {
     @Autowired JdbcTemplate jdbcTemplate;
 
     @BeforeAll
-    static void startTestListener(@Autowired ConnectionFactory connectionFactory, @Autowired ObjectMapper objectMapper) {
+    static void startTestListener(@Autowired ConnectionFactory connectionFactory,
+                                  @Autowired ObjectMapper objectMapper) {
         RabbitAdmin admin = new RabbitAdmin(connectionFactory);
         Queue queue = new Queue(TEST_QUEUE, false, false, false);
         admin.declareQueue(queue);
@@ -201,8 +201,10 @@ class PaymentServiceIntegrationTest {
                 && e.payload().path("bookingReference").asText().equals(REF_OK)).count()).isEqualTo(1);
 
         // a cancelled booking that was never paid refunds nothing and does not fail
-        publish(UUID.randomUUID().toString(), "booking.cancelled", Map.of("bookingReference", "NOPAY1", "status", "CANCELLED"));
-        publish(UUID.randomUUID().toString(), "booking.confirmed", Map.of("bookingReference", REF_FAIL, "status", "CONFIRMED"));
+        publish(UUID.randomUUID().toString(), "booking.cancelled",
+                Map.of("bookingReference", "NOPAY1", "status", "CANCELLED"));
+        publish(UUID.randomUUID().toString(), "booking.confirmed",
+                Map.of("bookingReference", REF_FAIL, "status", "CONFIRMED"));
         Thread.sleep(1000);
         assertThat(paymentRepository.findByBookingReferenceOrderByCreatedAt(REF_FAIL))
                 .extracting(p -> p.getStatus().name()).containsExactly("FAILED");
@@ -237,7 +239,8 @@ class PaymentServiceIntegrationTest {
 
         graphQlTester.document("mutation { refund(paymentId: 999999) { id } }")
                 .execute()
-                .errors().satisfy(errors -> assertThat(errors.get(0).getExtensions()).containsEntry("code", "NOT_FOUND"));
+                .errors().satisfy(errors ->
+                        assertThat(errors.get(0).getExtensions()).containsEntry("code", "NOT_FOUND"));
     }
 
     @Test
@@ -278,7 +281,8 @@ class PaymentServiceIntegrationTest {
                 .errors().satisfy(errors -> {
                     assertThat(errors).hasSize(1);
                     assertThat(errors.get(0).getExtensions()).containsEntry("code", "VALIDATION_ERROR");
-                    assertThat(errors.get(0).getMessage()).contains("bookingReference").contains("amount").contains("cardNumber").contains("cvv");
+                    assertThat(errors.get(0).getMessage())
+                            .contains("bookingReference").contains("amount").contains("cardNumber").contains("cvv");
                 });
         // nothing was persisted for the invalid attempts
         assertThat(paymentRepository.findByBookingReferenceOrderByCreatedAt("ABC123")).isEmpty();
@@ -335,7 +339,8 @@ class PaymentServiceIntegrationTest {
     // ------------------------------------------------------------------ helpers
 
     private void publish(String eventId, String type, Map<String, Object> payload) throws Exception {
-        EventEnvelope env = new EventEnvelope(eventId, type, OffsetDateTime.now(), "booking-service", objectMapper.valueToTree(payload));
+        EventEnvelope env = new EventEnvelope(eventId, type, OffsetDateTime.now(), "booking-service",
+                objectMapper.valueToTree(payload));
         MessageProperties props = new MessageProperties();
         props.setContentType(MessageProperties.CONTENT_TYPE_JSON);
         rabbitTemplate.send("airport.events", type, new Message(objectMapper.writeValueAsBytes(env), props));

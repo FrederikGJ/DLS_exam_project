@@ -16,6 +16,12 @@
       where it explains a design decision, not on every getter. Javadoc that IS written must still be well-formed.
     * No OperatorWrap: the code wraps `+`/`&&` both before and after the operator; forcing one style is churn
       without value.
+    * Single-line members are allowed: `public Long getId() { return id; }`, `protected Flight() {}`,
+      `record Created(...) {}` and one-line enums are the established style in every entity, event and input
+      type (about 160 methods across the services). RightCurly therefore uses alone_or_singleline, and the
+      SuppressWithNearbyTextFilter below turns off LeftCurly ("line break after '{'") and EmptyLineSeparator
+      ("blank line before the method") for a method that is declared and implemented on one line. Everything
+      else about such a method (naming, whitespace, line length, one statement per line) is still checked.
 
   Every check reports at severity=warning; the Maven plugin runs with violationSeverity=warning and
   failOnViolation=true, so a single finding still fails the build. There is no SuppressWarningsFilter on purpose:
@@ -28,6 +34,15 @@
 
   <module name="BeforeExecutionExclusionFileFilter">
     <property name="fileNamePattern" value="module\-info\.java$"/>
+  </module>
+
+  <!-- Single-line methods (see header): a line that declares and implements a method with exactly one statement
+       is exempt from LeftCurly and EmptyLineSeparator. lineRange=0 limits the exemption to that line. -->
+  <module name="SuppressWithNearbyTextFilter">
+    <property name="nearbyTextPattern"
+              value="^\s*((public|protected|private|static|final|default|synchronized)\s+)*[\w&lt;&gt;\[\],.? ]+\s\w+\(.*\) \{ [^;]+; \}\s*$"/>
+    <property name="checkPattern" value="LeftCurly|EmptyLineSeparator"/>
+    <property name="lineRange" value="0"/>
   </module>
 
   <!-- ===================================================== file level -->
@@ -96,7 +111,7 @@
     </module>
     <module name="RightCurly">
       <property name="id" value="RightCurlyAlone"/>
-      <property name="option" value="alone"/>
+      <property name="option" value="alone_or_singleline"/>
       <property name="tokens"
                 value="CLASS_DEF, METHOD_DEF, CTOR_DEF, LITERAL_FOR, LITERAL_WHILE, STATIC_INIT, INSTANCE_INIT,
                        ANNOTATION_DEF, ENUM_DEF, INTERFACE_DEF, RECORD_DEF, COMPACT_CTOR_DEF"/>

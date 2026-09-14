@@ -23,10 +23,14 @@ public class BookingSnapshotService {
     }
 
     @Transactional
-    public BookingSnapshot upsert(String reference, String passengerName, String flightNumber, Long flightId, String status) {
+    public BookingSnapshot upsert(String reference, String passengerName, String flightNumber, Long flightId,
+                                  String status) {
         String ref = reference.trim().toUpperCase();
         BookingSnapshot snapshot = snapshots.findById(ref)
-                .map(existing -> { existing.update(passengerName, flightNumber, flightId, status); return existing; })
+                .map(existing -> {
+                    existing.update(passengerName, flightNumber, flightId, status);
+                    return existing;
+                })
                 .orElseGet(() -> new BookingSnapshot(ref, passengerName, flightNumber, flightId, status));
         log.info("Booking snapshot {} -> {}", ref, status);
         return snapshots.save(snapshot);
@@ -36,7 +40,9 @@ public class BookingSnapshotService {
     public int cancelForFlight(Long flightId, String flightNumber) {
         Set<BookingSnapshot> affected = new LinkedHashSet<>();
         if (flightId != null) affected.addAll(snapshots.findByFlightId(flightId));
-        if (flightNumber != null && !flightNumber.isBlank()) affected.addAll(snapshots.findByFlightNumberIgnoreCase(flightNumber));
+        if (flightNumber != null && !flightNumber.isBlank()) {
+            affected.addAll(snapshots.findByFlightNumberIgnoreCase(flightNumber));
+        }
         affected.forEach(s -> s.setStatus("CANCELLED"));
         return affected.size();
     }

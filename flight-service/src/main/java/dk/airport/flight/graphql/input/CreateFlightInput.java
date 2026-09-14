@@ -6,7 +6,9 @@ import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 
 public record CreateFlightInput(
-        @NotBlank @Pattern(regexp = "^[A-Za-z0-9]{3,8}$", message = "flightNumber must be 3-8 alphanumeric characters") String flightNumber,
+        @NotBlank
+        @Pattern(regexp = "^[A-Za-z0-9]{3,8}$", message = "flightNumber must be 3-8 alphanumeric characters")
+        String flightNumber,
         @NotNull Long airlineId,
         @NotNull Long aircraftId,
         @NotBlank @Size(min = 3, max = 3, message = "origin must be a 3-letter IATA code") String origin,

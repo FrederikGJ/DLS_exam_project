@@ -72,8 +72,8 @@ public class FlightController {
         return flightService.aircraftByAirline(airline.getId());
     }
 
-    @SchemaMapping(typeName = "Airline")
-    public List<Flight> flights(Airline airline) {
+    @SchemaMapping(typeName = "Airline", field = "flights")
+    public List<Flight> flightsOfAirline(Airline airline) {
         return flightService.flightsByAirline(airline.getId());
     }
 

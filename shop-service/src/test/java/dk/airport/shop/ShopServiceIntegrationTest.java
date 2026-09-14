@@ -34,7 +34,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doThrow;
 
 /**
@@ -123,8 +122,10 @@ class ShopServiceIntegrationTest {
 
         int stairsDistance = stairs.path("route.totalDistanceM").entity(Integer.class).get();
         int elevatorDistance = elevator.path("route.totalDistanceM").entity(Integer.class).get();
-        assertThat(stairsDistance).isEqualTo(205);        // Central -> South (120) -> stairs (25) -> lounge (60)
-        assertThat(elevatorDistance).isEqualTo(225);      // Central -> Security (70) -> Elevator (80) -> lift (15) -> lounge (60)
+        // stairs:   Central -> South (120) -> stairs (25) -> lounge (60)
+        // elevator: Central -> Security (70) -> Elevator (80) -> lift (15) -> lounge (60)
+        assertThat(stairsDistance).isEqualTo(205);
+        assertThat(elevatorDistance).isEqualTo(225);
         assertThat(elevatorDistance).isGreaterThan(stairsDistance);
 
         assertThat(stairs.path("route.steps[*].instruction").entityList(String.class).get())
@@ -138,7 +139,8 @@ class ShopServiceIntegrationTest {
     void terminalsAreConnectedAndSameNodeRouteIsTrivial() {
         long from = nodeId("Gate A3");
         long to = nodeId("Gate C21");
-        routeQuery(from, to, true).path("route.totalDistanceM").entity(Integer.class).satisfies(d -> assertThat(d).isGreaterThan(500));
+        routeQuery(from, to, true).path("route.totalDistanceM").entity(Integer.class)
+                .satisfies(d -> assertThat(d).isGreaterThan(500));
 
         routeQuery(from, from, false)
                 .path("route.steps").entityList(Object.class).hasSize(1)
@@ -160,11 +162,13 @@ class ShopServiceIntegrationTest {
         graphQlTester.document("{ searchShops(text: \"duty\") { name category } }")
                 .execute()
                 .path("searchShops").entityList(Object.class).hasSizeGreaterThan(0)
-                .path("searchShops[*].category").entityList(String.class).satisfies(c -> assertThat(c).containsOnly("DUTY_FREE"));
+                .path("searchShops[*].category").entityList(String.class)
+                .satisfies(c -> assertThat(c).containsOnly("DUTY_FREE"));
 
         graphQlTester.document("{ shops(filter: { terminal: \"t1\", category: FOOD }) { name terminal category } }")
                 .execute()
-                .path("shops[*].terminal").entityList(String.class).satisfies(t -> assertThat(t).isNotEmpty().containsOnly("T1"))
+                .path("shops[*].terminal").entityList(String.class)
+                .satisfies(t -> assertThat(t).isNotEmpty().containsOnly("T1"))
                 .path("shops[*].category").entityList(String.class).satisfies(c -> assertThat(c).containsOnly("FOOD"));
 
         // 7-Eleven is 24/7 -> always in the openNow list
@@ -193,7 +197,11 @@ class ShopServiceIntegrationTest {
                 .variable("id", shopId).execute()
                 .path("shop.name").entity(String.class).isEqualTo("Test Kiosk");
 
-        graphQlTester.document("mutation($id: ID!) { updateShop(id: $id, input: { name: \"Test Kiosk 2\", category: FOOD, terminal: \"T1\", zone: \"Pier A\", floor: 0, openingHours: \"24/7\" }) { name category node { id } } }")
+        graphQlTester.document("""
+                mutation($id: ID!) {
+                  updateShop(id: $id, input: { name: "Test Kiosk 2", category: FOOD, terminal: "T1", zone: "Pier A",
+                                               floor: 0, openingHours: "24/7" }) { name category node { id } }
+                }""")
                 .variable("id", shopId).execute()
                 .path("updateShop.name").entity(String.class).isEqualTo("Test Kiosk 2")
                 .path("updateShop.node").valueIsNull();
@@ -208,12 +216,17 @@ class ShopServiceIntegrationTest {
 
         graphQlTester.document("mutation($id: ID!) { deleteShop(id: $id) }")
                 .variable("id", shopId).execute()
-                .errors().satisfy(errors -> assertThat(errors.get(0).getExtensions()).containsEntry("code", "NOT_FOUND"));
+                .errors().satisfy(errors ->
+                        assertThat(errors.get(0).getExtensions()).containsEntry("code", "NOT_FOUND"));
     }
 
     @Test
     void validationErrorsAreReportedWithCode() {
-        graphQlTester.document("mutation { createShop(input: { name: \"\", category: RETAIL, terminal: \"T1\", zone: \"Z\", floor: 0, openingHours: \"8-20\" }) { id } }")
+        graphQlTester.document("""
+                mutation {
+                  createShop(input: { name: "", category: RETAIL, terminal: "T1", zone: "Z", floor: 0,
+                                      openingHours: "8-20" }) { id }
+                }""")
                 .execute()
                 .errors().satisfy(errors -> {
                     assertThat(errors).hasSize(1);
@@ -225,7 +238,8 @@ class ShopServiceIntegrationTest {
     @Test
     void gateChangedEventIsConsumedOnce() throws Exception {
         String eventId = UUID.randomUUID().toString();
-        Map<String, Object> payload = Map.of("flightId", 7, "flightNumber", "DY1050", "oldGate", "B15", "newGate", "B17");
+        Map<String, Object> payload = Map.of("flightId", 7, "flightNumber", "DY1050",
+                "oldGate", "B15", "newGate", "B17");
         publish(eventId, "flight.gate.changed", payload);
         publish(eventId, "flight.gate.changed", payload);
         publish(UUID.randomUUID().toString(), "flight.status.changed", Map.of("flightId", 7, "newStatus", "DELAYED"));
@@ -233,7 +247,8 @@ class ShopServiceIntegrationTest {
         await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
                 assertThat(processedEventRepository.count()).isEqualTo(2));
         assertThat(processedEventRepository.existsById(eventId)).isTrue();
-        assertThat(processedEventRepository.findById(eventId).orElseThrow().getEventType()).isEqualTo("flight.gate.changed");
+        assertThat(processedEventRepository.findById(eventId).orElseThrow().getEventType())
+                .isEqualTo("flight.gate.changed");
     }
 
     // ------------------------------------------------------------------ outbox guarantees
@@ -298,7 +313,8 @@ class ShopServiceIntegrationTest {
     }
 
     private void publish(String eventId, String type, Map<String, Object> payload) throws Exception {
-        EventEnvelope env = new EventEnvelope(eventId, type, OffsetDateTime.now(), "flight-service", objectMapper.valueToTree(payload));
+        EventEnvelope env = new EventEnvelope(eventId, type, OffsetDateTime.now(), "flight-service",
+                objectMapper.valueToTree(payload));
         MessageProperties props = new MessageProperties();
         props.setContentType(MessageProperties.CONTENT_TYPE_JSON);
         rabbitTemplate.send("airport.events", type, new Message(objectMapper.writeValueAsBytes(env), props));

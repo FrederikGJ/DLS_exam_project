@@ -28,12 +28,13 @@ public final class FlightEvents {
     public record Cancelled(Long flightId, String flightNumber, OffsetDateTime scheduledDeparture, String reason) {}
 
     public static Created created(Flight f) {
-        return new Created(f.getId(), f.getFlightNumber(), f.getAirline().getIataCode(), f.getOrigin(), f.getDestination(),
-                f.getScheduledDeparture(), f.getScheduledArrival(), f.getGate(), f.getStatus());
+        return new Created(f.getId(), f.getFlightNumber(), f.getAirline().getIataCode(), f.getOrigin(),
+                f.getDestination(), f.getScheduledDeparture(), f.getScheduledArrival(), f.getGate(), f.getStatus());
     }
 
     public static StatusChanged statusChanged(Flight f, FlightStatus old) {
-        return new StatusChanged(f.getId(), f.getFlightNumber(), old, f.getStatus(), f.getScheduledDeparture(), f.getGate());
+        return new StatusChanged(f.getId(), f.getFlightNumber(), old, f.getStatus(), f.getScheduledDeparture(),
+                f.getGate());
     }
 
     public static GateChanged gateChanged(Flight f, String oldGate) {

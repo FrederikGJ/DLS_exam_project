@@ -47,7 +47,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.when;
 
@@ -88,7 +87,8 @@ class BookingServiceIntegrationTest {
     @MockitoBean FlightClient flightClient;
 
     @BeforeAll
-    static void startTestListener(@Autowired ConnectionFactory connectionFactory, @Autowired ObjectMapper objectMapper) {
+    static void startTestListener(@Autowired ConnectionFactory connectionFactory,
+                                  @Autowired ObjectMapper objectMapper) {
         RabbitAdmin admin = new RabbitAdmin(connectionFactory);
         Queue queue = new Queue(TEST_QUEUE, false, false, false);
         admin.declareQueue(queue);
@@ -162,13 +162,14 @@ class BookingServiceIntegrationTest {
 
         // 3. payment.completed (delivered twice with same eventId) -> CONFIRMED + exactly one booking.confirmed
         String eventId = UUID.randomUUID().toString();
-        publish(eventId, "payment.completed", "payment-service", Map.of(
-                "paymentId", 1, "bookingReference", reference, "amount", 899.00, "currency", "DKK", "cardLast4", "4242"));
-        publish(eventId, "payment.completed", "payment-service", Map.of(
-                "paymentId", 1, "bookingReference", reference, "amount", 899.00, "currency", "DKK", "cardLast4", "4242"));
+        Map<String, Object> completed = Map.of("paymentId", 1, "bookingReference", reference, "amount", 899.00,
+                "currency", "DKK", "cardLast4", "4242");
+        publish(eventId, "payment.completed", "payment-service", completed);
+        publish(eventId, "payment.completed", "payment-service", completed);
 
         await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
-                assertThat(bookingRepository.findByBookingReference(reference).orElseThrow().getStatus().name()).isEqualTo("CONFIRMED"));
+                assertThat(bookingRepository.findByBookingReference(reference).orElseThrow().getStatus().name())
+                        .isEqualTo("CONFIRMED"));
         await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
                 assertThat(processedEventRepository.existsById(eventId)).isTrue());
         awaitEvents(forRef(reference, "booking.confirmed"), 1);
@@ -184,7 +185,13 @@ class BookingServiceIntegrationTest {
         awaitEvents(forRef(reference, "booking.checkedin"), 1);
 
         // 5. bookingByReference returns snapshot fields (lower case reference is accepted)
-        graphQlTester.document("query($ref: String!) { bookingByReference(reference: $ref) { bookingReference status flightId flightNumber departureTime gate flightStatus seatNumber price currency passenger { firstName } } }")
+        graphQlTester.document("""
+                query($ref: String!) {
+                  bookingByReference(reference: $ref) {
+                    bookingReference status flightId flightNumber departureTime gate flightStatus seatNumber
+                    price currency passenger { firstName }
+                  }
+                }""")
                 .variable("ref", reference.toLowerCase())
                 .execute()
                 .path("bookingByReference.status").entity(String.class).isEqualTo("CHECKED_IN")
@@ -201,23 +208,27 @@ class BookingServiceIntegrationTest {
         publish(UUID.randomUUID().toString(), "flight.gate.changed", "flight-service", Map.of(
                 "flightId", FLIGHT_ID, "flightNumber", "SK1501", "oldGate", "A12", "newGate", "A20"));
         await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
-                assertThat(bookingRepository.findByBookingReference(reference).orElseThrow().getGate()).isEqualTo("A20"));
+                assertThat(bookingRepository.findByBookingReference(reference).orElseThrow().getGate())
+                        .isEqualTo("A20"));
 
         // 7. flight.cancelled -> CANCELLED + booking.cancelled
         publish(UUID.randomUUID().toString(), "flight.cancelled", "flight-service", Map.of(
                 "flightId", FLIGHT_ID, "flightNumber", "SK1501", "reason", "Flight cancelled by airline"));
         await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
-                assertThat(bookingRepository.findByBookingReference(reference).orElseThrow().getStatus().name()).isEqualTo("CANCELLED"));
+                assertThat(bookingRepository.findByBookingReference(reference).orElseThrow().getStatus().name())
+                        .isEqualTo("CANCELLED"));
         List<EventEnvelope> cancelled = awaitEvents(forRef(reference, "booking.cancelled"), 1);
         assertThat(cancelled.get(0).payload().get("reason").asText()).isEqualTo("Flight cancelled");
         assertThat(cancelled.get(0).payload().get("status").asText()).isEqualTo("CANCELLED");
-        assertThat(bookingRepository.findByBookingReference(reference).orElseThrow().getFlightStatus()).isEqualTo("CANCELLED");
+        assertThat(bookingRepository.findByBookingReference(reference).orElseThrow().getFlightStatus())
+                .isEqualTo("CANCELLED");
 
         // 8. seat is free again after cancellation
         graphQlTester.document("""
                 mutation {
                   createBooking(flightId: 1, seatNumber: "12C", passenger: {
-                    firstName: "Bo", lastName: "Hansen", email: "bo@example.com", passportNumber: "P7654321" }) { status }
+                    firstName: "Bo", lastName: "Hansen", email: "bo@example.com", passportNumber: "P7654321"
+                  }) { status }
                 }""")
                 .execute()
                 .path("createBooking.status").entity(String.class).isEqualTo("PENDING_PAYMENT");
@@ -228,7 +239,8 @@ class BookingServiceIntegrationTest {
         String reference = graphQlTester.document("""
                 mutation {
                   createBooking(flightId: 2, seatNumber: "3A", passenger: {
-                    firstName: "Carl", lastName: "Nielsen", email: "carl@example.com", passportNumber: "P0000001" }) { bookingReference }
+                    firstName: "Carl", lastName: "Nielsen", email: "carl@example.com", passportNumber: "P0000001"
+                  }) { bookingReference }
                 }""")
                 .execute().path("createBooking.bookingReference").entity(String.class).get();
 
@@ -237,7 +249,8 @@ class BookingServiceIntegrationTest {
                 "cardLast4", "0000", "failureReason", "Insufficient funds"));
 
         await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
-                assertThat(bookingRepository.findByBookingReference(reference).orElseThrow().getStatus().name()).isEqualTo("CANCELLED"));
+                assertThat(bookingRepository.findByBookingReference(reference).orElseThrow().getStatus().name())
+                        .isEqualTo("CANCELLED"));
         List<EventEnvelope> cancelled = awaitEvents(forRef(reference, "booking.cancelled"), 1);
         assertThat(cancelled.get(0).payload().get("reason").asText()).isEqualTo("Payment failed: Insufficient funds");
     }
@@ -247,7 +260,8 @@ class BookingServiceIntegrationTest {
         String reference = graphQlTester.document("""
                 mutation {
                   createBooking(flightId: 3, seatNumber: "7F", passenger: {
-                    firstName: "Dina", lastName: "Olsen", email: "Dina@Example.com", passportNumber: "P5555555" }) { bookingReference }
+                    firstName: "Dina", lastName: "Olsen", email: "Dina@Example.com", passportNumber: "P5555555"
+                  }) { bookingReference }
                 }""")
                 .execute().path("createBooking.bookingReference").entity(String.class).get();
 
@@ -265,7 +279,8 @@ class BookingServiceIntegrationTest {
         graphQlTester.document("mutation($ref: String!) { cancelBooking(reference: $ref) { status } }")
                 .variable("ref", reference)
                 .execute()
-                .errors().satisfy(errors -> assertThat(errors.get(0).getExtensions()).containsEntry("code", "INVALID_STATE"));
+                .errors().satisfy(errors ->
+                        assertThat(errors.get(0).getExtensions()).containsEntry("code", "INVALID_STATE"));
     }
 
     @Test
@@ -279,7 +294,8 @@ class BookingServiceIntegrationTest {
                 .errors().satisfy(errors -> {
                     assertThat(errors).hasSize(1);
                     assertThat(errors.get(0).getExtensions()).containsEntry("code", "VALIDATION_ERROR");
-                    assertThat(errors.get(0).getMessage()).contains("email").contains("firstName").contains("passportNumber");
+                    assertThat(errors.get(0).getMessage())
+                            .contains("email").contains("firstName").contains("passportNumber");
                 });
     }
 
@@ -353,7 +369,8 @@ class BookingServiceIntegrationTest {
 
     private void publish(String eventId, String type, String producer, Map<String, Object> payload) {
         try {
-            EventEnvelope env = new EventEnvelope(eventId, type, OffsetDateTime.now(), producer, objectMapper.valueToTree(payload));
+            EventEnvelope env = new EventEnvelope(eventId, type, OffsetDateTime.now(), producer,
+                objectMapper.valueToTree(payload));
             MessageProperties props = new MessageProperties();
             props.setContentType(MessageProperties.CONTENT_TYPE_JSON);
             rabbitTemplate.send("airport.events", type, new Message(objectMapper.writeValueAsBytes(env), props));

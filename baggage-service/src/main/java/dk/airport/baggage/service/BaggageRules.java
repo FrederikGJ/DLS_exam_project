@@ -20,7 +20,8 @@ public final class BaggageRules {
     public static void assertEligible(String bookingStatus) {
         if (bookingStatus == null || !ELIGIBLE_BOOKING_STATUSES.contains(bookingStatus)) {
             throw new ApiException(ErrorCode.INVALID_STATE,
-                    "Booking must be CONFIRMED or CHECKED_IN to register baggage (current status: " + bookingStatus + ")");
+                    "Booking must be CONFIRMED or CHECKED_IN to register baggage (current status: "
+                            + bookingStatus + ")");
         }
     }
 
@@ -31,7 +32,8 @@ public final class BaggageRules {
         }
         if (weightKg.compareTo(MAX_WEIGHT_KG) > 0) {
             throw new ApiException(ErrorCode.VALIDATION_ERROR,
-                    "weightKg must not exceed " + MAX_WEIGHT_KG + " kg per piece (was " + weightKg.stripTrailingZeros().toPlainString() + ")");
+                    "weightKg must not exceed " + MAX_WEIGHT_KG + " kg per piece (was "
+                            + weightKg.stripTrailingZeros().toPlainString() + ")");
         }
     }
 

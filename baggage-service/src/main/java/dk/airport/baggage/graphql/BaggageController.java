@@ -51,8 +51,11 @@ public class BaggageController {
 
     @MutationMapping
     public Baggage registerBaggage(
-            @Argument @NotBlank @Pattern(regexp = "^[A-Za-z0-9]{6}$", message = "bookingReference must be 6 alphanumeric characters") String bookingReference,
-            @Argument @NotNull @DecimalMin("0.1") @DecimalMax("32.0") @Digits(integer = 3, fraction = 2) BigDecimal weightKg,
+            @Argument @NotBlank
+            @Pattern(regexp = "^[A-Za-z0-9]{6}$", message = "bookingReference must be 6 alphanumeric characters")
+            String bookingReference,
+            @Argument @NotNull @DecimalMin("0.1") @DecimalMax("32.0") @Digits(integer = 3, fraction = 2)
+            BigDecimal weightKg,
             @Argument @NotNull BaggageType type) {
         return baggageService.register(bookingReference, weightKg, type);
     }

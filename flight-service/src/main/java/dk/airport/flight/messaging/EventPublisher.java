@@ -39,8 +39,8 @@ public class EventPublisher {
     public EventEnvelope publish(String eventType, Object payload) {
         if (!TransactionSynchronizationManager.isActualTransactionActive()
                 || TransactionSynchronizationManager.isCurrentTransactionReadOnly()) {
-            throw new IllegalStateException("publish(" + eventType + ") must be called inside a read-write transaction: "
-                    + "the outbox row has to commit together with the state change it describes");
+            throw new IllegalStateException("publish(" + eventType + ") must be called inside a read-write "
+                    + "transaction: the outbox row has to commit together with the state change it describes");
         }
         EventEnvelope envelope = new EventEnvelope(
                 UUID.randomUUID().toString(),

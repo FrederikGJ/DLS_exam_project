@@ -8,6 +8,8 @@ import java.util.List;
 
 public interface PaymentRepository extends JpaRepository<Payment, Long> {
     List<Payment> findByBookingReferenceOrderByCreatedAt(String bookingReference);
+
     List<Payment> findByBookingReferenceAndStatus(String bookingReference, PaymentStatus status);
+
     boolean existsByBookingReferenceAndStatus(String bookingReference, PaymentStatus status);
 }

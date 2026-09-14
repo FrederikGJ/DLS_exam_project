@@ -48,14 +48,16 @@ public class FlightClient {
     }
 
     /**
-     * Fetches flight + seat info. Throws ApiException with NOT_FOUND / INVALID_STATE / SEAT_TAKEN / UPSTREAM_UNAVAILABLE.
+     * Fetches flight + seat info.
+     * Throws ApiException with NOT_FOUND / INVALID_STATE / SEAT_TAKEN / UPSTREAM_UNAVAILABLE.
      */
     public FlightSeatInfo fetchFlightSeat(Long flightId, String seatNumber) {
         JsonNode response;
         try {
             response = restClient.post()
                     .contentType(MediaType.APPLICATION_JSON)
-                    .body(Map.of("query", QUERY, "variables", Map.of("id", String.valueOf(flightId), "seat", seatNumber)))
+                    .body(Map.of("query", QUERY,
+                            "variables", Map.of("id", String.valueOf(flightId), "seat", seatNumber)))
                     .retrieve()
                     .body(JsonNode.class);
         } catch (RestClientException e) {

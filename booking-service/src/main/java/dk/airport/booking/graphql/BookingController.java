@@ -59,9 +59,11 @@ public class BookingController {
     // ---------------------------------------------------------- mutations
 
     @MutationMapping
-    public Booking createBooking(@Argument @NotNull Long flightId,
-                                 @Argument @NotBlank @Pattern(regexp = "^[0-9]{1,3}[A-Za-z]$", message = "seatNumber must look like 12C") String seatNumber,
-                                 @Argument @Valid PassengerInput passenger) {
+    public Booking createBooking(
+            @Argument @NotNull Long flightId,
+            @Argument @NotBlank @Pattern(regexp = "^[0-9]{1,3}[A-Za-z]$", message = "seatNumber must look like 12C")
+            String seatNumber,
+            @Argument @Valid PassengerInput passenger) {
         return bookingService.createBooking(flightId, seatNumber, passenger);
     }
 

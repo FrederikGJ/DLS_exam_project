@@ -30,7 +30,9 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.time.Duration;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -41,7 +43,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doThrow;
 
 /**
@@ -81,7 +82,8 @@ class FlightServiceIntegrationTest {
     static SimpleMessageListenerContainer testListener;
 
     @BeforeAll
-    static void startTestListener(@Autowired ConnectionFactory connectionFactory, @Autowired ObjectMapper objectMapper) {
+    static void startTestListener(@Autowired ConnectionFactory connectionFactory,
+                                  @Autowired ObjectMapper objectMapper) {
         RabbitAdmin admin = new RabbitAdmin(connectionFactory);
         Queue queue = new Queue(TEST_QUEUE, false, false, false);
         admin.declareQueue(queue);
@@ -112,9 +114,30 @@ class FlightServiceIntegrationTest {
                 .execute()
                 .path("airlines").entityList(Object.class).hasSizeGreaterThan(2);
 
-        graphQlTester.document("{ flights { id flightNumber destination status gate availableSeatCount airline { iataCode } } }")
+        graphQlTester.document("{ flights { id flightNumber destination status gate availableSeatCount airline "
+                        + "{ iataCode } } }")
                 .execute()
                 .path("flights").entityList(Object.class).hasSizeGreaterThan(9);
+    }
+
+    @Test
+    void flightByNumberIsCaseInsensitiveAndScopedToTheDate() {
+        String departure = graphQlTester.document("{ flights { flightNumber scheduledDeparture } }")
+                .execute().path("flights[?(@.flightNumber == 'SK1501')].scheduledDeparture")
+                .entityList(String.class).get().getFirst();
+        LocalDate date = OffsetDateTime.parse(departure).withOffsetSameInstant(ZoneOffset.UTC).toLocalDate();
+
+        String byNumber = "query($n: String!, $d: Date!) "
+                + "{ flightByNumber(flightNumber: $n, date: $d) { flightNumber } }";
+        graphQlTester.document(byNumber)
+                .variable("n", "sk1501").variable("d", date)
+                .execute()
+                .path("flightByNumber.flightNumber").entity(String.class).isEqualTo("SK1501");
+
+        graphQlTester.document(byNumber)
+                .variable("n", "SK1501").variable("d", date.minusDays(1))
+                .execute()
+                .path("flightByNumber").valueIsNull();
     }
 
     @Test
@@ -123,7 +146,8 @@ class FlightServiceIntegrationTest {
                 .execute()
                 .path("flights[0].id").entity(Long.class).get();
 
-        graphQlTester.document("query($id: ID!) { flight(id: $id) { seat(seatNumber: \"1A\") { seatClass price isAvailable } } }")
+        graphQlTester.document("query($id: ID!) { flight(id: $id) { seat(seatNumber: \"1A\") "
+                        + "{ seatClass price isAvailable } } }")
                 .variable("id", flightId)
                 .execute()
                 .path("flight.seat.seatClass").entity(String.class).isEqualTo("BUSINESS")
@@ -144,7 +168,8 @@ class FlightServiceIntegrationTest {
                 "bookingReference", "ABC123", "flightId", flightId, "seatNumber", "5C"));
 
         await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
-                assertThat(seatRepository.findByFlightIdAndSeatNumberIgnoreCase(flightId, "5C").orElseThrow().isAvailable()).isFalse());
+                assertThat(seatRepository.findByFlightIdAndSeatNumberIgnoreCase(flightId, "5C").orElseThrow()
+                        .isAvailable()).isFalse());
         await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
                 assertThat(processedEventRepository.existsById(eventId)).isTrue());
 
@@ -156,7 +181,8 @@ class FlightServiceIntegrationTest {
         publish(UUID.randomUUID().toString(), "booking.cancelled", Map.of(
                 "bookingReference", "ABC123", "flightId", flightId, "seatNumber", "5C"));
         await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
-                assertThat(seatRepository.findByFlightIdAndSeatNumberIgnoreCase(flightId, "5C").orElseThrow().isAvailable()).isTrue());
+                assertThat(seatRepository.findByFlightIdAndSeatNumberIgnoreCase(flightId, "5C").orElseThrow()
+                        .isAvailable()).isTrue());
     }
 
     @Test
@@ -164,7 +190,8 @@ class FlightServiceIntegrationTest {
         Long flightId = graphQlTester.document("{ flights(filter: { destination: \"HEL\" }) { id } }")
                 .execute().path("flights[0].id").entity(Long.class).get();
 
-        graphQlTester.document("mutation($id: ID!) { updateFlightStatus(flightId: $id, status: CANCELLED) { id status } }")
+        graphQlTester.document(
+                        "mutation($id: ID!) { updateFlightStatus(flightId: $id, status: CANCELLED) { id status } }")
                 .variable("id", flightId)
                 .execute()
                 .path("updateFlightStatus.status").entity(String.class).isEqualTo("CANCELLED");
@@ -172,7 +199,8 @@ class FlightServiceIntegrationTest {
         List<EventEnvelope> received = awaitEvents(e -> e.payload().path("flightNumber").asText().equals("DY1050"), 2);
         assertThat(received).extracting(EventEnvelope::eventType)
                 .containsExactlyInAnyOrder("flight.status.changed", "flight.cancelled");
-        EventEnvelope cancelled = received.stream().filter(e -> e.eventType().equals("flight.cancelled")).findFirst().orElseThrow();
+        EventEnvelope cancelled = received.stream()
+                .filter(e -> e.eventType().equals("flight.cancelled")).findFirst().orElseThrow();
         assertThat(cancelled.eventId()).isNotBlank();
         assertThat(cancelled.producer()).isEqualTo("flight-service");
         assertThat(cancelled.occurredAt()).isNotNull();
@@ -217,7 +245,8 @@ class FlightServiceIntegrationTest {
         assertThat(row.getPayload()).contains("SK9999");
         assertThat(row.getAttempts()).isZero();
         await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
-                assertThat(outboxEventRepository.findByEventId(row.getEventId()).orElseThrow().getPublishedAt()).isNotNull());
+                assertThat(outboxEventRepository.findByEventId(row.getEventId()).orElseThrow().getPublishedAt())
+                        .isNotNull());
     }
 
     // ------------------------------------------------------------------ outbox guarantees
@@ -271,7 +300,8 @@ class FlightServiceIntegrationTest {
     // ------------------------------------------------------------------ helpers
 
     private void publish(String eventId, String type, Map<String, Object> payload) throws Exception {
-        EventEnvelope env = new EventEnvelope(eventId, type, OffsetDateTime.now(), "booking-service", objectMapper.valueToTree(payload));
+        EventEnvelope env = new EventEnvelope(eventId, type, OffsetDateTime.now(), "booking-service",
+                objectMapper.valueToTree(payload));
         MessageProperties props = new MessageProperties();
         props.setContentType(MessageProperties.CONTENT_TYPE_JSON);
         rabbitTemplate.send("airport.events", type, new Message(objectMapper.writeValueAsBytes(env), props));

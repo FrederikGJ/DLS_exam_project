@@ -67,8 +67,8 @@ public class ShopController {
         return shopService.isOpenNow(shop);
     }
 
-    @SchemaMapping(typeName = "NavNode")
-    public List<Shop> shops(NavNode node) {
+    @SchemaMapping(typeName = "NavNode", field = "shops")
+    public List<Shop> shopsAtNode(NavNode node) {
         return shopService.shopsAtNode(node.getId());
     }
 
