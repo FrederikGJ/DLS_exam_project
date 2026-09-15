@@ -42,7 +42,8 @@ flowchart LR
 Regler der overholdes:
 
 * Én PostgreSQL-database pr. service. Ingen service læser i en anden services database.
-* Synkront: frontend → service via GraphQL over HTTP (Spring for GraphQL). Kun `/actuator/health` er REST.
+* Synkront: frontend → service via GraphQL over HTTP (Spring for GraphQL) med Keycloak-JWT som Bearer-token på
+  beskyttede operationer (se *Sikkerhed*). Kun actuator-endpoints (`/actuator/health`, `/actuator/info`, `/actuator/metrics`) er REST.
 * Asynkront: service → service via events på RabbitMQ (se [events.md](events.md)).
 * Services cacher snapshots fra events (fx booking gemmer flightnummer, afgangstid, gate og flystatus;
   baggage gemmer `booking_snapshot`). Kilden til sandhed er altid den ejende service.
@@ -178,13 +179,193 @@ sequenceDiagram
    `shopsAlongRoute` – butikker hvis node indgår i ruten. Frontend tegner gangnetværket og ruten på et SVG-kort med
    nummererede trin, instruktionstekst pr. trin, afstand pr. delstrækning og retningspile; trin på en anden etage vises som hint.
 
+## Sikkerhed (login og roller)
+
+Login og roller er lagt oven på systemet uden at ændre GraphQL-API'et: Keycloak er OpenID Connect-provider,
+frontenden er OIDC-client, og de fem services er OAuth2 resource servers, der alene validerer et Bearer-token.
+Læsning (afgange, butikker, opslag af booking) kræver stadig ikke login.
+
+### Komponenter
+
+* **Keycloak 26** (`quay.io/keycloak/keycloak:26.7.3`, `start-dev --import-realm`, H2 i en `emptyDir`/container).
+  Realm'et `airport` importeres ved hver opstart fra `k8s/keycloak/realm-airport.json` – samme fil i docker-compose
+  (mount) og Kubernetes (ConfigMap `keycloak-realm` via `configMapGenerator`). Realm'et definerer realm-rollerne
+  `PASSENGER` og `OPERATIONS`, testbrugerne `anna`/`anna` (PASSENGER, `anna@example.com`) og `ops`/`ops`
+  (OPERATIONS, `ops@example.com`) og den public client `airport-frontend`: Authorization Code + PKCE (S256), ingen
+  client secret, redirect-URIs for `localhost:8080` (compose), `localhost:8090` (kind) og `airport.local`. Direct access
+  grants er slået til, så `scripts/e2e-smoke.sh` og `curl` kan hente tokens med password grant. Access tokens lever
+  5 minutter (`accessTokenLifespan: 300`) og signeres med RS256.
+* **Frontend som OIDC-client** (`frontend/js/auth.js`): én instans af den vendorede `keycloak-js` 26.2.4
+  (`js/vendor/keycloak.js` – Keycloak 26 serverer ikke længere adapteren selv, og npm-pakken er ES-module only).
+  `initAuth()` kører før første render med `onLoad: 'check-sso'` og `silent-check-sso.html` i en skjult iframe, så en
+  eksisterende session overlever en page refresh uden redirect; `pkceMethod: 'S256'`, `responseMode: 'query'` (så
+  `#/route` overlever turen til Keycloak) og `checkLoginIframe: false` (kræver tredjeparts-cookies; token-refresh
+  dækker i stedet). Siderne *Book*, *Betaling* og *Bagage* sender brugeren til login før render (`LOGIN_REQUIRED` i
+  `app.js`); operations-panelet under *Afgange* vises kun med `hasRole('OPERATIONS')`. `frontend/js/api.js` kalder
+  `getToken()` før hvert GraphQL-kald (refresh når tokenet udløber inden 30 s) og sætter
+  `Authorization: Bearer <token>`, når brugeren er logget ind. Keycloaks adresse kommer fra `js/config.js`:
+  `http://localhost:8180` i compose og `<origin>/auth` i Kubernetes (ConfigMap over `config.js`).
+* **Services som OAuth2 resource servers** – `config/SecurityConfig.java` og `config/KeycloakRoleConverter.java`
+  er identiske i alle fem services. Kæden er stateless (`SessionCreationPolicy.STATELESS`, CSRF slået fra, ingen
+  cookies); `oauth2ResourceServer().jwt()` validerer tokenet, og `KeycloakRoleConverter` oversætter
+  `realm_access.roles` til `ROLE_<navn>` (client-roller i `resource_access` ignoreres – realm'et bruger kun
+  realm-roller). `Authentication.getName()` er `preferred_username`. På HTTP-niveau er GraphQL-endpointet,
+  `/actuator/health/**`, `/actuator/info` og `/graphiql` (kun dev-profil) åbne; alle andre URL'er (fx
+  `/actuator/metrics`) kræver OPERATIONS. Selve autorisationen ligger pr. operation som `@PreAuthorize` på
+  controller-metoderne (`@EnableMethodSecurity`). CORS ligger i samme filterkæde (`CORS_ALLOWED_ORIGINS`), og fordi
+  `CorsFilter` kører før autentificering, kræver preflight-requests aldrig et token.
+
+### Login- og kaldsflow
+
+```mermaid
+sequenceDiagram
+  participant B as Browser (frontend + keycloak-js)
+  participant KC as Keycloak (realm airport)
+  participant S as service (resource server)
+
+  B->>KC: GET /protocol/openid-connect/auth (client_id=airport-frontend, code_challenge S256)
+  KC-->>B: login-side; brugeren logger ind (anna/anna)
+  KC-->>B: redirect tilbage til frontenden med ?code=...
+  B->>KC: POST /protocol/openid-connect/token (code + code_verifier)
+  KC-->>B: access token (JWT: iss, exp, preferred_username, email, realm_access.roles)
+  B->>S: POST /api/.../graphql, Authorization: Bearer JWT
+  S->>KC: GET JWK_SET_URI (intern adresse) - første gang, derefter cachet
+  KC-->>S: signeringsnøgler (JWKS)
+  S->>S: signatur, exp og iss == OIDC_ISSUER_URI
+  alt token ugyldigt (udløbet, forkert iss, ikke et JWT)
+    S-->>B: HTTP 401, WWW-Authenticate: Bearer error="invalid_token"
+  else token ok (eller slet intet token)
+    S->>S: @PreAuthorize på operationen (ROLE_PASSENGER / ROLE_OPERATIONS)
+    alt intet token på beskyttet operation
+      S-->>B: HTTP 200, errors[].extensions.code = UNAUTHORIZED
+    else forkert rolle
+      S-->>B: HTTP 200, errors[].extensions.code = FORBIDDEN
+    else tilladt
+      S-->>B: HTTP 200, data
+    end
+  end
+```
+
+Nøglerne hentes første gang et token skal valideres og caches derefter i servicen (Nimbus henter igen, hvis et token
+peger på et ukendt `kid`). Et request uden `Authorization`-header er anonymt: offentlige queries svarer som før,
+beskyttede operationer giver `UNAUTHORIZED`.
+
+### Operation × rolle
+
+`@PreAuthorize` sidder på controller-metoderne (`graphql/<X>Controller.java`); `@SchemaMapping`-felter (fx
+`Flight.seats`, `Passenger.bookings`) følger den query, de hentes igennem, og har ingen egen regel.
+
+| Service         | Operation                                                                        | Type     | Hvem må kalde                                    |
+|-----------------|----------------------------------------------------------------------------------|----------|--------------------------------------------------|
+| flight-service  | `airlines`, `airline`, `flights`, `flight`, `flightByNumber`, `availableSeats`   | query    | Alle                                             |
+| flight-service  | `createAirline`, `createAircraft`, `createFlight`, `updateFlightStatus`, `updateGate` | mutation | OPERATIONS                                  |
+| booking-service | `booking`, `bookingByReference`, `passenger`                                     | query    | Alle                                             |
+| booking-service | `bookingsByPassenger(email)`                                                     | query    | PASSENGER (kun egen e-mail) / OPERATIONS (alle)  |
+| booking-service | `createBooking`, `cancelBooking`, `checkIn`                                      | mutation | PASSENGER / OPERATIONS                           |
+| payment-service | `payment`                                                                        | query    | Alle                                             |
+| payment-service | `paymentsByBooking`                                                              | query    | PASSENGER / OPERATIONS                           |
+| payment-service | `pay`                                                                            | mutation | PASSENGER / OPERATIONS                           |
+| payment-service | `refund`                                                                         | mutation | OPERATIONS                                       |
+| baggage-service | `baggage`, `baggageByFlight`, `bookingSnapshot`                                  | query    | Alle                                             |
+| baggage-service | `baggageByBooking`                                                               | query    | PASSENGER / OPERATIONS                           |
+| baggage-service | `registerBaggage`                                                                | mutation | PASSENGER / OPERATIONS                           |
+| baggage-service | `updateBaggageStatus`                                                            | mutation | OPERATIONS                                       |
+| shop-service    | `shops`, `shop`, `searchShops`, `navNodes`, `navEdges`, `route`                  | query    | Alle                                             |
+| shop-service    | `createShop`, `updateShop`, `deleteShop`                                         | mutation | OPERATIONS                                       |
+
+Særregel: `bookingsByPassenger` beholder sit `email`-argument (det er en del af API'et), men tokenet afgør, hvad
+det må være – en PASSENGER må kun angive sin egen e-mail (`email`-claim, case-insensitivt), ellers `FORBIDDEN`;
+OPERATIONS må slå alle op. Uden for GraphQL: `/actuator/health`, `/actuator/health/**`, `/actuator/info` og
+GraphiQL (`/graphiql`, kun dev-profil) er offentlige; øvrige actuator-endpoints (`/actuator/metrics`) kræver
+OPERATIONS.
+
+### Konfiguration: issuer og JWKS
+
+Hver service får to værdier (`application.yml` → `spring.security.oauth2.resourceserver.jwt`):
+
+| Env-var           | Betydning                                                                                           |
+|-------------------|-----------------------------------------------------------------------------------------------------|
+| `OIDC_ISSUER_URI` | Den streng, tokenets `iss` skal være lig med: Keycloaks *browser-vendte* URL + `/realms/airport`. Keycloak låser den med `KC_HOSTNAME`, så alle tokens har samme `iss`, uanset om de er hentet fra browseren eller inde fra netværket |
+| `JWK_SET_URI`     | Hvor servicen henter signeringsnøglerne: Keycloaks *interne* adresse i compose-netværket/clusteret  |
+
+| Miljø          | `OIDC_ISSUER_URI`                            | `JWK_SET_URI`                                                             |
+|----------------|----------------------------------------------|---------------------------------------------------------------------------|
+| docker-compose | `http://localhost:8180/realms/airport`       | `http://keycloak:8080/realms/airport/protocol/openid-connect/certs`       |
+| kind           | `http://localhost:8090/auth/realms/airport`  | `http://keycloak:8080/auth/realms/airport/protocol/openid-connect/certs`  |
+
+Når både `issuer-uri` og `jwk-set-uri` er sat, bruger Spring **aldrig** OIDC discovery
+(`/.well-known/openid-configuration`): den henter nøglerne fra `jwk-set-uri` og sammenligner `iss` med
+`issuer-uri` som ren streng. Derfor behøver en service aldrig at kunne nå `localhost:8180`/`localhost:8090`, og
+browseren behøver ikke at kunne nå `keycloak:8080`. Faldgruben er, at Keycloak som udgangspunkt udleder `iss` af
+den URL, forespørgslen kom ind på, så tokens hentet fra browseren og fra en container ville få to forskellige
+issuers, og kun den ene ville blive accepteret. Løsningen er `KC_HOSTNAME` (compose: `http://localhost:8180`,
+kind: `http://localhost:8090/auth`), som låser alle URL'er Keycloak udgiver. Skifter man host eller port (fx
+minikube), skal `KC_HOSTNAME`, `OIDC_ISSUER_URI` i `k8s/base/services/*.yaml` og `KEYCLOAK_URL` i frontendens ConfigMap
+rettes sammen; symptomet ellers er HTTP 401 med `WWW-Authenticate: ... invalid_token ... The iss claim is not valid`.
+Detaljer, verifikation og hvorfor `KC_PROXY_HEADERS`/`KC_HOSTNAME_BACKCHANNEL_DYNAMIC` bevidst er slået fra: se
+[k8s/README.md, Keycloak (login)](../k8s/README.md#keycloak-login).
+
+### GitHub-login (identity brokering)
+
+Realm'et definerer en identity provider `github` (`providerId: github`), som er **slået fra** og har placeholder
+client id/secret i `realm-airport.json`. En mapper (`github-users-are-passengers`, `oidc-hardcoded-role-idp-mapper`)
+giver alle brokerede brugere rollen PASSENGER; e-mailen hentes med scope `user:email` og regnes som verificeret
+(`trustEmail: true`). Sådan tændes den:
+
+1. Opret en OAuth App på GitHub: *Settings → Developer settings → OAuth Apps → New OAuth App*.
+   *Homepage URL* = frontendens URL (fx `http://localhost:8080`); *Authorization callback URL* =
+   `<KEYCLOAK_URL>/realms/airport/broker/github/endpoint`, dvs.
+   `http://localhost:8180/realms/airport/broker/github/endpoint` i compose eller
+   `http://localhost:8090/auth/realms/airport/broker/github/endpoint` i kind. Gem Client ID og generér en Client secret.
+2. Åbn Keycloaks admin console (`admin`/`admin`; compose `http://localhost:8180/admin/`, kind
+   `http://localhost:8090/auth/admin/`) → realm `airport` → *Identity providers* → *GitHub* → indsæt Client ID og
+   Client Secret → *Enabled* = on → *Save*.
+3. Login-siden viser nu en *GitHub*-knap ved siden af brugernavn/kode. Første login opretter brugeren i realm'et med
+   rollen PASSENGER (`syncMode: IMPORT`).
+
+Bemærk: Keycloak kører med H2-databasen i dev-mode, og realm'et importeres forfra ved hver genstart. Indstillingen
+(og de brugere GitHub-login har oprettet) forsvinder derfor ved genstart, medmindre client id/secret også skrives
+ind i `realm-airport.json` (`identityProviders[0].config` og `enabled: true`) – hvilket ikke bør committes.
+
+### Fejl og frontendens reaktion
+
+| Svar                                              | Hvornår                                                                                             | Frontend (`api.js`)                                                 |
+|---------------------------------------------------|-----------------------------------------------------------------------------------------------------|---------------------------------------------------------------------|
+| GraphQL-fejl `UNAUTHORIZED` (HTTP 200)            | Beskyttet operation uden gyldigt Bearer-token (anonymt kald rammer `@PreAuthorize`)                 | `login()`: til Keycloak og tilbage til samme route; brugeren gentager handlingen; besked "Log ind for at fortsætte" |
+| GraphQL-fejl `FORBIDDEN` (HTTP 200)               | Logget ind, men forkert rolle (fx PASSENGER → `updateFlightStatus`), eller `bookingsByPassenger` med en anden e-mail | Dansk besked "<bruger> har ikke rettighed til denne handling"; ingen redirect |
+| HTTP 401, `WWW-Authenticate: Bearer error="invalid_token"` | Tokenet afvises af Spring Security før GraphQL: udløbet, forkert `iss`, ugyldig signatur eller ikke et JWT | `login()` + "Din session er udløbet - log ind igen"           |
+| HTTP 401 / 403 uden GraphQL-body                  | Andre URL'er end de offentlige (fx `/actuator/metrics`) uden token / uden OPERATIONS                | Kaldes ikke fra frontenden                                          |
+
+`GraphQlExceptionResolver` afgør mellem de to GraphQL-koder ved at se på `SecurityContext`: en `AccessDeniedException`
+fra `@PreAuthorize` bliver `UNAUTHORIZED`, hvis kalderen er anonym, ellers `FORBIDDEN` (se også *GraphQL-fejl*).
+Udløbne tokens ses sjældent fra frontenden, fordi `getToken()` fornyer tokenet, når det udløber inden 30 s.
+
+### Designvalg og test
+
+| Nr. | Valg                                                                                          | Alternativ overvejet                                                     | Begrundelse |
+|-----|-----------------------------------------------------------------------------------------------|--------------------------------------------------------------------------|-------------|
+| 1   | Keycloak 26 med realm-import (`realm-airport.json`) og faste testbrugere `anna`/`ops`         | Egen bruger-/kodeordstabel i en service; hosted IdP (Auth0, Entra ID)   | Standard OIDC uden egen kodeordshåndtering; realm-filen er én kilde til roller, client og brugere for compose og k8s og giver kendt tilstand ved hver demo; en hosted IdP kræver netadgang og konti, som eksamen ikke kan forudsætte |
+| 2   | Læse-queries offentlige; autorisation pr. operation med `@PreAuthorize` på controller-metoderne | URL-baserede regler i `SecurityFilterChain`; en API-gateway foran services | Én GraphQL-endpoint pr. service bærer både offentlige queries og beskyttede mutations, så URL-regler kan ikke skelne; method security holder reglen ved siden af operationen og giver GraphQL-koder i stedet for HTTP-fejl; en gateway ville være endnu en komponent uden at fjerne behovet for rolletjek i servicen |
+| 3   | `iss` låst med `KC_HOSTNAME`, nøgler fra intern `JWK_SET_URI`, ingen discovery; proxy-headers og dynamisk backchannel bevidst slået fra | Discovery via `issuer-uri` alene; `KC_HOSTNAME_BACKCHANNEL_DYNAMIC`/`KC_PROXY_HEADERS` | Discovery kræver, at servicen kan nå browserens Keycloak-URL, hvilket den ikke kan fra compose-netværket/clusteret; med to eksplicitte værdier er begge sider uafhængige, og alle tokens får samme `iss`. Proxy-headers lækker ingress-nginx' `X-Forwarded-Port: 80` ind i discovery-dokumentet (verificeret 15-09-2026) |
+
+Test: hver service har en `TestTokens`-klasse (test scope, `@TestConfiguration`), der genererer en RSA-nøgle ved
+opstart, minter RS256-JWT'er med samme claims som Keycloak (`iss`, `preferred_username`, `email`,
+`realm_access.roles`) og erstatter `JwtDecoder` med en, der stoler på testnøglen og kræver samme `iss` som
+`application.yml`. Alt andet – Bearer-header, issuer-tjek, rolle-mapping, `@PreAuthorize`, CORS – kører præcis som i
+drift, så integrationstestene går gennem den rigtige HTTP-filterkæde uden en kørende Keycloak.
+`SecurityIntegrationTest` i hver service dækker: offentlige queries og readiness uden token, beskyttede operationer
+uden token → `UNAUTHORIZED`, forkert rolle → `FORBIDDEN` (booking: også `bookingsByPassenger` med en fremmed e-mail),
+rigtig rolle går igennem, udløbet/fremmed/ugyldigt token → HTTP 401 med `invalid_token`, andre actuator-endpoints
+kræver OPERATIONS, og CORS-preflight fra frontendens origin tillades. De øvrige integrationstests sender
+mutations med `TestTokens.passenger()`/`operations()`.
+
 ## Designvalg (hvor spec'en gav frihed)
 
 | Emne | Valg | Begrundelse |
 |------|------|-------------|
 | Pris i booking-service | Synkront GraphQL-kald til flight-service (`RestClient`) ved `createBooking` | Enkelt, altid korrekt pris og sædestatus; ingen kopi af sædedata i booking_db |
 | Booking-snapshot | `booking` har ekstra kolonner `gate`, `flight_status`, `currency` | `flight.status.changed`/`flight.gate.changed` har noget at opdatere; vises under "Min booking" |
-| Passager | Nøgle = e-mail (case-insensitivt unikt indeks); navn/pas opdateres ved ny booking | Enkel identitet uden login |
+| Passager | Nøgle = e-mail (case-insensitivt unikt indeks); navn/pas opdateres ved ny booking. Login-identiteten er Keycloak-brugeren; frontenden forudfylder e-mailen fra tokenet, og `bookingsByPassenger` må kun bruges med tokenets e-mail | Passageren i booking_db er stadig et rent data-objekt (ingen kodeord); koblingen til login går via e-mailen i tokenet |
 | Bookingreference | 6 tegn fra `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` (uden 0/O/1/I), op til 5 forsøg ved kollision | Læsbar og entydig |
 | Annullering | Tilladt fra PENDING_PAYMENT, CONFIRMED og CHECKED_IN; `payment.failed` giver årsag "Payment failed: <reason>" | Spec forbyder ikke annullering efter check-in |
 | Sædepris | `basePrice` på flight × klassemultiplikator (ECONOMY 1.0, BUSINESS 2.5, FIRST 4.0) | Spec'ens seat-tabel har ingen pris; dette holder prisen i flight-service |
@@ -207,3 +388,6 @@ sequenceDiagram
 | pgAdmin i Kubernetes | Dev/demo-værktøj i `k8s/tools/` bag Ingress på `/pgadmin`, uden login (desktop mode); de fem databaser forudregistreret (ConfigMap) med kodeord fra en pgpass-fil (Secret) | Viser "én database pr. service" og eventflowet live i en demo; ikke en del af systemet og fjernes med én linje i `kustomization.yaml` |
 | Strukturerede logs | Spring Boots indbyggede `logging.structured.format.console=logstash` i `prod`-profil | Ingen ekstra dependency |
 | Ubetalte bookinger | Forbliver `PENDING_PAYMENT` (ingen timeout) | Ikke krævet; kendt begrænsning – sædet er reserveret i booking_db men vises ledigt i flight-service indtil betaling |
+| Login | Keycloak 26 med realm-import (`realm-airport.json`) og faste testbrugere `anna`/`ops` | Se *Sikkerhed (login og roller)*, designvalg 1 |
+| Autorisation | Læse-queries offentlige; `@PreAuthorize` pr. operation på controller-metoderne (én GraphQL-endpoint) | Se *Sikkerhed (login og roller)*, designvalg 2 |
+| Token-validering | `iss` låst med `KC_HOSTNAME`, nøgler fra intern `JWK_SET_URI`, ingen discovery | Se *Sikkerhed (login og roller)*, designvalg 3 |

@@ -1,11 +1,12 @@
 # pgAdmin - dev/demo tool for browsing the five service databases from one UI.
 #
-# It is NOT part of the airport system (not in the requirements spec). To deploy without it,
-# remove the `tools/pgadmin.yaml` line from k8s/kustomization.yaml.
+# It is NOT part of the airport system (not in the requirements spec) and is therefore not in the base
+# kustomization: `kubectl apply -k k8s/` deploys the system without it, `kubectl apply -k k8s/overlays/dev-tools/`
+# adds it (this file + pgadmin-ingress.yaml via tools/kustomization.yaml).
 #
 # How it fits together:
-# - Reached through the Ingress at /pgadmin. SCRIPT_NAME makes pgAdmin serve under that prefix,
-#   so no rewrite rule is needed (same approach as the services' GRAPHQL_PATH).
+# - Reached through its own Ingress (pgadmin-ingress.yaml) at /pgadmin. SCRIPT_NAME makes pgAdmin serve under
+#   that prefix, so no rewrite rule is needed (same approach as the services' GRAPHQL_PATH).
 # - Runs in pgAdmin's "desktop mode" (SERVER_MODE=False): no login page, the UI opens directly
 #   with the five databases ready. That is exactly why it is dev/demo only - anyone who can reach
 #   /pgadmin has full access to the databases.

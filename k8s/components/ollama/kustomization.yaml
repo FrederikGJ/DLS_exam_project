@@ -1,0 +1,18 @@
+# Kustomize Component (dev plan DP-16): adds the local LLM behind shop-service's askRoute - an Ollama Deployment +
+# Service with the model qwen2.5:1.5b baked into the image - and switches shop-service over to it. It is NOT part of
+# the base: `kubectl apply -k k8s/` deploys no Ollama and askRoute answers with the keyword fallback. Overlays opt
+# in with `components: [../../components/ollama]` (see k8s/overlays/demo).
+#
+# The image is built by docker-compose (`docker compose --profile ai build`, see ollama/Dockerfile) and must be on
+# the node before the pod can start:   kind load docker-image airport/ollama:local --name airport
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - deployment.yaml
+  - service.yaml
+
+# shop-service: enable AI and point it at the in-cluster Ollama (the base ConfigMap has AI_ENABLED "false").
+# Note: a ConfigMap change does not restart a running pod - `kubectl -n airport rollout restart deployment/shop-service`.
+patches:
+  - path: shop-service-ai.yaml

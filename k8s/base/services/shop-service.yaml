@@ -21,6 +21,13 @@ data:
   # address the pod fetches the signing keys from.
   OIDC_ISSUER_URI: http://localhost:8090/auth/realms/airport
   JWK_SET_URI: http://keycloak:8080/auth/realms/airport/protocol/openid-connect/certs
+  # askRoute / local LLM (dev plan DP-16): OFF in the base - no Ollama runs here, so askRoute answers with the
+  # keyword fallback (aiUsed=false). The component k8s/components/ollama (used by k8s/overlays/demo) adds the Ollama
+  # Deployment + Service and patches AI_ENABLED to "true". A ConfigMap change alone does not restart the pod:
+  #     kubectl -n airport rollout restart deployment/shop-service
+  AI_ENABLED: "false"
+  OLLAMA_URL: http://ollama:11434
+  OLLAMA_MODEL: qwen2.5:1.5b
 
 ---
 # DEV VALUES ONLY - replace before any shared cluster.

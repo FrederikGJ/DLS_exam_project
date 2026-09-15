@@ -170,6 +170,11 @@ export const baggageApi = {
 // ------------------------------------------------------------------- shop-service
 const NODE_FIELDS = `id name terminal floor x y type`;
 const SHOP_FIELDS = `id name category terminal zone floor openingHours description openNow node { ${NODE_FIELDS} }`;
+const ROUTE_FIELDS = `
+  totalDistanceM estimatedMinutes
+  steps { instruction distance node { ${NODE_FIELDS} } }
+  shopsAlongRoute { ${SHOP_FIELDS} }
+`;
 
 export const shopApi = {
   shops: (filter = {}) => gql(cfg.SHOP_URL, `
@@ -190,10 +195,19 @@ export const shopApi = {
 
   route: (fromNodeId, toNodeId, accessibleOnly = false) => gql(cfg.SHOP_URL, `
     query($from: ID!, $to: ID!, $acc: Boolean) {
-      route(fromNodeId: $from, toNodeId: $to, accessibleOnly: $acc) {
-        totalDistanceM estimatedMinutes
-        steps { instruction distance node { ${NODE_FIELDS} } }
-        shopsAlongRoute { ${SHOP_FIELDS} }
-      }
+      route(fromNodeId: $from, toNodeId: $to, accessibleOnly: $acc) { ${ROUTE_FIELDS} }
     }`, { from: fromNodeId, to: toNodeId, acc: accessibleOnly }, 'shop-service').then(d => d.route),
+
+  // "Spørg om vej": a free-text question is interpreted by shop-service's local language model (Ollama) into a shop
+  // (+ optional destination) and answered with the same Route shape as `route`. aiUsed=false + fallbackReason when
+  // the model was not available and the keyword fallback answered instead. Can take a few seconds.
+  askRoute: (question, fromNodeId, accessibleOnly = false) => gql(cfg.SHOP_URL, `
+    query($q: String!, $from: ID!, $acc: Boolean) {
+      askRoute(question: $q, fromNodeId: $from, accessibleOnly: $acc) {
+        interpretation aiUsed fallbackReason model
+        shop { ${SHOP_FIELDS} }
+        toNode { ${NODE_FIELDS} }
+        route { ${ROUTE_FIELDS} }
+      }
+    }`, { q: question, from: fromNodeId, acc: accessibleOnly }, 'shop-service').then(d => d.askRoute),
 };

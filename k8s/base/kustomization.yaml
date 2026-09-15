@@ -1,0 +1,26 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: airport
+
+# The base is the airport system itself; `kubectl apply -k k8s/` (thin wrapper) or `kubectl apply -k k8s/base/`.
+# Dev/demo extras live in overlays next to it (k8s/overlays/*), optional features in k8s/components/*; Kustomize
+# does not allow an overlay to live inside its own base directory, hence base/ as a separate directory.
+resources:
+  - namespace.yaml
+  - rabbitmq/secret.yaml
+  - rabbitmq/statefulset.yaml
+  - rabbitmq/service.yaml
+  - databases/flight-db.yaml
+  - databases/booking-db.yaml
+  - databases/payment-db.yaml
+  - databases/baggage-db.yaml
+  - databases/shop-db.yaml
+  - services/flight-service.yaml
+  - services/booking-service.yaml
+  - services/payment-service.yaml
+  - services/baggage-service.yaml
+  - services/shop-service.yaml
+  - frontend/frontend.yaml
+  - ../keycloak          # Keycloak Deployment/Service/Secret + realm ConfigMap (k8s/keycloak/kustomization.yaml)
+  - ingress.yaml

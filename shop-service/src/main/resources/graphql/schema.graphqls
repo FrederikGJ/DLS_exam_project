@@ -9,6 +9,12 @@ type Query {
   navEdges(terminal: String): [NavEdge!]!
   "Shortest route (Dijkstra over nav_edge). accessibleOnly=true skips stairs etc."
   route(fromNodeId: ID!, toNodeId: ID!, accessibleOnly: Boolean = false): Route!
+  """
+  Ask for the way in natural language ("Hvor finder jeg en kop kaffe på vej til gate B12?"). A local language model
+  (Ollama) maps the question to a shop and an optional destination, and the route is computed with Dijkstra like
+  `route`. When the model is unavailable a keyword search answers instead (aiUsed = false, fallbackReason set).
+  """
+  askRoute(question: String!, fromNodeId: ID!, accessibleOnly: Boolean = false): AiRouteAnswer!
 }
 
 type Mutation {
@@ -66,6 +72,23 @@ type Route {
   estimatedMinutes: Int!
   "Shops located at a node that is part of the route"
   shopsAlongRoute: [Shop!]!
+}
+
+type AiRouteAnswer {
+  "One sentence: how the question was understood"
+  interpretation: String!
+  "The shop the question was mapped to; null when nothing matched"
+  shop: Shop
+  "Destination named in the question (gate, security, entrance ...), if any"
+  toNode: NavNode
+  "fromNodeId -> shop (-> toNode); null when no shop matched"
+  route: Route
+  "true when the language model chose the shop; false when the keyword fallback answered"
+  aiUsed: Boolean!
+  "Why the fallback was used (model unreachable, timeout, invalid answer, unknown id, AI disabled); null when aiUsed"
+  fallbackReason: String
+  "Name of the model that answered (null in fallback)"
+  model: String
 }
 
 input ShopFilter {

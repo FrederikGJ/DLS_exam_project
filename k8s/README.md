@@ -3,21 +3,26 @@
 Alle manifests ligger i denne mappe og deployes samlet med Kustomize:
 
 ```bash
-kubectl apply -k k8s/
+kubectl apply -k k8s/                      # selve systemet (= k8s/base/)
+kubectl apply -k k8s/overlays/dev-tools/   # systemet + pgAdmin (dev/demo-værktøj)
 ```
 
-Indhold:
+`k8s/kustomization.yaml` er kun en tynd henvisning til `base/`. Selve systemet ligger i `base/`, valgfrie
+tilføjelser i `overlays/` (og senere `components/`), fordi Kustomize ikke tillader, at et overlay ligger inde i sin
+egen base-mappe. Indhold:
 
-| Mappe/fil            | Indhold                                                                                   |
-|----------------------|-------------------------------------------------------------------------------------------|
-| `namespace.yaml`     | Namespace `airport`                                                                       |
-| `rabbitmq/`          | StatefulSet + Service (5672/15672) + Secret                                               |
-| `databases/`         | 5 × PostgreSQL 16 StatefulSet (1 replica, PVC 1Gi) + Service + Secret, én pr. service     |
-| `services/`          | 5 × Deployment (1 replica, `requests` 150m/256Mi, `limits` 500m/640Mi – se *Ressourcer på en laptop*) + ClusterIP Service + ConfigMap + Secret, liveness/readiness, initContainer `wait-for-db` der venter på servicens Postgres med `pg_isready`. Kan skaleres til flere replicas uden kodeændringer: en Postgres advisory lock sikrer, at kun én pod ad gangen kører outbox-relayet |
-| `frontend/`          | nginx Deployment + Service + ConfigMap der overskriver `js/config.js` med Ingress-stier    |
-| `keycloak/`          | Keycloak 26 (login, roller): Deployment + Service + Secret + `realm-airport.json` (bliver til ConfigMap `keycloak-realm` via `configMapGenerator`) – se *Keycloak (login)* |
-| `tools/`             | pgAdmin (dev/demo-værktøj, ikke en del af systemet): Deployment + Service + ConfigMap + Secret |
-| `ingress.yaml`       | Én Ingress: `/` → frontend, `/api/<x>/graphql` → den enkelte service, `/auth` → Keycloak, `/pgadmin` → pgAdmin |
+| Mappe/fil                    | Indhold                                                                                   |
+|------------------------------|-------------------------------------------------------------------------------------------|
+| `base/namespace.yaml`        | Namespace `airport`                                                                       |
+| `base/rabbitmq/`             | StatefulSet + Service (5672/15672) + Secret                                               |
+| `base/databases/`            | 5 × PostgreSQL 16 StatefulSet (1 replica, PVC 1Gi) + Service + Secret, én pr. service     |
+| `base/services/`             | 5 × Deployment (1 replica, `requests` 150m/256Mi, `limits` 500m/640Mi – se *Ressourcer på en laptop*) + ClusterIP Service + ConfigMap + Secret, liveness/readiness, initContainer `wait-for-db` der venter på servicens Postgres med `pg_isready`. Kan skaleres til flere replicas uden kodeændringer: en Postgres advisory lock sikrer, at kun én pod ad gangen kører outbox-relayet |
+| `base/frontend/`             | nginx Deployment + Service + ConfigMap der overskriver `js/config.js` med Ingress-stier    |
+| `base/ingress.yaml`          | Én Ingress: `/` → frontend, `/api/<x>/graphql` → den enkelte service, `/auth` → Keycloak |
+| `keycloak/`                  | Keycloak 26 (login, roller): Deployment + Service + Secret + `realm-airport.json` (bliver til ConfigMap `keycloak-realm` via `configMapGenerator`); egen kustomization, som `base/` henviser til, så compose kan mounte samme realm-fil – se *Keycloak (login)* |
+| `tools/`                     | pgAdmin (dev/demo-værktøj, ikke en del af systemet): Deployment + Service + ConfigMap + Secret + egen Ingress på `/pgadmin` (`pgadmin-ingress.yaml`). Deployes kun via `overlays/dev-tools` |
+| `overlays/dev-tools/`        | `base` + `tools`: systemet med pgAdmin                                                    |
+| `kind-config.yaml`           | kind-cluster med port-mapping 80/443 → 8090/8443                                          |
 
 Secrets indeholder **dev-værdier** (fx `flight/flight`). Skift dem før brug i et delt cluster.
 
@@ -75,7 +80,7 @@ kubectl delete -k k8s/                                  # ryd op (PVC'er slettes
 Clusteret oprettes med `kind-config.yaml`, som mapper ingress-nginx' port 80/443 på kind-noden til
 **localhost:8090 / 8443** på host-maskinen. Dermed kolliderer det ikke med docker-compose-stakken (frontend på 8080),
 og der er ikke brug for port-forward. Skal du bruge andre porte, så ret `hostPort` i `kind-config.yaml` **og**
-`CORS_ALLOWED_ORIGINS` i `k8s/services/*.yaml`: nginx-ingress sender `X-Forwarded-Port: 80` (porten inde i noden),
+`CORS_ALLOWED_ORIGINS` i `k8s/base/services/*.yaml`: nginx-ingress sender `X-Forwarded-Port: 80` (porten inde i noden),
 så Spring ser browserens origin `http://localhost:8090` som cross-origin, og den skal derfor være tilladt eksplicit.
 
 ```bash
@@ -92,7 +97,7 @@ done
 kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
 kubectl -n ingress-nginx wait --for=condition=ready pod -l app.kubernetes.io/component=controller --timeout=180s
 
-kubectl apply -k k8s/
+kubectl apply -k k8s/                      # eller k8s/overlays/dev-tools/ for også at få pgAdmin
 kubectl -n airport get pods -w
 ```
 
@@ -263,12 +268,12 @@ Services'ne konfigureres derfor med to værdier (DP-02) og bruger aldrig discove
 Spring bruger *ikke* OIDC discovery, når begge er sat, så services'ne behøver aldrig at nå `localhost:8090`
 (og et in-cluster-script, der vil hente tokens, skal selv bruge `http://keycloak:8080/auth/realms/airport/protocol/openid-connect/token`).
 Skifter du host eller port (fx minikube: `http://<minikube ip>/auth`), skal `KC_HOSTNAME` i `keycloak/keycloak.yaml`,
-`OIDC_ISSUER_URI` i `services/*.yaml` og `KEYCLOAK_URL` i `frontend/frontend.yaml` rettes sammen – ellers er
+`OIDC_ISSUER_URI` i `base/services/*.yaml` og `KEYCLOAK_URL` i `base/frontend/frontend.yaml` rettes sammen – ellers er
 symptomet `401` med `WWW-Authenticate: ... invalid_token ... The iss claim is not valid`.
 
 ## pgAdmin (dev/demo-værktøj)
 
-`tools/pgadmin.yaml` deployer pgAdmin 4 bag Ingress'en på `/pgadmin/` (kind: <http://localhost:8090/pgadmin/>,
+`tools/pgadmin.yaml` (via `overlays/dev-tools`) deployer pgAdmin 4 bag Ingress'en på `/pgadmin/` (kind: <http://localhost:8090/pgadmin/>,
 minikube: `http://<minikube ip>/pgadmin/`). Den kører i pgAdmins *desktop mode* (`PGADMIN_CONFIG_SERVER_MODE=False`),
 så der er ingen login-side: siden åbner direkte med de fem databaser klar. Netop derfor er det kun et dev/demo-værktøj:
 alle, der kan nå `/pgadmin`, har fuld adgang til databaserne.
@@ -285,10 +290,13 @@ svarer 503 på `/pgadmin/`, indtil podden er Ready (`kubectl -n airport get pods
 - pgAdmin serverer selv under præfikset `/pgadmin` (`SCRIPT_NAME`), så Ingress'en behøver ingen rewrite-regel,
   præcis som services' `GRAPHQL_PATH`.
 - pgAdmin er **ikke** en del af selve systemet (det står ikke i kravspec'en) og hører ikke hjemme i et
-  produktionscluster. Fjern linjen `tools/pgadmin.yaml` i `kustomization.yaml` for at deploye uden.
+  produktionscluster. Derfor er det et overlay: `kubectl apply -k k8s/` deployer systemet uden pgAdmin,
+  `kubectl apply -k k8s/overlays/dev-tools/` lægger `tools/` (pgAdmin + dets egen Ingress-regel `/pgadmin`) oven på
+  `base/`. Fjern det igen med `kubectl delete -k k8s/tools/`.
 - Tilstanden (registrerede servere, sessions) ligger i en `emptyDir` og genskabes ved hvert pod-start. Ændrer du
-  `servers.json` eller pgpass, så `kubectl apply -k k8s/` efterfulgt af `kubectl -n airport rollout restart deploy/pgadmin`.
-- Ændrer du brugernavn/kode i `databases/*-db.yaml`, skal `pgpass` og `servers.json` i `tools/pgadmin.yaml` følge med.
+  `servers.json` eller pgpass, så `kubectl apply -k k8s/overlays/dev-tools/` efterfulgt af
+  `kubectl -n airport rollout restart deploy/pgadmin`.
+- Ændrer du brugernavn/kode i `base/databases/*-db.yaml`, skal `pgpass` og `servers.json` i `tools/pgadmin.yaml` følge med.
 
 Demo-idé: lav en booking i frontenden og betal den. Se derefter rækken i `booking_db` (tabellerne `booking` og
 `passenger`), betalingen i `payment_db` (`payment`) og bagage-snapshottet i `baggage_db` (`booking_snapshot`).

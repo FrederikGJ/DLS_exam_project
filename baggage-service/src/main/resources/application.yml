@@ -30,6 +30,9 @@ spring:
           initial-interval: 500ms
           multiplier: 2.0
           max-interval: 3s
+  mvc:
+    problemdetails:
+      enabled: true               # REST errors as RFC 9457 application/problem+json (rest/RestExceptionHandler)
   graphql:
     path: ${GRAPHQL_PATH:/api/baggage/graphql}
     graphiql:

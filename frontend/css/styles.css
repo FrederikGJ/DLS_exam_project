@@ -212,3 +212,15 @@ svg .step-label { font-size: 12px; font-weight: 600; fill: #0f172a; font-family:
 svg .dist-label { font-size: 11px; font-weight: 600; fill: #1f5fbf; font-family: system-ui, sans-serif;
   paint-order: stroke; stroke: #fff; stroke-width: 3px; stroke-linejoin: round; pointer-events: none; }
 svg .nlabel.hint { fill: #7c3aed; font-size: 10px; }
+
+/* ---- Spørg om vej (AI) on the shops page */
+.ask-divider { display: flex; align-items: center; gap: 10px; margin: 14px 0 8px; color: var(--muted); font-size: .85rem; }
+.ask-divider::before, .ask-divider::after { content: ''; flex: 1; border-top: 1px solid var(--border); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.chip { border: 1px solid var(--border); background: #f8fafc; color: var(--text); border-radius: 999px; padding: 4px 10px; font-size: .82rem; cursor: pointer; }
+.chip:hover { background: #eef2f7; }
+.ai-answer { margin-top: 12px; border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: #fbfcfe; }
+.ai-answer .ai-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.ai-answer .alert { margin-bottom: 10px; }
+.ai-answer .ai-interpretation { margin: 0 0 10px; font-size: 1.02rem; }
+.ai-answer .shop-list { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }

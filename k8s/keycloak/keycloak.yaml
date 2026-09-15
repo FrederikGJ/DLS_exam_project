@@ -19,7 +19,7 @@
 #   URL in KC_HOSTNAME the proxy headers are not needed for URL generation; the only loss is that Keycloak's
 #   event log shows the ingress pod's IP instead of the client's, which is fine for a dev cluster.
 #   Details: k8s/README.md "Keycloak (login)". Another host/port (e.g. minikube): change KC_HOSTNAME here,
-#   OIDC_ISSUER_URI in services/*.yaml and KEYCLOAK_URL in frontend/frontend.yaml together.
+#   OIDC_ISSUER_URI in base/services/*.yaml and KEYCLOAK_URL in base/frontend/frontend.yaml together.
 # - Health endpoints live on the management port 9000 (KC_HEALTH_ENABLED); the management path is pinned to `/`
 #   so the probes do not move with KC_HTTP_RELATIVE_PATH.
 #

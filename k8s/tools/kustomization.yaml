@@ -1,0 +1,11 @@
+# Dev/demo tools that are NOT part of the airport system. Never applied on their own in practice - the overlay
+# k8s/overlays/dev-tools adds them on top of the base. (A kustomization of its own is needed because Kustomize
+# refuses to load files from outside the directory it is run in.)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: airport
+
+resources:
+  - pgadmin.yaml
+  - pgadmin-ingress.yaml

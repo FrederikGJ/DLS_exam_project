@@ -1,0 +1,11 @@
+# Base stack + dev/demo tools (pgAdmin at /pgadmin). Use instead of `kubectl apply -k k8s/` when you want the tools:
+#     kubectl apply -k k8s/overlays/dev-tools/
+# `kubectl apply -k k8s/` alone deploys the airport system without pgAdmin.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: airport
+
+resources:
+  - ../../base
+  - ../../tools

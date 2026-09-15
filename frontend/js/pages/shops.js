@@ -1,4 +1,6 @@
-// Butikker: list/search shops and navigate between locations (Dijkstra route + SVG map).
+// Butikker: list/search shops and navigate between locations (Dijkstra route + SVG map), plus "Spørg om vej":
+// a free-text question answered by shop-service's local language model (askRoute) and drawn with the same route
+// rendering and map as "Find rute".
 import { shopApi } from '../api.js';
 import { esc, badge, toast, showError, busy } from '../app.js';
 
@@ -8,6 +10,12 @@ const TYPE_LABEL = { SHOP: 'Butikker', GATE: 'Gates', SECURITY: 'Security', ENTR
 const TYPE_ORDER = ['ENTRANCE', 'SECURITY', 'GATE', 'SHOP', 'ELEVATOR', 'JUNCTION'];
 const TYPE_COLOR = { SHOP: '#f59e0b', GATE: '#1f5fbf', SECURITY: '#dc2626', ENTRANCE: '#16a34a', JUNCTION: '#94a3b8', ELEVATOR: '#7c3aed' };
 const ROUTE_COLOR = { start: '#16a34a', end: '#dc2626', mid: '#1f5fbf' };
+/** Example questions for "Spørg om vej" (clicking one fills the text field). */
+const ASK_EXAMPLES = [
+  'Hvor finder jeg en kop kaffe på vej til gate B12?',
+  'Jeg vil købe parfume inden jeg går til gate C21',
+  'Hvor kan jeg få noget at spise i terminal 1?',
+];
 
 export async function render(container, params) {
   container.innerHTML = `
@@ -29,6 +37,19 @@ export async function render(container, params) {
         <div class="auto"><button class="btn secondary" type="button" id="swap-btn" title="Byt om">⇄</button></div>
       </form>
       <p class="help">Tip: klik på et punkt på kortet for at vælge start og derefter destination.</p>
+
+      <div class="ask-divider">eller spørg med dine egne ord</div>
+      <form id="ask-form" class="row">
+        <div style="flex:3 1 280px"><label for="ask-q">Hvad leder du efter?</label>
+          <input id="ask-q" maxlength="500" autocomplete="off" required placeholder='fx "Hvor finder jeg en kop kaffe på vej til gate B12?"'></div>
+        <div class="auto"><button class="btn" type="submit" id="ask-btn">Spørg om vej</button></div>
+      </form>
+      <div class="chips" id="ask-examples" aria-label="Eksempler på spørgsmål">
+        ${ASK_EXAMPLES.map(q => `<button type="button" class="chip">${esc(q)}</button>`).join('')}
+      </div>
+      <p class="help">Spørgsmålet tolkes af en lokal sprogmodel (Ollama) ud fra <em>Hvor er jeg?</em> ovenfor, og ruten beregnes som ved <em>Find rute</em>.
+        Svarer modellen ikke, bruges en nøgleordssøgning i stedet.</p>
+      <div id="ask-answer" hidden></div>
 
       <div style="margin-top:12px">
         <div class="map-wrap">
@@ -71,11 +92,14 @@ export async function render(container, params) {
   const mapTextToggle = container.querySelector('#map-text');
   const routeHost = container.querySelector('#route-host');
   const shopList = container.querySelector('#shop-list');
+  const askInput = container.querySelector('#ask-q');
+  const askAnswer = container.querySelector('#ask-answer');
 
   let nodes = [];
   let edges = [];
   let shops = [];
   let route = null;
+  let routeSource = 'route';          // 'route' (Find rute) or 'ask' (Spørg om vej): what to redo on accessibility change
   let floor = 0;
 
   // ---- load nodes + walkway network (edges) + shops
@@ -99,7 +123,9 @@ export async function render(container, params) {
 
   if (params.from) fromSel.value = String(params.from);
   if (params.to) toSel.value = String(params.to);
+  if (params.q) askInput.value = String(params.q);
   if (params.from && params.to) findRoute();      // deep link #/shops?from=<id>&to=<id> shows the route directly
+  else if (params.from && params.q) askRoute();   // deep link #/shops?from=<id>&q=<question> asks straight away
 
   // ---- events
   container.querySelector('#route-form').addEventListener('submit', (e) => {
@@ -109,10 +135,22 @@ export async function render(container, params) {
   container.querySelector('#swap-btn').addEventListener('click', () => {
     const a = fromSel.value; fromSel.value = toSel.value; toSel.value = a;
   });
+  container.querySelector('#ask-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    busy(container.querySelector('#ask-btn'), askRoute);
+  });
+  container.querySelectorAll('#ask-examples .chip').forEach(b => b.addEventListener('click', () => {
+    askInput.value = b.textContent;
+    askInput.focus();
+  }));
   floorSel.addEventListener('change', () => { floor = Number(floorSel.value); drawMap(); });
   mapTextToggle.addEventListener('change', drawMap);
   container.querySelector('#shop-filter').addEventListener('submit', (e) => { e.preventDefault(); searchShops(); });
-  container.querySelector('#acc-only').addEventListener('change', () => { if (route) findRoute(); });
+  container.querySelector('#acc-only').addEventListener('change', () => {
+    if (!route) return;
+    if (routeSource === 'ask') busy(container.querySelector('#ask-btn'), askRoute);
+    else findRoute();
+  });
 
   // ------------------------------------------------------------ helpers
   function nodeLabel(n) { return `${n.terminal} · ${n.name}${n.floor ? ` (etage ${n.floor})` : ''}`; }
@@ -205,18 +243,71 @@ export async function render(container, params) {
     const accessibleOnly = container.querySelector('#acc-only').checked;
     routeHost.innerHTML = '<div class="empty"><span class="spinner"></span> Beregner rute…</div>';
     try {
-      route = await shopApi.route(from, to, accessibleOnly);
-      drawRoute();
-      // jump to the floor where the route starts
-      const startFloor = route.steps[0]?.node?.floor;
-      if (startFloor !== undefined && startFloor !== floor) { floor = startFloor; floorSel.value = String(floor); }
-      drawMap();
+      routeSource = 'route';
+      showRoute(await shopApi.route(from, to, accessibleOnly));
     } catch (err) {
       route = null;
       routeHost.innerHTML = `<div class="alert error">${esc(err.message)} <span class="mono small">(${esc(err.code)})</span></div>`;
       showError(err);
       drawMap();
     }
+  }
+
+  /** Renders a Route (from Find rute or Spørg om vej): step list + map, jumping to the floor where it starts. */
+  function showRoute(r) {
+    route = r;
+    drawRoute();
+    const startFloor = route.steps[0]?.node?.floor;
+    if (startFloor !== undefined && startFloor !== floor) { floor = startFloor; floorSel.value = String(floor); }
+    drawMap();
+  }
+
+  // ---- Spørg om vej: free text -> shop-service askRoute (local LLM, keyword fallback) -> same route rendering
+  async function askRoute() {
+    const question = askInput.value.trim();
+    const from = fromSel.value;
+    if (!question) { toast('Skriv hvad du leder efter', 'error'); askInput.focus(); return; }
+    if (!from) { toast('Vælg først hvor du er ("Hvor er jeg?")', 'error'); fromSel.focus(); fromSel.scrollIntoView({ behavior: 'smooth', block: 'center' }); return; }
+    const accessibleOnly = container.querySelector('#acc-only').checked;
+    askAnswer.hidden = false;
+    askAnswer.innerHTML = '<div class="empty"><span class="spinner"></span> Spørger sprogmodellen… (kan tage nogle sekunder)</div>';
+    const started = performance.now();
+    try {
+      const answer = await shopApi.askRoute(question, from, accessibleOnly);
+      drawAnswer(answer, ((performance.now() - started) / 1000).toFixed(1));
+      routeSource = 'ask';
+      if (answer.route && answer.shop) {
+        // the map marks fromSel/toSel as start/end: the end is the named destination, otherwise the shop itself
+        toSel.value = String((answer.toNode || answer.shop.node || {}).id ?? '');
+        showRoute(answer.route);
+      } else {
+        route = null;
+        routeHost.innerHTML = '<div class="empty">Ingen rute – prøv at omformulere spørgsmålet.</div>';
+        drawMap();
+      }
+    } catch (err) {
+      askAnswer.innerHTML = `<div class="alert error">${esc(err.message)} <span class="mono small">(${esc(err.code)})</span></div>`;
+      showError(err);
+    }
+  }
+
+  function drawAnswer(a, seconds) {
+    const source = a.aiUsed
+      ? `<span class="badge purple" title="Tolket af sprogmodellen ${esc(a.model || '')} (Ollama, kører lokalt)">AI · ${esc(a.model || 'model')}</span>`
+      : '<span class="badge gray" title="Sprogmodellen svarede ikke – nøgleordssøgning brugt i stedet">Nøgleordssøgning</span>';
+    const fallback = a.aiUsed ? '' : `<div class="alert warn">AI-modellen var ikke tilgængelig, så svaret er fundet med nøgleordssøgning.
+        <span class="mono small">${esc(a.fallbackReason || '')}</span></div>`;
+    const onward = a.toNode ? `<div class="small muted">Ruten fortsætter videre til <strong>${esc(a.toNode.name)}</strong>.</div>` : '';
+    const shop = a.shop
+      ? `<div class="shop-list">${shopCard(a.shop)}</div>`
+      : '<div class="alert info">Ingen butik matcher spørgsmålet – prøv at omformulere det.</div>';
+    askAnswer.innerHTML = `<div class="ai-answer">
+      <div class="ai-head">${source}<span class="muted small">svar på ${esc(seconds)} s</span></div>
+      ${fallback}
+      <p class="ai-interpretation">“${esc(a.interpretation)}”</p>
+      ${onward}${shop}
+    </div>`;
+    bindGoto(askAnswer);
   }
 
   function drawRoute() {

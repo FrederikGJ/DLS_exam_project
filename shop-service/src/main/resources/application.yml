@@ -66,6 +66,11 @@ app:
   cors:
     allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:8080}   # comma separated, see config/SecurityConfig
   timezone: ${APP_TIMEZONE:Europe/Copenhagen}
+  ai:                                   # local LLM behind askRoute (see ai/AiConciergeService); optional at runtime
+    enabled: ${AI_ENABLED:true}         # false = keyword fallback only, Ollama is never called
+    url: ${OLLAMA_URL:http://localhost:11434}
+    model: ${OLLAMA_MODEL:qwen2.5:1.5b} # must be present in the ollama image (ollama/Dockerfile)
+    timeout: ${AI_TIMEOUT_MS:15000}ms   # read timeout for one /api/chat call; then keyword fallback
   messaging:
     exchange: airport.events
     dead-letter-exchange: airport.events.dlx

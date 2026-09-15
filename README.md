@@ -28,7 +28,7 @@ Dokumentation: [docs/architecture.md](docs/architecture.md) (diagram, flows, des
 | Message broker      | RabbitMQ (Spring AMQP) – topic exchange `airport.events`              |
 | Containerisering    | Docker, multi-stage builds (maven → eclipse-temurin JRE)              |
 | Orkestrering        | Kubernetes (Kustomize), verificeret på kind – minikube-kommandoer i k8s/README.md |
-| Tests               | JUnit 5, Testcontainers (Postgres + RabbitMQ), Spring GraphQL Tester  |
+| Tests               | JUnit 5, Testcontainers (Postgres + RabbitMQ), Spring GraphQL Tester, WireMock (system-test) |
 
 ## Komponenter
 
@@ -164,6 +164,21 @@ cd shop-service    && mvn test
 | baggage-service | `BaggageRules` (3 stk., 32 kg), tag-format     | snapshot via events, register/limit, statusopdatering, RETURN_DESK ved aflysning |
 | shop-service    | `Dijkstra`, `OpeningHours`                     | rute Security T2 → Gate B12, accessibleOnly, søgning, CRUD, idempotens |
 
+### System-test (booking ↔ payment)
+
+`system-tests/` starter de byggede images af booking-service og payment-service sammen med RabbitMQ og PostgreSQL
+(Testcontainers) og verificerer samarbejdet udefra: createBooking → pay → `payment.completed` → CONFIRMED, afvist kort
+→ `payment.failed` → CANCELLED, og cancelBooking → `payment.refunded`. flight-service og Keycloaks JWKS-endpoint er
+WireMock-stubs; tokens udstedes af en testnøgle, som services'ne validerer ad præcis samme vej som mod Keycloak.
+Kræver byggede images og springes over, hvis de mangler. Kører på ca. 50 sekunder.
+
+```bash
+docker compose build
+cd system-tests && mvn verify        # -Pci for også Checkstyle + SpotBugs
+```
+
+Se [system-tests/README.md](system-tests/README.md).
+
 ### CI og statisk analyse
 
 GitHub Actions ([.github/workflows/ci.yml](.github/workflows/ci.yml)) kører ved hvert push og på pull requests
@@ -189,8 +204,8 @@ kubectl kustomize k8s/ | kubeconform -strict -summary
 
 Manifests ligger i `k8s/` (Kustomize): namespace `airport`, Deployment (1 replica, dimensioneret til en laptop – se
 [Ressourcer på en laptop](k8s/README.md#ressourcer-på-en-laptop)) + Service + ConfigMap + Secret pr. backend-service, StatefulSet + PVC + Service pr. database, RabbitMQ StatefulSet, frontend og én Ingress.
-Derudover pgAdmin som dev/demo-værktøj på `/pgadmin` (`k8s/tools/`, kan fjernes med én linje i `kustomization.yaml`);
-det er ikke en del af selve systemet.
+Selve systemet ligger i `k8s/base/` (`kubectl apply -k k8s/`); pgAdmin som dev/demo-værktøj på `/pgadmin` ligger i
+`k8s/tools/` og deployes kun med overlayet `kubectl apply -k k8s/overlays/dev-tools/` – det er ikke en del af selve systemet.
 
 Manifests er verificeret på et **kind**-cluster (13/13 pods Ready efter ca. 70 s på en laptop, alle flows grønne gennem Ingress). Kort version for
 minikube – se
@@ -221,7 +236,7 @@ Ingress-routing:
 | `/api/payments`         | payment-service  | `/api/payments/graphql` |
 | `/api/baggage`          | baggage-service  | `/api/baggage/graphql`  |
 | `/api/shops`            | shop-service     | `/api/shops/graphql`    |
-| `/pgadmin`              | pgadmin          | dev/demo: pgAdmin UI, åbner uden login |
+| `/pgadmin`              | pgadmin          | kun med overlayet `dev-tools`: pgAdmin UI, åbner uden login |
 
 I Kubernetes erstattes `frontend/js/config.js` af en ConfigMap med relative paths (`/api/.../graphql`),
 så frontend og API deler origin.
@@ -290,8 +305,9 @@ Alle services konfigureres via environment variables. Defaults i `application.ym
   baggage-service/         ... dk/airport/baggage/...
   shop-service/            ... dk/airport/shop/...
     (hver: src/main/resources/graphql/schema.graphqls, db/migration/V1__init.sql (+V2__seed.sql), src/test/java)
-  k8s/                     kustomization.yaml, namespace.yaml, rabbitmq/, databases/, services/, frontend/, keycloak/ (realm-airport.json), tools/ (pgAdmin), ingress.yaml
+  k8s/                     base/ (namespace, rabbitmq/, databases/, services/, frontend/, ingress.yaml), keycloak/ (realm-airport.json), tools/ (pgAdmin), overlays/dev-tools/
   scripts/e2e-smoke.sh     end-to-end smoke-test af Flow A-D mod en kørende compose-stak
+  system-tests/            system-test af booking ↔ payment med de byggede images (Testcontainers + WireMock)
 ```
 
 ## Designvalg og afvigelser

@@ -2,7 +2,8 @@
 # Each Spring service serves GraphQL at its own /api/<x>/graphql path (GRAPHQL_PATH), so no rewrite is needed.
 # /graphiql and /actuator of the services are deliberately not exposed.
 # /auth is Keycloak (login), which serves under that prefix itself (KC_HTTP_RELATIVE_PATH).
-# /pgadmin is the dev/demo database UI from k8s/tools/pgadmin.yaml (longest prefix wins over `/`).
+# /pgadmin (dev/demo database UI) is a separate Ingress in k8s/tools/pgadmin-ingress.yaml, only deployed by the
+# dev-tools overlay; ingress-nginx merges the rules of all Ingress objects, longest prefix wins over `/`.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -57,13 +58,6 @@ spec:
                 name: keycloak
                 port:
                   number: 8080
-          - path: /pgadmin
-            pathType: Prefix
-            backend:
-              service:
-                name: pgadmin
-                port:
-                  number: 80
           - path: /
             pathType: Prefix
             backend:

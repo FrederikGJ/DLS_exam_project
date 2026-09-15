@@ -1,5 +1,7 @@
 package dk.airport.shop.graphql;
 
+import dk.airport.shop.ai.AiConciergeService;
+import dk.airport.shop.ai.AiRouteAnswer;
 import dk.airport.shop.domain.*;
 import dk.airport.shop.graphql.input.ShopFilter;
 import dk.airport.shop.graphql.input.ShopInput;
@@ -7,6 +9,7 @@ import dk.airport.shop.service.RouteService;
 import dk.airport.shop.service.ShopService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
 import org.springframework.graphql.data.method.annotation.Argument;
 import org.springframework.graphql.data.method.annotation.MutationMapping;
 import org.springframework.graphql.data.method.annotation.QueryMapping;
@@ -23,10 +26,12 @@ public class ShopController {
 
     private final ShopService shopService;
     private final RouteService routeService;
+    private final AiConciergeService conciergeService;
 
-    public ShopController(ShopService shopService, RouteService routeService) {
+    public ShopController(ShopService shopService, RouteService routeService, AiConciergeService conciergeService) {
         this.shopService = shopService;
         this.routeService = routeService;
+        this.conciergeService = conciergeService;
     }
 
     // ---------------------------------------------------------- queries
@@ -59,6 +64,13 @@ public class ShopController {
     @QueryMapping
     public Route route(@Argument Long fromNodeId, @Argument Long toNodeId, @Argument Boolean accessibleOnly) {
         return routeService.route(fromNodeId, toNodeId, Boolean.TRUE.equals(accessibleOnly));
+    }
+
+    /** Public like the other reads: the question is free text (validated here), the answer never needs a login. */
+    @QueryMapping
+    public AiRouteAnswer askRoute(@Argument @NotBlank @Size(max = 500) String question, @Argument Long fromNodeId,
+                                  @Argument Boolean accessibleOnly) {
+        return conciergeService.askRoute(question, fromNodeId, Boolean.TRUE.equals(accessibleOnly));
     }
 
     // ---------------------------------------------------------- nested fields

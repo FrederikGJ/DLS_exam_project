@@ -68,7 +68,7 @@ public class RouteService {
         }
 
         int total = path.totalDistance();
-        int minutes = (int) Math.max(1, Math.ceil(total / METRES_PER_MINUTE));
+        int minutes = estimatedMinutes(total);
 
         Map<Long, List<Shop>> shopsByNode = shops.findByNodeIdIn(path.nodeIds()).stream()
                 .collect(Collectors.groupingBy(s -> s.getNode().getId()));
@@ -78,6 +78,40 @@ public class RouteService {
                 .toList();
 
         return new Route(steps, total, minutes, along);
+    }
+
+    /**
+     * Route with a stop-over: {@code from -> via -> to} as two Dijkstra legs joined into one Route. The via node
+     * appears once (its arrival step becomes a "Stop ved ..." instruction, the second leg's start step is dropped),
+     * distances are summed, the walking time is recomputed from the total and shops along both legs are listed once.
+     */
+    public Route routeVia(Long fromNodeId, Long viaNodeId, Long toNodeId, boolean accessibleOnly) {
+        Route first = route(fromNodeId, viaNodeId, accessibleOnly);
+        if (viaNodeId.equals(toNodeId)) {
+            return first;
+        }
+        Route second = route(viaNodeId, toNodeId, accessibleOnly);
+
+        List<RouteStep> steps = new ArrayList<>(first.steps());
+        RouteStep arrival = steps.remove(steps.size() - 1);
+        NavNode via = arrival.node();
+        NavNode to = second.steps().get(second.steps().size() - 1).node();
+        String stopOver = first.steps().size() == 1
+                ? "Start ved " + via.getName()
+                : "Stop ved " + via.getName() + ", fortsæt derefter mod " + to.getName();
+        steps.add(new RouteStep(via, stopOver, arrival.distance()));
+        steps.addAll(second.steps().subList(1, second.steps().size()));
+
+        int total = first.totalDistanceM() + second.totalDistanceM();
+        Map<Long, Shop> along = new LinkedHashMap<>();
+        first.shopsAlongRoute().forEach(s -> along.putIfAbsent(s.getId(), s));
+        second.shopsAlongRoute().forEach(s -> along.putIfAbsent(s.getId(), s));
+        return new Route(steps, total, estimatedMinutes(total), List.copyOf(along.values()));
+    }
+
+    /** Walking time at {@link #METRES_PER_MINUTE}, rounded up; at least one minute for any distance at all. */
+    static int estimatedMinutes(int totalMetres) {
+        return totalMetres == 0 ? 0 : (int) Math.max(1, Math.ceil(totalMetres / METRES_PER_MINUTE));
     }
 
     static String instruction(NavNode previous, NavNode node, Dijkstra.Edge used, boolean last) {

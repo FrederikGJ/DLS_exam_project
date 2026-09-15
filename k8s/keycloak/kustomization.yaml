@@ -1,0 +1,20 @@
+# Keycloak (login) - referenced from k8s/base/kustomization.yaml. Kept outside base/ because docker-compose.yml
+# mounts realm-airport.json from this directory, and Kustomize can only read files below its own directory:
+# the realm becomes the ConfigMap `keycloak-realm` here, from the very same file.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: airport
+
+resources:
+  - keycloak.yaml
+
+configMapGenerator:
+  - name: keycloak-realm
+    files:
+      - realm-airport.json
+    options:
+      disableNameSuffixHash: true
+      labels:
+        app.kubernetes.io/name: keycloak
+        app.kubernetes.io/part-of: airport

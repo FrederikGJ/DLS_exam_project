@@ -11,6 +11,7 @@
 #   15672 RabbitMQ management UI (airport / airport)
 #   8180  Keycloak (login): admin console http://localhost:8180/admin/ (admin / admin),
 #         realm `airport` with test users anna/anna (PASSENGER) and ops/ops (OPERATIONS)
+#   11434 Ollama (local LLM behind shop-service askRoute) - only with `docker compose --profile ai up`
 #   5433-5437 the five PostgreSQL instances (only for debugging with psql)
 #
 # Credentials below are DEV DEFAULTS ONLY. In Kubernetes they come from Secrets.
@@ -210,10 +211,39 @@ services:
       DB_URL: jdbc:postgresql://shop-db:5432/shop_db
       DB_USERNAME: shop
       DB_PASSWORD: shop
+      # askRoute ("Spørg om vej"): the local LLM lives in the `ollama` service below. Deliberately NO depends_on:
+      # shop-service starts and is healthy without it, and askRoute then answers with the keyword fallback
+      # (aiUsed=false + fallbackReason). Start the model with `docker compose --profile ai up`.
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_MODEL: qwen2.5:1.5b
     ports: ["8085:8080"]
     depends_on:
       shop-db: { condition: service_healthy }
       rabbitmq: { condition: service_healthy }
+
+  # ------------------------------------------------------------ AI (optional)
+  # Local LLM for shop-service's askRoute (dev plan DP-16). Only started with the `ai` profile:
+  #     docker compose --profile ai up -d --wait          (or: docker compose --profile ai up --build)
+  # The image (ollama/Dockerfile) has the model qwen2.5:1.5b baked in, so nothing is downloaded at start-up.
+  # Resources: CPU inference only - no GPU needed. Roughly 1.2 GB on disk, ~1.5 GB RAM while the model is loaded
+  # (it is unloaded again after OLLAMA_KEEP_ALIVE of idle time and reloaded in ~1-2 s on the next question),
+  # and 2-6 s per question on a laptop CPU with ~4 cores. One question at a time (OLLAMA_NUM_PARALLEL=1).
+  ollama:
+    build: ./ollama
+    image: airport/ollama:local
+    profiles: [ai]
+    restart: unless-stopped
+    environment:
+      OLLAMA_KEEP_ALIVE: 5m
+      OLLAMA_NUM_PARALLEL: "1"
+    ports: ["11434:11434"]
+    healthcheck:
+      # The image has no curl/wget; the ollama CLI talks to the server on localhost:11434 and lists the models.
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
 
   # -------------------------------------------------------------- frontend
   frontend:
