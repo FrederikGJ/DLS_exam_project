@@ -1,4 +1,5 @@
-// Entry point: hash router + shared UI helpers used by all pages.
+// Entry point: Keycloak login, hash router + shared UI helpers used by all pages.
+import { initAuth, isLoggedIn, login, logout, username, roles, onAuthChange } from './auth.js';
 import * as departures from './pages/departures.js';
 import * as book from './pages/book.js';
 import * as payment from './pages/payment.js';
@@ -15,6 +16,8 @@ const routes = {
   'shops': shops,
 };
 const DEFAULT_ROUTE = 'departures';
+/** Pages that need a logged-in user (their mutations require PASSENGER or OPERATIONS). Reads stay public. */
+const LOGIN_REQUIRED = new Set(['book', 'payment', 'baggage']);
 
 // ------------------------------------------------------------------ helpers
 export function esc(v) {
@@ -129,6 +132,12 @@ async function render() {
 
   const container = document.getElementById('app');
   const id = ++currentRender;
+  if (LOGIN_REQUIRED.has(path) && !isLoggedIn()) {
+    // Off to Keycloak; the login lands on exactly this URL (hash included) again.
+    container.innerHTML = '<div class="empty"><span class="spinner"></span> Denne side kræver login – sender dig til login…</div>';
+    login();
+    return;
+  }
   container.innerHTML = '<div class="empty"><span class="spinner"></span> Indlæser…</div>';
   try {
     await page.render(container, params);
@@ -139,6 +148,29 @@ async function render() {
   }
 }
 
-window.addEventListener('hashchange', render);
-// Module scripts run after the document is parsed, so the DOM is ready here.
-render();
+// ---------------------------------------------------------------- login UI
+function renderAuthNav() {
+  const host = document.getElementById('auth-nav');
+  if (!host) return;
+  if (isLoggedIn()) {
+    const roleBadges = roles().filter(r => r === 'PASSENGER' || r === 'OPERATIONS')
+      .map(r => `<span class="badge ${r === 'OPERATIONS' ? 'purple' : 'blue'}">${esc(r)}</span>`).join(' ');
+    host.innerHTML = `<span class="user" id="auth-user">${esc(username())} ${roleBadges}</span>
+      <button class="btn sm secondary" id="logout-btn" type="button">Log ud</button>`;
+    host.querySelector('#logout-btn').addEventListener('click', () => logout());
+  } else {
+    host.innerHTML = '<button class="btn sm" id="login-btn" type="button">Log ind</button>';
+    host.querySelector('#login-btn').addEventListener('click', () => login());
+  }
+}
+
+// Module scripts run after the document is parsed, so the DOM is ready here. The silent SSO check must finish
+// before the first render, otherwise a refreshed page would briefly look logged out.
+async function main() {
+  await initAuth();
+  renderAuthNav();
+  onAuthChange(renderAuthNav);
+  window.addEventListener('hashchange', render);
+  await render();
+}
+main();

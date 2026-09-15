@@ -15,6 +15,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.springframework.amqp.AmqpException;
@@ -24,10 +25,13 @@ import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.graphql.tester.AutoConfigureGraphQlTester;
+import org.springframework.boot.test.autoconfigure.graphql.tester.AutoConfigureHttpGraphQlTester;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.context.annotation.Import;
 import org.springframework.graphql.test.tester.GraphQlTester;
+import org.springframework.graphql.test.tester.HttpGraphQlTester;
+import org.springframework.http.HttpHeaders;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -53,9 +57,11 @@ import static org.mockito.Mockito.doThrow;
  * End-to-end test against real PostgreSQL + RabbitMQ (Testcontainers): Flyway migrations, GraphQL,
  * booking/flight event consumption (idempotent) and publishing of baggage.* events.
  * Steps build on each other, hence the explicit ordering.
+ * Requests go over HTTP through the security filter chain; mutations carry a test token from {@link TestTokens}.
  */
-@SpringBootTest
-@AutoConfigureGraphQlTester
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@AutoConfigureHttpGraphQlTester
+@Import(TestTokens.class)
 @Testcontainers
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class BaggageServiceIntegrationTest {
@@ -78,7 +84,11 @@ class BaggageServiceIntegrationTest {
     static SimpleMessageListenerContainer testListener;
     static String firstTag;
 
-    @Autowired GraphQlTester graphQlTester;
+    /** Anonymous client - enough for public queries. */
+    @Autowired HttpGraphQlTester graphQlTester;
+    /** Same client with a PASSENGER (anna) / OPERATIONS (ops) token. */
+    GraphQlTester asPassenger;
+    GraphQlTester asOperations;
     /** Spy so a single test can make the outbox relay's publish attempt fail (reset after every test). */
     @MockitoSpyBean RabbitTemplate rabbitTemplate;
     @Autowired ObjectMapper objectMapper;
@@ -115,6 +125,12 @@ class BaggageServiceIntegrationTest {
         if (testListener != null) {
             testListener.stop();
         }
+    }
+
+    @BeforeEach
+    void authenticatedClients() {
+        asPassenger = graphQlTester.mutate().header(HttpHeaders.AUTHORIZATION, TestTokens.passenger()).build();
+        asOperations = graphQlTester.mutate().header(HttpHeaders.AUTHORIZATION, TestTokens.operations()).build();
     }
 
     @Test
@@ -211,7 +227,7 @@ class BaggageServiceIntegrationTest {
     @Test
     @Order(6)
     void updateStatusPublishesStatusChanged() {
-        graphQlTester.document("mutation($tag: String!) { updateBaggageStatus(tagNumber: $tag, status: LOADED, "
+        asOperations.document("mutation($tag: String!) { updateBaggageStatus(tagNumber: $tag, status: LOADED, "
                         + "location: \"Belt 4\") { tagNumber status lastLocation } }")
                 .variable("tag", firstTag)
                 .execute()
@@ -225,7 +241,7 @@ class BaggageServiceIntegrationTest {
         assertThat(events.get(0).payload().path("location").asText()).isEqualTo("Belt 4");
         assertThat(events.get(0).payload().path("bookingReference").asText()).isEqualTo(REF);
 
-        graphQlTester.document(
+        asOperations.document(
                         "mutation { updateBaggageStatus(tagNumber: \"BAG-NOPE0000\", status: LOST) { tagNumber } }")
                 .execute()
                 .errors().satisfy(errors -> {
@@ -258,7 +274,7 @@ class BaggageServiceIntegrationTest {
     @Test
     @Order(8)
     void queriesReturnBaggage() {
-        graphQlTester.document("query($ref: String!) { baggageByBooking(reference: $ref) "
+        asPassenger.document("query($ref: String!) { baggageByBooking(reference: $ref) "
                         + "{ tagNumber status lastLocation type weightKg } }")
                 .variable("ref", REF)
                 .execute()
@@ -334,7 +350,7 @@ class BaggageServiceIntegrationTest {
     // ------------------------------------------------------------------ helpers
 
     private GraphQlTester.Response register(String ref, String weight, String type) {
-        return graphQlTester.document("""
+        return asPassenger.document("""
                 mutation($ref: String!, $w: BigDecimal!, $t: BaggageType!) {
                   registerBaggage(bookingReference: $ref, weightKg: $w, type: $t) {
                     id tagNumber bookingReference passengerName flightNumber weightKg type status lastLocation updatedAt

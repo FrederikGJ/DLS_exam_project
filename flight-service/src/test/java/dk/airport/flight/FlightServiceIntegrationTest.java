@@ -10,6 +10,7 @@ import dk.airport.flight.repository.SeatRepository;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.core.*;
@@ -18,10 +19,13 @@ import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.graphql.tester.AutoConfigureGraphQlTester;
+import org.springframework.boot.test.autoconfigure.graphql.tester.AutoConfigureHttpGraphQlTester;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.context.annotation.Import;
 import org.springframework.graphql.test.tester.GraphQlTester;
+import org.springframework.graphql.test.tester.HttpGraphQlTester;
+import org.springframework.http.HttpHeaders;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -48,10 +52,12 @@ import static org.mockito.Mockito.doThrow;
 /**
  * End-to-end test against real PostgreSQL + RabbitMQ (Testcontainers):
  * Flyway migrations + seed, GraphQL queries/mutations, event publishing through the transactional outbox
- * and idempotent consumption.
+ * and idempotent consumption. Requests go over HTTP through the security filter chain; mutations are sent with
+ * a test token from {@link TestTokens} (queries need none).
  */
-@SpringBootTest
-@AutoConfigureGraphQlTester
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@AutoConfigureHttpGraphQlTester
+@Import(TestTokens.class)
 @Testcontainers
 class FlightServiceIntegrationTest {
 
@@ -65,7 +71,10 @@ class FlightServiceIntegrationTest {
 
     static final String TEST_QUEUE = "test.flight-events";
 
-    @Autowired GraphQlTester graphQlTester;
+    /** Anonymous client - enough for every query. */
+    @Autowired HttpGraphQlTester graphQlTester;
+    /** Same client with an OPERATIONS token - mutations require that role. */
+    GraphQlTester asOperations;
     /** Spy so a single test can make the outbox relay's publish attempt fail (reset after every test). */
     @MockitoSpyBean RabbitTemplate rabbitTemplate;
     @Autowired ConnectionFactory connectionFactory;
@@ -106,6 +115,11 @@ class FlightServiceIntegrationTest {
         if (testListener != null) {
             testListener.stop();
         }
+    }
+
+    @BeforeEach
+    void authenticatedClients() {
+        asOperations = graphQlTester.mutate().header(HttpHeaders.AUTHORIZATION, TestTokens.operations()).build();
     }
 
     @Test
@@ -190,7 +204,7 @@ class FlightServiceIntegrationTest {
         Long flightId = graphQlTester.document("{ flights(filter: { destination: \"HEL\" }) { id } }")
                 .execute().path("flights[0].id").entity(Long.class).get();
 
-        graphQlTester.document(
+        asOperations.document(
                         "mutation($id: ID!) { updateFlightStatus(flightId: $id, status: CANCELLED) { id status } }")
                 .variable("id", flightId)
                 .execute()
@@ -208,7 +222,7 @@ class FlightServiceIntegrationTest {
         assertThat(cancelled.payload().get("flightNumber").asText()).isEqualTo("DY1050");
 
         // second cancel is an INVALID_STATE error
-        graphQlTester.document("mutation($id: ID!) { updateFlightStatus(flightId: $id, status: CANCELLED) { id } }")
+        asOperations.document("mutation($id: ID!) { updateFlightStatus(flightId: $id, status: CANCELLED) { id } }")
                 .variable("id", flightId)
                 .execute()
                 .errors().satisfy(errors -> {
@@ -220,7 +234,7 @@ class FlightServiceIntegrationTest {
     @Test
     void createFlightGeneratesSeatsAndPublishesEvent() throws Exception {
         OffsetDateTime dep = OffsetDateTime.now().plusDays(3).withNano(0);
-        graphQlTester.document("""
+        asOperations.document("""
                 mutation($dep: DateTime!, $arr: DateTime!) {
                   createFlight(input: { flightNumber: "SK9999", airlineId: 1, aircraftId: 5, origin: "CPH",
                                         destination: "AAL", scheduledDeparture: $dep, scheduledArrival: $arr,

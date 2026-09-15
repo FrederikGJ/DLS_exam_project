@@ -7,16 +7,20 @@ import dk.airport.shop.messaging.OutboxEvent;
 import dk.airport.shop.messaging.OutboxEventRepository;
 import dk.airport.shop.messaging.ProcessedEventRepository;
 import io.micrometer.core.instrument.MeterRegistry;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.graphql.tester.AutoConfigureGraphQlTester;
+import org.springframework.boot.test.autoconfigure.graphql.tester.AutoConfigureHttpGraphQlTester;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.context.annotation.Import;
 import org.springframework.graphql.test.tester.GraphQlTester;
+import org.springframework.graphql.test.tester.HttpGraphQlTester;
+import org.springframework.http.HttpHeaders;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -39,9 +43,11 @@ import static org.mockito.Mockito.doThrow;
 /**
  * End-to-end test against real PostgreSQL + RabbitMQ (Testcontainers):
  * Flyway seed, shop queries/mutations, Dijkstra routing via GraphQL and idempotent event consumption.
+ * Requests go over HTTP through the security filter chain; mutations carry a test token from {@link TestTokens}.
  */
-@SpringBootTest
-@AutoConfigureGraphQlTester
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@AutoConfigureHttpGraphQlTester
+@Import(TestTokens.class)
 @Testcontainers
 class ShopServiceIntegrationTest {
 
@@ -53,7 +59,11 @@ class ShopServiceIntegrationTest {
     @ServiceConnection
     static final RabbitMQContainer rabbit = new RabbitMQContainer("rabbitmq:3.13-management-alpine");
 
-    @Autowired GraphQlTester graphQlTester;
+    /** Anonymous client - enough for public queries. */
+    @Autowired HttpGraphQlTester graphQlTester;
+    /** Same client with a PASSENGER (anna) / OPERATIONS (ops) token. */
+    GraphQlTester asPassenger;
+    GraphQlTester asOperations;
     /** Spy so a single test can make the outbox relay's publish attempt fail (reset after every test). */
     @MockitoSpyBean RabbitTemplate rabbitTemplate;
     @Autowired ObjectMapper objectMapper;
@@ -62,6 +72,12 @@ class ShopServiceIntegrationTest {
     @Autowired EventPublisher eventPublisher;
     @Autowired TransactionTemplate transactionTemplate;
     @Autowired MeterRegistry meterRegistry;
+
+    @BeforeEach
+    void authenticatedClients() {
+        asPassenger = graphQlTester.mutate().header(HttpHeaders.AUTHORIZATION, TestTokens.passenger()).build();
+        asOperations = graphQlTester.mutate().header(HttpHeaders.AUTHORIZATION, TestTokens.operations()).build();
+    }
 
     @Test
     void seedDataIsLoadedByFlyway() {
@@ -181,7 +197,7 @@ class ShopServiceIntegrationTest {
     @Test
     void createReadDeleteShop() {
         long nodeId = nodeId("Junction T1 North");
-        Long shopId = graphQlTester.document("""
+        Long shopId = asOperations.document("""
                 mutation($nodeId: ID!) {
                   createShop(input: { name: "Test Kiosk", category: RETAIL, terminal: "T1", zone: "Pier A",
                                       floor: 0, openingHours: "08:00-20:00", description: "test", nodeId: $nodeId }) {
@@ -197,7 +213,7 @@ class ShopServiceIntegrationTest {
                 .variable("id", shopId).execute()
                 .path("shop.name").entity(String.class).isEqualTo("Test Kiosk");
 
-        graphQlTester.document("""
+        asOperations.document("""
                 mutation($id: ID!) {
                   updateShop(id: $id, input: { name: "Test Kiosk 2", category: FOOD, terminal: "T1", zone: "Pier A",
                                                floor: 0, openingHours: "24/7" }) { name category node { id } }
@@ -206,7 +222,7 @@ class ShopServiceIntegrationTest {
                 .path("updateShop.name").entity(String.class).isEqualTo("Test Kiosk 2")
                 .path("updateShop.node").valueIsNull();
 
-        graphQlTester.document("mutation($id: ID!) { deleteShop(id: $id) }")
+        asOperations.document("mutation($id: ID!) { deleteShop(id: $id) }")
                 .variable("id", shopId).execute()
                 .path("deleteShop").entity(Boolean.class).isEqualTo(true);
 
@@ -214,7 +230,7 @@ class ShopServiceIntegrationTest {
                 .variable("id", shopId).execute()
                 .path("shop").valueIsNull();
 
-        graphQlTester.document("mutation($id: ID!) { deleteShop(id: $id) }")
+        asOperations.document("mutation($id: ID!) { deleteShop(id: $id) }")
                 .variable("id", shopId).execute()
                 .errors().satisfy(errors ->
                         assertThat(errors.get(0).getExtensions()).containsEntry("code", "NOT_FOUND"));
@@ -222,7 +238,7 @@ class ShopServiceIntegrationTest {
 
     @Test
     void validationErrorsAreReportedWithCode() {
-        graphQlTester.document("""
+        asOperations.document("""
                 mutation {
                   createShop(input: { name: "", category: RETAIL, terminal: "T1", zone: "Z", floor: 0,
                                       openingHours: "8-20" }) { id }

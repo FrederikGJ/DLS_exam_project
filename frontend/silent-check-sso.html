@@ -1,0 +1,9 @@
+<!DOCTYPE html>
+<html lang="da">
+<head><meta charset="utf-8"><title>silent check-sso</title></head>
+<body>
+  <!-- Loaded by keycloak-js in a hidden iframe (onLoad: 'check-sso'): Keycloak redirects here with the result and
+       this page hands the URL back to the app, so an existing login survives a page refresh without a redirect. -->
+  <script>parent.postMessage(location.href, location.origin);</script>
+</body>
+</html>

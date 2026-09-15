@@ -12,6 +12,12 @@ import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.graphql.execution.DataFetcherExceptionResolverAdapter;
 import org.springframework.graphql.execution.ErrorType;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.authentication.AuthenticationTrustResolver;
+import org.springframework.security.authentication.AuthenticationTrustResolverImpl;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.AuthenticationException;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Component;
 import org.springframework.validation.BindException;
 
@@ -26,11 +32,25 @@ import java.util.stream.Collectors;
 public class GraphQlExceptionResolver extends DataFetcherExceptionResolverAdapter {
 
     private static final Logger log = LoggerFactory.getLogger(GraphQlExceptionResolver.class);
+    private static final AuthenticationTrustResolver TRUST_RESOLVER = new AuthenticationTrustResolverImpl();
+
+    public GraphQlExceptionResolver() {
+        setThreadLocalContextAware(true);   // makes the SecurityContext visible here (see isAnonymous)
+    }
 
     @Override
     protected GraphQLError resolveToSingleError(Throwable ex, DataFetchingEnvironment env) {
         if (ex instanceof ApiException api) {
             return error(env, api.getCode(), api.getMessage());
+        }
+        // @PreAuthorize on a controller method: anonymous caller -> UNAUTHORIZED, wrong role -> FORBIDDEN
+        if (ex instanceof AccessDeniedException) {
+            return isAnonymous()
+                    ? error(env, ErrorCode.UNAUTHORIZED, "Authentication required: send a Bearer token")
+                    : error(env, ErrorCode.FORBIDDEN, "Your role does not allow this operation");
+        }
+        if (ex instanceof AuthenticationException) {
+            return error(env, ErrorCode.UNAUTHORIZED, "Authentication required: send a Bearer token");
         }
         if (ex instanceof ConstraintViolationException cve) {
             String msg = cve.getConstraintViolations().stream()
@@ -55,6 +75,11 @@ public class GraphQlExceptionResolver extends DataFetcherExceptionResolverAdapte
         return error(env, ErrorCode.INTERNAL_ERROR, "Unexpected error");
     }
 
+    private static boolean isAnonymous() {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        return auth == null || TRUST_RESOLVER.isAnonymous(auth);
+    }
+
     private static String lastPathSegment(ConstraintViolation<?> v) {
         String path = v.getPropertyPath().toString();
         int idx = path.lastIndexOf('.');
@@ -72,6 +97,8 @@ public class GraphQlExceptionResolver extends DataFetcherExceptionResolverAdapte
     private static ErrorType classify(ErrorCode code) {
         return switch (code) {
             case NOT_FOUND -> ErrorType.NOT_FOUND;
+            case UNAUTHORIZED -> ErrorType.UNAUTHORIZED;
+            case FORBIDDEN -> ErrorType.FORBIDDEN;
             case INTERNAL_ERROR -> ErrorType.INTERNAL_ERROR;
             default -> ErrorType.BAD_REQUEST;
         };

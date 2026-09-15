@@ -21,10 +21,13 @@ import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.graphql.tester.AutoConfigureGraphQlTester;
+import org.springframework.boot.test.autoconfigure.graphql.tester.AutoConfigureHttpGraphQlTester;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.context.annotation.Import;
 import org.springframework.graphql.test.tester.GraphQlTester;
+import org.springframework.graphql.test.tester.HttpGraphQlTester;
+import org.springframework.http.HttpHeaders;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -52,9 +55,11 @@ import static org.mockito.Mockito.when;
 
 /**
  * End-to-end test against real PostgreSQL + RabbitMQ (Testcontainers). flight-service is mocked.
+ * Requests go over HTTP through the security filter chain; mutations carry a test token from {@link TestTokens}.
  */
-@SpringBootTest
-@AutoConfigureGraphQlTester
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@AutoConfigureHttpGraphQlTester
+@Import(TestTokens.class)
 @Testcontainers
 class BookingServiceIntegrationTest {
 
@@ -74,7 +79,11 @@ class BookingServiceIntegrationTest {
     static final List<EventEnvelope> RECEIVED = new CopyOnWriteArrayList<>();
     static SimpleMessageListenerContainer testListener;
 
-    @Autowired GraphQlTester graphQlTester;
+    /** Anonymous client - enough for public queries. */
+    @Autowired HttpGraphQlTester graphQlTester;
+    /** Same client with a PASSENGER (anna) / OPERATIONS (ops) token. */
+    GraphQlTester asPassenger;
+    GraphQlTester asOperations;
     /** Spy so a single test can make the outbox relay's publish attempt fail (reset after every test). */
     @MockitoSpyBean RabbitTemplate rabbitTemplate;
     @Autowired ObjectMapper objectMapper;
@@ -114,6 +123,12 @@ class BookingServiceIntegrationTest {
     }
 
     @BeforeEach
+    void authenticatedClients() {
+        asPassenger = graphQlTester.mutate().header(HttpHeaders.AUTHORIZATION, TestTokens.passenger()).build();
+        asOperations = graphQlTester.mutate().header(HttpHeaders.AUTHORIZATION, TestTokens.operations()).build();
+    }
+
+    @BeforeEach
     void mockFlightService() {
         when(flightClient.fetchFlightSeat(anyLong(), any())).thenAnswer(inv -> new FlightSeatInfo(
                 inv.getArgument(0), "SK1501", DEPARTURE, "A12", "SCHEDULED", "DKK",
@@ -123,7 +138,7 @@ class BookingServiceIntegrationTest {
     @Test
     void fullBookingLifecycle() throws Exception {
         // 1. createBooking -> PENDING_PAYMENT + booking.created
-        String reference = graphQlTester.document("""
+        String reference = asPassenger.document("""
                 mutation {
                   createBooking(flightId: 1, seatNumber: "12C", passenger: {
                     firstName: "Anna", lastName: "Jensen", email: "anna@example.com",
@@ -149,7 +164,7 @@ class BookingServiceIntegrationTest {
         assertThat(created.get(0).payload().get("price").decimalValue()).isEqualByComparingTo("899.00");
 
         // 2. same seat again -> SEAT_TAKEN
-        graphQlTester.document("""
+        asPassenger.document("""
                 mutation {
                   createBooking(flightId: 1, seatNumber: "12c", passenger: {
                     firstName: "Bo", lastName: "Hansen", email: "bo@example.com", passportNumber: "P7654321" }) { id }
@@ -178,7 +193,7 @@ class BookingServiceIntegrationTest {
         assertThat(RECEIVED.stream().filter(forRef(reference, "booking.confirmed")).count()).isEqualTo(1);
 
         // 4. checkIn -> CHECKED_IN + booking.checkedin
-        graphQlTester.document("mutation($ref: String!) { checkIn(reference: $ref) { status } }")
+        asPassenger.document("mutation($ref: String!) { checkIn(reference: $ref) { status } }")
                 .variable("ref", reference)
                 .execute()
                 .path("checkIn.status").entity(String.class).isEqualTo("CHECKED_IN");
@@ -224,7 +239,7 @@ class BookingServiceIntegrationTest {
                 .isEqualTo("CANCELLED");
 
         // 8. seat is free again after cancellation
-        graphQlTester.document("""
+        asPassenger.document("""
                 mutation {
                   createBooking(flightId: 1, seatNumber: "12C", passenger: {
                     firstName: "Bo", lastName: "Hansen", email: "bo@example.com", passportNumber: "P7654321"
@@ -236,7 +251,7 @@ class BookingServiceIntegrationTest {
 
     @Test
     void paymentFailedCancelsPendingBooking() {
-        String reference = graphQlTester.document("""
+        String reference = asPassenger.document("""
                 mutation {
                   createBooking(flightId: 2, seatNumber: "3A", passenger: {
                     firstName: "Carl", lastName: "Nielsen", email: "carl@example.com", passportNumber: "P0000001"
@@ -257,7 +272,7 @@ class BookingServiceIntegrationTest {
 
     @Test
     void cancelByPassengerAndBookingsByPassenger() {
-        String reference = graphQlTester.document("""
+        String reference = asPassenger.document("""
                 mutation {
                   createBooking(flightId: 3, seatNumber: "7F", passenger: {
                     firstName: "Dina", lastName: "Olsen", email: "Dina@Example.com", passportNumber: "P5555555"
@@ -265,18 +280,21 @@ class BookingServiceIntegrationTest {
                 }""")
                 .execute().path("createBooking.bookingReference").entity(String.class).get();
 
-        graphQlTester.document("query { bookingsByPassenger(email: \"dina@example.com\") { bookingReference } }")
+        // a passenger sees their own bookings (e-mail from the token, compared case-insensitively)
+        GraphQlTester asDina = graphQlTester.mutate()
+                .header(HttpHeaders.AUTHORIZATION, TestTokens.bearer("dina", "Dina@Example.com", "PASSENGER")).build();
+        asDina.document("query { bookingsByPassenger(email: \"dina@example.com\") { bookingReference } }")
                 .execute()
                 .path("bookingsByPassenger[*].bookingReference").entityList(String.class).contains(reference);
 
-        graphQlTester.document("mutation($ref: String!) { cancelBooking(reference: $ref) { status } }")
+        asPassenger.document("mutation($ref: String!) { cancelBooking(reference: $ref) { status } }")
                 .variable("ref", reference)
                 .execute()
                 .path("cancelBooking.status").entity(String.class).isEqualTo("CANCELLED");
         List<EventEnvelope> cancelled = awaitEvents(forRef(reference, "booking.cancelled"), 1);
         assertThat(cancelled.get(0).payload().get("reason").asText()).isEqualTo("Cancelled by passenger");
 
-        graphQlTester.document("mutation($ref: String!) { cancelBooking(reference: $ref) { status } }")
+        asPassenger.document("mutation($ref: String!) { cancelBooking(reference: $ref) { status } }")
                 .variable("ref", reference)
                 .execute()
                 .errors().satisfy(errors ->
@@ -285,7 +303,7 @@ class BookingServiceIntegrationTest {
 
     @Test
     void validationErrorsAreReportedWithCode() {
-        graphQlTester.document("""
+        asPassenger.document("""
                 mutation {
                   createBooking(flightId: 1, seatNumber: "1A", passenger: {
                     firstName: "", lastName: "X", email: "not-an-email", passportNumber: "ab" }) { id }
@@ -301,7 +319,7 @@ class BookingServiceIntegrationTest {
 
     @Test
     void unknownReferenceGivesNotFound() {
-        graphQlTester.document("mutation { checkIn(reference: \"ZZZZZZ\") { id } }")
+        asPassenger.document("mutation { checkIn(reference: \"ZZZZZZ\") { id } }")
                 .execute()
                 .errors().satisfy(errors -> {
                     assertThat(errors).hasSize(1);

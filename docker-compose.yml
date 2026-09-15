@@ -24,6 +24,10 @@ x-service-defaults: &service-defaults
     RABBITMQ_USERNAME: airport
     RABBITMQ_PASSWORD: airport
     CORS_ALLOWED_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
+    # JWT validation (see the keycloak service): issuer = the browser-facing URL tokens are issued for,
+    # JWKS = where this container fetches the signing keys. Read queries need no token.
+    OIDC_ISSUER_URI: http://localhost:8180/realms/airport
+    JWK_SET_URI: http://keycloak:8080/realms/airport/protocol/openid-connect/certs
     JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=75.0 -XX:TieredStopAtLevel=1 -XX:+UseSerialGC -Xss512k
   healthcheck:
     test: ["CMD", "wget", "-qO-", "http://localhost:8080/actuator/health/readiness"]

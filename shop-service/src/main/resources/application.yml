@@ -35,11 +35,15 @@ spring:
     graphiql:
       enabled: true
       path: /graphiql
-    cors:
-      allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:8080}
-      allowed-methods: GET,POST,OPTIONS
-      allowed-headers: "*"
-      max-age: 3600
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Keycloak (see k8s/README.md "Keycloak (login)"): a token is accepted when its signature matches a key
+          # from JWK_SET_URI (an address the service can reach) and its `iss` claim equals OIDC_ISSUER_URI (the
+          # browser-facing address the token was issued for). Both are set, so Spring never calls OIDC discovery.
+          issuer-uri: ${OIDC_ISSUER_URI:http://localhost:8180/realms/airport}
+          jwk-set-uri: ${JWK_SET_URI:http://localhost:8180/realms/airport/protocol/openid-connect/certs}
 
 server:
   port: ${SERVER_PORT:8080}
@@ -59,6 +63,8 @@ management:
           include: readinessState,db,rabbit
 
 app:
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:8080}   # comma separated, see config/SecurityConfig
   timezone: ${APP_TIMEZONE:Europe/Copenhagen}
   messaging:
     exchange: airport.events

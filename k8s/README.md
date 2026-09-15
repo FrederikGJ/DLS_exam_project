@@ -108,8 +108,12 @@ BOOKING_URL=http://localhost:8090/api/bookings/graphql \
 PAYMENT_URL=http://localhost:8090/api/payments/graphql \
 BAGGAGE_URL=http://localhost:8090/api/baggage/graphql \
 SHOP_URL=http://localhost:8090/api/shops/graphql \
+KEYCLOAK_URL=http://localhost:8090/auth \
 scripts/e2e-smoke.sh
 ```
+
+`KEYCLOAK_URL` er Keycloaks browser-vendte adresse bag Ingress'en; scriptet henter tokens for `anna` og `ops` der
+(se *Keycloak (login)* nedenfor).
 
 Ryd op med `kind delete cluster --name airport`.
 

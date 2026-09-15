@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------------
-// Service URLs - the ONLY place the frontend knows where the backends live.
+// Service URLs + Keycloak - the ONLY place the frontend knows where the backends live.
 //
 // Local docker-compose: the services are published on localhost:8081-8085 and
 // allow CORS from http://localhost:8080 (the nginx frontend).
@@ -15,5 +15,10 @@ window.AIRPORT_CONFIG = {
   BOOKING_URL: 'http://localhost:8082/api/bookings/graphql',
   PAYMENT_URL: 'http://localhost:8083/api/payments/graphql',
   BAGGAGE_URL: 'http://localhost:8084/api/baggage/graphql',
-  SHOP_URL:    'http://localhost:8085/api/shops/graphql'
+  SHOP_URL:    'http://localhost:8085/api/shops/graphql',
+  // Keycloak (login) - the browser-facing base URL. Realm and client are defined in
+  // k8s/keycloak/realm-airport.json; in Kubernetes the ConfigMap sets KEYCLOAK_URL to <origin>/auth.
+  KEYCLOAK_URL: 'http://localhost:8180',
+  KEYCLOAK_REALM: 'airport',
+  KEYCLOAK_CLIENT_ID: 'airport-frontend'
 };

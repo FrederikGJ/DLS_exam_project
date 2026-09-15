@@ -9,6 +9,7 @@ import jakarta.validation.constraints.*;
 import org.springframework.graphql.data.method.annotation.Argument;
 import org.springframework.graphql.data.method.annotation.MutationMapping;
 import org.springframework.graphql.data.method.annotation.QueryMapping;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.stereotype.Controller;
 import org.springframework.validation.annotation.Validated;
 
@@ -33,6 +34,7 @@ public class BaggageController {
     }
 
     @QueryMapping
+    @PreAuthorize("hasAnyRole('PASSENGER', 'OPERATIONS')")
     public List<Baggage> baggageByBooking(@Argument @NotBlank String reference) {
         return baggageService.byBooking(reference);
     }
@@ -50,6 +52,7 @@ public class BaggageController {
     // ---------------------------------------------------------- mutations
 
     @MutationMapping
+    @PreAuthorize("hasAnyRole('PASSENGER', 'OPERATIONS')")
     public Baggage registerBaggage(
             @Argument @NotBlank
             @Pattern(regexp = "^[A-Za-z0-9]{6}$", message = "bookingReference must be 6 alphanumeric characters")
@@ -61,6 +64,7 @@ public class BaggageController {
     }
 
     @MutationMapping
+    @PreAuthorize("hasRole('OPERATIONS')")
     public Baggage updateBaggageStatus(@Argument @NotBlank String tagNumber,
                                        @Argument @NotNull BaggageStatus status,
                                        @Argument @Size(max = 100) String location) {

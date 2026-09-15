@@ -9,7 +9,7 @@ import js from '@eslint/js';
 import globals from 'globals';
 
 export default [
-  { ignores: ['node_modules/'] },
+  { ignores: ['node_modules/', 'js/vendor/'] },   // vendor: keycloak-js as published, not our style
   js.configs.recommended,
   {
     files: ['js/**/*.js'],

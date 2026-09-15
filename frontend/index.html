@@ -22,6 +22,7 @@
         <a href="#/baggage" data-route="baggage">Bagage</a>
         <a href="#/shops" data-route="shops">Butikker</a>
       </nav>
+      <div class="auth" id="auth-nav" aria-live="polite"></div>
     </div>
   </header>
 
@@ -35,7 +36,8 @@
 
   <div id="toasts" class="toasts" aria-live="assertive"></div>
 
-  <!-- config.js must be a classic script and load before the module -->
+  <!-- config.js must be a classic script and load before the module. app.js imports js/auth.js, which imports the
+       vendored keycloak-js (js/vendor/keycloak.js), so the login adapter is loaded before the app starts. -->
   <script src="js/config.js"></script>
   <script type="module" src="js/app.js"></script>
 </body>

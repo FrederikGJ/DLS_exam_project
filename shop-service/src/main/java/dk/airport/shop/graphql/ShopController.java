@@ -11,6 +11,7 @@ import org.springframework.graphql.data.method.annotation.Argument;
 import org.springframework.graphql.data.method.annotation.MutationMapping;
 import org.springframework.graphql.data.method.annotation.QueryMapping;
 import org.springframework.graphql.data.method.annotation.SchemaMapping;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.stereotype.Controller;
 import org.springframework.validation.annotation.Validated;
 
@@ -85,16 +86,19 @@ public class ShopController {
     // ---------------------------------------------------------- mutations
 
     @MutationMapping
+    @PreAuthorize("hasRole('OPERATIONS')")
     public Shop createShop(@Argument @Valid ShopInput input) {
         return shopService.createShop(input);
     }
 
     @MutationMapping
+    @PreAuthorize("hasRole('OPERATIONS')")
     public Shop updateShop(@Argument Long id, @Argument @Valid ShopInput input) {
         return shopService.updateShop(id, input);
     }
 
     @MutationMapping
+    @PreAuthorize("hasRole('OPERATIONS')")
     public boolean deleteShop(@Argument Long id) {
         return shopService.deleteShop(id);
     }

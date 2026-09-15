@@ -70,7 +70,10 @@ Skema og seed-data styres af Flyway (`V1__init.sql`, `V2__seed.sql`, `V{n}__outb
 
 Alle fejl returneres i `errors[].extensions.code` med en af koderne
 `NOT_FOUND`, `VALIDATION_ERROR`, `INVALID_STATE`, `SEAT_TAKEN`, `UPSTREAM_UNAVAILABLE`, `ALREADY_PAID`,
-`BAGGAGE_LIMIT_EXCEEDED`, `ROUTE_NOT_FOUND`, `CONFLICT`, `INTERNAL_ERROR`, `PAYMENT_FAILED`.
+`BAGGAGE_LIMIT_EXCEEDED`, `ROUTE_NOT_FOUND`, `CONFLICT`, `INTERNAL_ERROR`, `PAYMENT_FAILED`,
+`UNAUTHORIZED` (operationen kræver login, men der var intet gyldigt Bearer-token) og `FORBIDDEN` (logget ind, men
+rollen tillader ikke operationen – fx `PASSENGER` der kalder `updateFlightStatus`). Et token, der er udløbet eller
+har forkert `iss`, afvises med HTTP 401 allerede inden GraphQL.
 `PAYMENT_FAILED` er defineret, men kastes ikke: `pay` returnerer et `Payment` med `status: FAILED` og `failureReason`
 i stedet for en GraphQL-fejl (se designvalg nedenfor).
 Bean Validation-fejl (`ConstraintViolationException`) mappes til `VALIDATION_ERROR` med feltnavne i beskeden.

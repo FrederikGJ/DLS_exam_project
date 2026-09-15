@@ -1,5 +1,6 @@
 // Book: choose flight -> passenger details -> seat map -> createBooking (PENDING_PAYMENT) -> payment page.
 import { flightApi, bookingApi } from '../api.js';
+import { email } from '../auth.js';
 import { esc, formatDateTime, formatMoney, badge, toast, showError, busy, navigate, state, qs } from '../app.js';
 
 export async function render(container, params) {
@@ -69,6 +70,8 @@ export async function render(container, params) {
   const confirmBtn = container.querySelector('#confirm-btn');
   const result = container.querySelector('#result');
   const form = container.querySelector('#passenger-form');
+  // The logged-in passenger's e-mail: bookingsByPassenger only lists bookings made with the token's e-mail.
+  if (email()) container.querySelector('#p-email').value = email();
 
   let flight = null;
   let selectedSeat = null;

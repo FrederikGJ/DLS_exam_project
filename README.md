@@ -76,12 +76,16 @@ docker compose down -v                    # stop og slet databaser (nulstil seed
 
 ### Prøv flows fra frontenden
 
+Læsning (afgange, butikker, opslag af booking) kræver ikke login. *Book*, *Betaling* og *Bagage* sender dig til
+Keycloaks login-side (brug `anna`/`anna`) og tilbage igen; *Log ind*/*Log ud* står øverst til højre sammen med
+brugernavn og rolle. Operations-panelet under *Afgange* vises kun for brugere med rollen OPERATIONS (`ops`/`ops`).
+
 - **Flow A – booking og betaling:** *Afgange* → *Book* på et fly → udfyld passager, vælg sæde → *Bekræft booking*
   → *Betaling*: brug fx kort `4242 4242 4242 4242`, udløb `12/30`, cvv `123` → bookingen bliver `CONFIRMED`.
   Kort der slutter på `0000` giver `Insufficient funds`; udløbet dato giver `Card expired` (bookingen annulleres).
 - **Flow B – bagage:** *Bagage* → indtast bookingreference, vægt 23, type CHECKED → tag genereres →
   opdatér status til `LOADED` / "Belt 4" → se det under *Min booking*.
-- **Flow C – aflysning:** *Afgange* → slå *Vis operations-panel* til → sæt status `CANCELLED` på flyet →
+- **Flow C – aflysning:** log ind som `ops` → *Afgange* → slå *Vis operations-panel* til → sæt status `CANCELLED` på flyet →
   bookinger annulleres, betalinger refunderes, bagage sendes til `RETURN_DESK`, sæder frigives.
 - **Flow D – navigation:** *Butikker* → vælg "Security T2" → "Gate B12" → *Find rute* → trin-for-trin rute,
   afstand, estimeret tid, butikker undervejs og et SVG-kort med gangnetværk, nummererede trin, instruktionstekst,
@@ -95,10 +99,13 @@ Med stakken kørende kan alle fire flows køres end-to-end fra kommandolinjen (k
 ./scripts/e2e-smoke.sh
 ```
 
-Scriptet booker et sæde, betaler, registrerer bagage, aflyser flyet og verificerer at bookingen bliver
-`CANCELLED`, betalingen `REFUNDED`, bagagen står ved `RETURN_DESK` og sædet er frigivet – og slutter med en
-rute fra Security T2 til Gate B12. Bemærk at Flow C aflyser et fly fra seed-data; `docker compose down -v`
-nulstiller.
+Scriptet henter først tokens fra Keycloak for `anna` (PASSENGER) og `ops` (OPERATIONS) med password grant,
+tjekker at en mutation uden token giver `UNAUTHORIZED` og at anna får `FORBIDDEN` på en OPERATIONS-mutation,
+og kører så flows: anna booker et sæde, betaler og registrerer bagage, ops sætter bagagestatus og aflyser flyet,
+og scriptet verificerer at bookingen bliver `CANCELLED`, betalingen `REFUNDED`, bagagen står ved `RETURN_DESK` og
+sædet er frigivet – og slutter med en rute fra Security T2 til Gate B12. Mod kind sættes `KEYCLOAK_URL` og
+service-URL'erne som vist i [k8s/README.md](k8s/README.md#alternativ-kind). Bemærk at Flow C aflyser et fly fra
+seed-data; `docker compose down -v` nulstiller.
 
 ### Test af retry + dead-letter queue
 
@@ -137,7 +144,9 @@ cd flight-service && mvn spring-boot:run     # bruger dev-defaults i application
 ## Tests
 
 Hver service har unit tests for domænelogik og én integrationstest med Testcontainers
-(rigtig PostgreSQL 16 + RabbitMQ). Docker skal køre.
+(rigtig PostgreSQL 16 + RabbitMQ). Docker skal køre. Integrationstestene kalder GraphQL over HTTP gennem
+Spring Securitys filterkæde; mutations sendes med et test-JWT fra `TestTokens` (`passenger()` = anna,
+`operations()` = ops), som signeres med en testnøgle, så Keycloak ikke behøver køre.
 
 ```bash
 cd flight-service  && mvn test
@@ -217,6 +226,38 @@ Ingress-routing:
 I Kubernetes erstattes `frontend/js/config.js` af en ConfigMap med relative paths (`/api/.../graphql`),
 så frontend og API deler origin.
 
+## Login og roller
+
+Login sker via **Keycloak** (OpenID Connect, realm `airport`). Frontenden er en public client med Authorization Code
++ PKCE; de fem services er resource servers, der validerer JWT'et og læser rollen i `realm_access.roles`.
+Realm'et importeres fra `k8s/keycloak/realm-airport.json` ved hver opstart – samme fil i compose og Kubernetes.
+
+| Bruger  | Kode   | Rolle        | Må                                                                          |
+|---------|--------|--------------|-----------------------------------------------------------------------------|
+| –       | –      | (ingen)      | læse: afgange, sæder, butikker, ruter, booking/bagage/betaling pr. reference/id |
+| `anna`  | `anna` | `PASSENGER`  | booke, betale, checke ind, annullere, registrere bagage, se egne bookinger (`bookingsByPassenger` kun med egen e-mail) |
+| `ops`   | `ops`  | `OPERATIONS` | alt ovenstående for alle + ændre flystatus/gate, opdatere bagagestatus, refundere, vedligeholde butikker |
+
+Fejlkoder: `UNAUTHORIZED` (operationen kræver login), `FORBIDDEN` (forkert rolle); et udløbet eller forkert token
+afvises med HTTP 401. Hele rolletabellen pr. operation står i [docs/architecture.md](docs/architecture.md).
+
+Hent et token til scripts og `curl` (password grant er slået til på clienten `airport-frontend` netop til det):
+
+```bash
+TOKEN=$(curl -s -d client_id=airport-frontend -d grant_type=password -d username=anna -d password=anna \
+  http://localhost:8180/realms/airport/protocol/openid-connect/token | jq -r .access_token)
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"query":"{ bookingsByPassenger(email: \"anna@example.com\") { bookingReference status } }"}' \
+  http://localhost:8082/api/bookings/graphql
+```
+
+Services'ne konfigureres med `OIDC_ISSUER_URI` (den issuer et token skal have – Keycloaks browser-vendte URL +
+`/realms/airport`) og `JWK_SET_URI` (hvor signeringsnøglerne hentes – en intern adresse). De to er forskellige,
+fordi browseren og containerne når Keycloak på hver sin adresse; faldgruben er beskrevet i
+[k8s/README.md](k8s/README.md#keycloak-login). Admin console: compose <http://localhost:8180/admin/>, kind
+<http://localhost:8090/auth/admin/> (admin/admin). GitHub-login kan slås til som identity provider – se
+docs/architecture.md.
+
 ## Konfiguration
 
 Alle services konfigureres via environment variables. Defaults i `application.yml` gælder kun lokal udvikling.
@@ -229,6 +270,8 @@ Alle services konfigureres via environment variables. Defaults i `application.ym
 | `RABBITMQ_USERNAME` / `RABBITMQ_PASSWORD` | RabbitMQ-credentials    | fra Secret i k8s                            |
 | `CORS_ALLOWED_ORIGINS` | Kommasepareret liste af tilladte origins   | `http://localhost:8080`                     |
 | `GRAPHQL_PATH`         | Path GraphQL-endpointet serveres på        | `/api/flights/graphql`                      |
+| `OIDC_ISSUER_URI`      | Issuer (`iss`) et JWT skal have – Keycloaks browser-vendte URL + `/realms/airport` | `http://localhost:8180/realms/airport` |
+| `JWK_SET_URI`          | Hvor servicen henter Keycloaks signeringsnøgler (intern adresse) | `http://keycloak:8080/realms/airport/protocol/openid-connect/certs` |
 | `SPRING_PROFILES_ACTIVE` | `dev` (læsbare logs, GraphiQL) / `prod` (JSON-logs) | `dev`                             |
 | `FLIGHT_SERVICE_URL`   | Kun booking-service: flight-service GraphQL | `http://flight-service:8080/api/flights/graphql` |
 
