@@ -25,7 +25,7 @@ export async function gql(url, query, variables = {}, serviceName = 'servicen') 
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({ query, variables }),
     });
-  } catch (e) {
+  } catch (_) {
     throw new GraphQLError(`Kan ikke nå ${serviceName}`, 'NETWORK_ERROR');
   }
   let body = null;

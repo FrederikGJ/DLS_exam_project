@@ -377,7 +377,7 @@ export async function render(container, params) {
       return `<g class="step">${g}</g>`;
     }).join('');
     // distance per segment beside the midpoint (either side); dropped if there is no free spot – the step text has it too
-    const distSvg = segLabels.map(l => placeText(l.mx, l.my, l.text, 'dist-label', hw => [
+    const distSvg = segLabels.map(l => placeText(l.mx, l.my, l.text, 'dist-label', _hw => [
       [l.mx - l.uy * 14, l.my + l.ux * 14 + 4], [l.mx + l.uy * 14, l.my - l.ux * 14 + 4]], true)).join('');
 
     // ---- summary strip above the map

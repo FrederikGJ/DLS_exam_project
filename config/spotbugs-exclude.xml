@@ -6,6 +6,10 @@
   Rule: every <Match> has a reason. Nothing is silenced with @SuppressFBWarnings in the code - a false positive is
   either fixed in the code or documented here, so the list of what we consciously do not act on stays reviewable
   in one place.
+
+  To check that an exclusion is still needed: replace this file with an empty <FindBugsFilter/>, run
+      mvn -Pci -DskipTests -Dcheckstyle.skip=true compile spotbugs:spotbugs
+  in a service directory and read target/spotbugsXml.xml. Last done 2026-09-15 (see the notes below).
 -->
 <FindBugsFilter>
 
@@ -13,15 +17,27 @@
        Since SpotBugs 4.3 this fires on every JPA entity getter that returns a child entity or a collection, and on
        every Spring bean that stores an injected collaborator (RabbitTemplate, ObjectMapper, repositories) in a
        field. Entities are persistence models that are only mutated through the service layer, and injected beans
-       are shared singletons by design. Copying them would add code without removing a risk. -->
+       are shared singletons by design. Copying them would add code without removing a risk.
+       Without this exclusion the build fails with 45 Medium findings (flight 10, booking 7, payment 6, baggage 7,
+       shop 15 - checked 2026-09-15). -->
   <Match>
     <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
   </Match>
 
-  <!-- CRLF_INJECTION_LOGS (find-sec-bugs): "log injection" whenever a value that came from a request is logged.
-       Every value reaching the service layer has passed Bean Validation with a whitelist pattern (booking
-       references, seat numbers, tag numbers, e-mail), and the prod profile writes structured JSON logs
-       (logstash format) where newlines are escaped, so a forged log line cannot be injected. -->
+  <!-- CRLF_INJECTION_LOGS (find-sec-bugs): "log injection" when a value that came from a request is logged.
+       Checked 2026-09-15 with an empty filter: at threshold=Medium (the ci profile) nothing is reported today,
+       because GraphQL @Argument values are not a taint source find-sec-bugs knows; at threshold=Low it reports
+       24 findings in booking-service alone (every log line with a booking reference, seat number or event
+       payload). It will be reported at Medium/High as soon as a logged value comes from a Spring MVC
+       @PathVariable/@RequestParam/@RequestBody (taint-param-annotations.txt in find-sec-bugs), i.e. with REST v1
+       in baggage-service (dev plan DP-09). The decision is recorded here now so DP-09 does not have to take it
+       again:
+         * request values that are logged are whitelist-validated with Bean Validation first (booking references,
+           seat numbers, passport numbers, e-mail addresses - see @Pattern/@Email in the graphql inputs), and
+         * the prod profile writes structured JSON logs (logging.structured.format.console=logstash in every
+           application.yml), where a newline inside a value is escaped, so a forged log line cannot be injected
+           where the logs are collected.
+       If an endpoint ever logs an unvalidated free-text value, validate it instead of relying on this. -->
   <Match>
     <Bug pattern="CRLF_INJECTION_LOGS"/>
   </Match>

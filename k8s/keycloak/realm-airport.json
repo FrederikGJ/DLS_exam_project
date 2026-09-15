@@ -1,0 +1,113 @@
+{
+  "realm": "airport",
+  "displayName": "CPH Lufthavn",
+  "enabled": true,
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "bruteForceProtected": true,
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "defaultSignatureAlgorithm": "RS256",
+  "roles": {
+    "realm": [
+      {
+        "name": "PASSENGER",
+        "description": "Passager: kan booke, betale og registrere bagage for sig selv."
+      },
+      {
+        "name": "OPERATIONS",
+        "description": "Lufthavnsdrift: kan aendre flystatus, opdatere bagagestatus, refundere og vedligeholde butikker."
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "airport-frontend",
+      "name": "Airport frontend (SPA)",
+      "description": "Den statiske frontend. Public client med Authorization Code + PKCE (S256); ingen client secret. Direct access grants er slaaet til, saa scripts/e2e-smoke.sh og curl kan hente tokens med password grant.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true,
+      "redirectUris": [
+        "http://localhost:8080/*",
+        "http://127.0.0.1:8080/*",
+        "http://localhost:8090/*",
+        "http://airport.local/*"
+      ],
+      "webOrigins": [
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "http://localhost:8090",
+        "http://airport.local"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "+"
+      }
+    }
+  ],
+  "users": [
+    {
+      "username": "anna",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Anna",
+      "lastName": "Andersen",
+      "email": "anna@example.com",
+      "credentials": [
+        { "type": "password", "value": "anna", "temporary": false }
+      ],
+      "realmRoles": [ "PASSENGER" ]
+    },
+    {
+      "username": "ops",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Ole",
+      "lastName": "Operations",
+      "email": "ops@example.com",
+      "credentials": [
+        { "type": "password", "value": "ops", "temporary": false }
+      ],
+      "realmRoles": [ "OPERATIONS" ]
+    }
+  ],
+  "identityProviders": [
+    {
+      "alias": "github",
+      "displayName": "GitHub",
+      "providerId": "github",
+      "enabled": false,
+      "trustEmail": true,
+      "storeToken": false,
+      "addReadTokenRoleOnCreate": false,
+      "firstBrokerLoginFlowAlias": "first broker login",
+      "config": {
+        "clientId": "REPLACE_WITH_GITHUB_OAUTH_APP_CLIENT_ID",
+        "clientSecret": "REPLACE_WITH_GITHUB_OAUTH_APP_CLIENT_SECRET",
+        "defaultScope": "user:email",
+        "syncMode": "IMPORT"
+      }
+    }
+  ],
+  "identityProviderMappers": [
+    {
+      "name": "github-users-are-passengers",
+      "identityProviderAlias": "github",
+      "identityProviderMapper": "oidc-hardcoded-role-idp-mapper",
+      "config": {
+        "role": "PASSENGER",
+        "syncMode": "INHERIT"
+      }
+    }
+  ]
+}

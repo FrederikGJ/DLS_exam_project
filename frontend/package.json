@@ -1,0 +1,15 @@
+{
+  "name": "airport-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Lint-opsætning for den statiske frontend. Der er intet build-step: nginx serverer index.html, css/ og js/ som de er (se Dockerfile). package.json bruges kun af ESLint i CI (dev plan DP-23).",
+  "type": "module",
+  "scripts": {
+    "lint": "eslint js/"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.10.0",
+    "globals": "^17.12.0"
+  }
+}

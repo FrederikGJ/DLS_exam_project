@@ -1,5 +1,7 @@
 # DLS_exam_project – Lufthavnssystem (microservices)
 
+[![CI](https://github.com/FrederikGJ/DLS_exam_project/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/FrederikGJ/DLS_exam_project/actions/workflows/ci.yml)
+
 Eksamensprojekt i *Development of Large Systems*, Softwareudvikling bachelor 2026 efterår.
 
 **Gruppe 7:** Mahdi Karimi · Lukas Rønberg · Frederik Johannessen
@@ -39,6 +41,7 @@ Dokumentation: [docs/architecture.md](docs/architecture.md) (diagram, flows, des
 | `baggage-service` | Bagage bundet til booking, status-tracking        | 8084           | `http://localhost:8084/api/baggage/graphql` |
 | `shop-service`    | Butikker + navigation (Dijkstra)                  | 8085           | `http://localhost:8085/api/shops/graphql` |
 | RabbitMQ          | Events mellem services                            | 5672 / 15672   | Management UI: http://localhost:15672 (airport/airport) |
+| Keycloak          | OpenID Connect-login, roller PASSENGER/OPERATIONS | 8180           | http://localhost:8180/realms/airport (admin: /admin/, admin/admin) |
 | PostgreSQL ×5     | `flight_db`, `booking_db`, `payment_db`, `baggage_db`, `shop_db` | 5433–5437 | – |
 
 Hver service har GraphiQL på `http://localhost:808x/graphiql?path=/api/<x>/graphql` i dev-profilen
@@ -54,6 +57,11 @@ docker compose up --build
 
 Første build tager nogle minutter (Maven downloader dependencies i build-containerne). Når alle
 services melder `healthy`, åbn **http://localhost:8080**.
+
+Login sker via Keycloak på **http://localhost:8180** (realm `airport`, admin console `/admin/` med admin/admin).
+Testbrugere: `anna`/`anna` (rolle PASSENGER) og `ops`/`ops` (rolle OPERATIONS). Realm'et importeres fra
+`k8s/keycloak/realm-airport.json` ved hver opstart – samme fil som Kubernetes bruger (se
+[k8s/README.md, Keycloak](k8s/README.md#keycloak-login), også om issuer-faldgruben).
 
 Seed-data indlæses automatisk af Flyway ved første opstart: 3 flyselskaber, 5 fly, 10 afgange med sæder,
 2 terminaler, 15+ butikker og et navigationsnetværk med 30+ noder inkl. gates.
@@ -147,6 +155,27 @@ cd shop-service    && mvn test
 | baggage-service | `BaggageRules` (3 stk., 32 kg), tag-format     | snapshot via events, register/limit, statusopdatering, RETURN_DESK ved aflysning |
 | shop-service    | `Dijkstra`, `OpeningHours`                     | rute Security T2 → Gate B12, accessibleOnly, søgning, CRUD, idempotens |
 
+### CI og statisk analyse
+
+GitHub Actions ([.github/workflows/ci.yml](.github/workflows/ci.yml)) kører ved hvert push og på pull requests
+mod `main`; et nyt push til samme branch afbryder den kørsel, der stadig er i gang. Tre uafhængige jobs:
+
+| Job         | Hvad                                                                                                          |
+|-------------|---------------------------------------------------------------------------------------------------------------|
+| `backend`   | Én matrix-kørsel pr. service: `mvn -Pci verify` = unit + Testcontainers-tests, Checkstyle og SpotBugs/find-sec-bugs. Surefire-, Checkstyle- og SpotBugs-rapporter uploades som artifacts. |
+| `frontend`  | `npm ci && npx eslint js/` i `frontend/` (ESLint *recommended* + browser-globals; frontenden har intet build-step) |
+| `manifests` | `kubectl kustomize` + `kubeconform -strict` mod Kubernetes-API-skemaerne for hver kustomization under `k8s/`   |
+
+Maven-profilen `ci` findes i alle fem poms og bruger `config/checkstyle.xml` (Google-stil med 4 spaces og
+120 tegn) og `config/spotbugs-exclude.xml` (hver undtagelse er begrundet i filen). Uden `-Pci` er
+`mvn package`/Docker-buildet uændret. Kør det samme lokalt:
+
+```bash
+cd flight-service && mvn -Pci verify          # som pipelinen: tests + Checkstyle + SpotBugs
+cd frontend && npm ci && npx eslint js/
+kubectl kustomize k8s/ | kubeconform -strict -summary
+```
+
 ## Kubernetes
 
 Manifests ligger i `k8s/` (Kustomize): namespace `airport`, Deployment (1 replica, dimensioneret til en laptop – se
@@ -208,15 +237,17 @@ Alle services konfigureres via environment variables. Defaults i `application.ym
 ```
 /
   README.md                docker-compose.yml
+  .github/workflows/       ci.yml – GitHub Actions: backend (matrix), frontend (eslint), manifests (kubeconform)
+  config/                  checkstyle.xml, spotbugs-exclude.xml – regler for Maven-profilen `ci`
   docs/                    architecture.md, events.md
-  frontend/                Dockerfile, nginx.conf, index.html, css/, js/ (config.js, api.js, app.js, pages/)
+  frontend/                Dockerfile, nginx.conf, index.html, css/, js/ (config.js, api.js, app.js, pages/), eslint.config.js + package.json (kun lint)
   flight-service/          pom.xml, Dockerfile, src/main/java/dk/airport/flight/{domain,repository,service,graphql,messaging,config}
   booking-service/         ... dk/airport/booking/...
   payment-service/         ... dk/airport/payment/...
   baggage-service/         ... dk/airport/baggage/...
   shop-service/            ... dk/airport/shop/...
     (hver: src/main/resources/graphql/schema.graphqls, db/migration/V1__init.sql (+V2__seed.sql), src/test/java)
-  k8s/                     kustomization.yaml, namespace.yaml, rabbitmq/, databases/, services/, frontend/, tools/ (pgAdmin), ingress.yaml
+  k8s/                     kustomization.yaml, namespace.yaml, rabbitmq/, databases/, services/, frontend/, keycloak/ (realm-airport.json), tools/ (pgAdmin), ingress.yaml
   scripts/e2e-smoke.sh     end-to-end smoke-test af Flow A-D mod en kørende compose-stak
 ```
 

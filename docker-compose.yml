@@ -9,6 +9,8 @@
 #   8084  baggage-service    -> http://localhost:8084/api/baggage/graphql
 #   8085  shop-service       -> http://localhost:8085/api/shops/graphql
 #   15672 RabbitMQ management UI (airport / airport)
+#   8180  Keycloak (login): admin console http://localhost:8180/admin/ (admin / admin),
+#         realm `airport` with test users anna/anna (PASSENGER) and ops/ops (OPERATIONS)
 #   5433-5437 the five PostgreSQL instances (only for debugging with psql)
 #
 # Credentials below are DEV DEFAULTS ONLY. In Kubernetes they come from Secrets.
@@ -57,6 +59,39 @@ services:
       retries: 10
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
+
+  # Keycloak = the OpenID Connect provider (login, roles). Dev mode with an embedded H2 database and the realm
+  # imported from k8s/keycloak/realm-airport.json on every start (single source for compose and Kubernetes).
+  # KC_HOSTNAME pins every URL Keycloak publishes: a token says iss=http://localhost:8180/realms/airport no matter
+  # whether it was requested from the browser (localhost:8180) or from inside the compose network (keycloak:8080),
+  # and the discovery document always advertises the localhost:8180 endpoints. The services verify exactly that
+  # issuer string (OIDC_ISSUER_URI) and fetch the signing keys over the internal URL (JWK_SET_URI) without using
+  # discovery, so neither side needs to reach the other's address. See k8s/README.md "Keycloak (login)".
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.3
+    command: ["start-dev", "--import-realm"]
+    restart: unless-stopped
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HOSTNAME: http://localhost:8180
+      KC_HEALTH_ENABLED: "true"
+      KC_HTTP_MANAGEMENT_RELATIVE_PATH: /
+    ports: ["8180:8080"]
+    volumes:
+      - ./k8s/keycloak/realm-airport.json:/opt/keycloak/data/import/realm-airport.json:ro
+    healthcheck:
+      # The image has neither curl nor wget; bash's /dev/tcp against the management port (9000) does the job.
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000
+          && printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3
+          && grep -q '"status": "UP"' <&3
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
 
   flight-db:
     <<: *postgres-defaults

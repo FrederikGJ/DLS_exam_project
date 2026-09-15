@@ -1,0 +1,117 @@
+# CI for the airport system (dev plan DP-23).
+#
+# Three independent jobs:
+#   backend   - one matrix leg per Spring Boot service: `mvn -Pci verify` = unit tests, Testcontainers
+#               integration tests (Docker is available on ubuntu-latest), Checkstyle and SpotBugs/find-sec-bugs.
+#               The `ci` Maven profile and its rule files live in config/ (dev plan DP-24).
+#   frontend  - ESLint over the static frontend. There is no build step: nginx serves the files as they are.
+#   manifests - every Kustomize build under k8s/ is rendered with `kubectl kustomize` and validated against the
+#               Kubernetes API schemas with kubeconform (strict: unknown fields are errors).
+#
+# Runs on every push, so a branch is red before a pull request is opened, and on pull requests into main.
+# A new push to the same branch cancels the run that is still going for the previous commit.
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: backend · ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [flight-service, booking-service, payment-service, baggage-service, shop-service]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Build, test, Checkstyle and SpotBugs
+        working-directory: ${{ matrix.service }}
+        run: mvn -B -ntp -Pci verify
+
+      - name: Upload test and analysis reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: reports-${{ matrix.service }}
+          path: |
+            ${{ matrix.service }}/target/surefire-reports/
+            ${{ matrix.service }}/target/checkstyle-result.xml
+            ${{ matrix.service }}/target/spotbugsXml.xml
+          if-no-files-found: ignore
+          retention-days: 14
+
+  frontend:
+    name: frontend · eslint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install ESLint
+        run: npm ci
+
+      - name: Lint
+        run: npx eslint js/
+
+  manifests:
+    name: manifests · kustomize + kubeconform
+    runs-on: ubuntu-latest
+    env:
+      KUBECONFORM_VERSION: v0.8.0
+      KUBERNETES_VERSION: 1.36.0   # kind v0.32 node image; kubeconform fetches the matching API schemas
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install kubeconform
+        run: |
+          curl -fsSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin kubeconform
+          kubeconform -v
+          kubectl version --client
+
+      - name: Render and validate every kustomization under k8s/
+        # Base, overlays and components alike: every directory with a kustomization.yaml is built on its own.
+        # A `kind: Component` cannot be built standalone; it is validated through the overlays that include it.
+        # The second schema location covers CRDs (KEDA, HPA add-ons etc.) via the community CRD catalog.
+        run: |
+          failed=0
+          for dir in $(find k8s -name kustomization.yaml -printf '%h\n' | sort); do
+            if grep -q '^kind: Component' "$dir/kustomization.yaml"; then
+              echo "skip $dir (Component - validated through the overlays that include it)"
+              continue
+            fi
+            echo "::group::$dir"
+            kubectl kustomize "$dir" \
+              | kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" \
+                  -schema-location default \
+                  -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+              || failed=1
+            echo "::endgroup::"
+          done
+          exit $failed

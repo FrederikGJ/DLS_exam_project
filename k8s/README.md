@@ -15,8 +15,9 @@ Indhold:
 | `databases/`         | 5 × PostgreSQL 16 StatefulSet (1 replica, PVC 1Gi) + Service + Secret, én pr. service     |
 | `services/`          | 5 × Deployment (1 replica, `requests` 150m/256Mi, `limits` 500m/640Mi – se *Ressourcer på en laptop*) + ClusterIP Service + ConfigMap + Secret, liveness/readiness, initContainer `wait-for-db` der venter på servicens Postgres med `pg_isready`. Kan skaleres til flere replicas uden kodeændringer: en Postgres advisory lock sikrer, at kun én pod ad gangen kører outbox-relayet |
 | `frontend/`          | nginx Deployment + Service + ConfigMap der overskriver `js/config.js` med Ingress-stier    |
+| `keycloak/`          | Keycloak 26 (login, roller): Deployment + Service + Secret + `realm-airport.json` (bliver til ConfigMap `keycloak-realm` via `configMapGenerator`) – se *Keycloak (login)* |
 | `tools/`             | pgAdmin (dev/demo-værktøj, ikke en del af systemet): Deployment + Service + ConfigMap + Secret |
-| `ingress.yaml`       | Én Ingress: `/` → frontend, `/api/<x>/graphql` → den enkelte service, `/pgadmin` → pgAdmin |
+| `ingress.yaml`       | Én Ingress: `/` → frontend, `/api/<x>/graphql` → den enkelte service, `/auth` → Keycloak, `/pgadmin` → pgAdmin |
 
 Secrets indeholder **dev-værdier** (fx `flight/flight`). Skift dem før brug i et delt cluster.
 
@@ -95,7 +96,8 @@ kubectl apply -k k8s/
 kubectl -n airport get pods -w
 ```
 
-Åbn frontenden på <http://localhost:8090/> (alle `/api/<x>/graphql`-stier går gennem samme Ingress) og pgAdmin på
+Åbn frontenden på <http://localhost:8090/> (alle `/api/<x>/graphql`-stier går gennem samme Ingress), Keycloak på
+<http://localhost:8090/auth/> (admin console `/auth/admin/`, admin/admin – se *Keycloak (login)*) og pgAdmin på
 <http://localhost:8090/pgadmin/> (åbner direkte uden login).
 
 Kør end-to-end-smoketesten mod Kubernetes-stakken gennem Ingress:
@@ -202,6 +204,63 @@ timeout 90 docker run --rm --network dls_exam_default --cpus 0.5 --memory 640m \
   -e JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75.0 -XX:TieredStopAtLevel=1 -XX:+UseSerialGC -Xss512k" \
   airport/flight-service:local 2>&1 | grep -m1 'Started FlightServiceApplication'
 ```
+
+## Keycloak (login)
+
+`keycloak/keycloak.yaml` deployer Keycloak 26 bag Ingress'en på `/auth/` (kind: <http://localhost:8090/auth/>).
+Realm'et `airport` importeres ved hvert pod-start fra `keycloak/realm-airport.json` – **den samme fil**, som
+`docker-compose.yml` mounter, så compose og Kubernetes har præcis samme roller, client og testbrugere:
+
+| Hvad                 | Værdi                                                                                     |
+|----------------------|-------------------------------------------------------------------------------------------|
+| Realm                | `airport`, realm-roller `PASSENGER` og `OPERATIONS`                                       |
+| Client               | `airport-frontend` – public client, Authorization Code + PKCE (S256), direct access grants slået til (så `curl`/smoke-test kan hente tokens med password grant) |
+| Testbrugere          | `anna` / `anna` (PASSENGER), `ops` / `ops` (OPERATIONS)                                   |
+| Admin console        | kind: <http://localhost:8090/auth/admin/>, compose: <http://localhost:8180/admin/> – `admin` / `admin` (`keycloak-secret`) |
+| Identity provider    | `github` er defineret men **slået fra**; brokerede GitHub-brugere får rollen PASSENGER via en mapper. Tændes i admin console → Identity providers → GitHub (client id/secret fra en GitHub OAuth-app) |
+| Database             | H2 i en `emptyDir` (`start-dev`). Brugere oprettet i drift (fx GitHub-logins) forsvinder ved genstart – kendt tilstand ved hver demo. Et delt cluster kræver `start` + PostgreSQL + TLS |
+
+Keycloak serverer selv under præfikset `/auth` (`KC_HTTP_RELATIVE_PATH`), så Ingress'en behøver ingen rewrite-regel –
+præcis som services' `GRAPHQL_PATH` og pgAdmins `SCRIPT_NAME`. Health-endpoints ligger på management-porten 9000
+(`/health/started|live|ready`) og bruges af proberne.
+
+Hent et token og se rollerne (kræver `python3` til at afkode payloaden; ellers indsæt tokenet på jwt.io):
+
+```bash
+TOKEN=$(curl -s -d client_id=airport-frontend -d grant_type=password -d username=anna -d password=anna \
+  http://localhost:8090/auth/realms/airport/protocol/openid-connect/token | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])')
+echo "$TOKEN" | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null | python3 -m json.tool | grep -A3 realm_access
+```
+
+### Faldgrube: issuer (`iss`) skal være den samme URL for browser og services
+
+Et JWT fra Keycloak indeholder `iss`, og en resource server (Spring) afviser tokenet, hvis `iss` ikke er præcis den
+streng, den forventer. Keycloak udleder som udgangspunkt `iss` af den URL, *forespørgslen* kom ind på – så et token
+hentet af browseren via `http://localhost:8090/auth` og et token hentet af en pod via `http://keycloak:8080/auth` ville
+have to forskellige issuers, og kun det ene ville blive accepteret. Samme problem i compose: `localhost:8180` set fra
+browseren, `keycloak:8080` set fra containerne.
+
+Løsningen her er at **låse alle Keycloaks URL'er** til den browser-vendte adresse med `KC_HOSTNAME`
+(`http://localhost:8090/auth` i kind, `http://localhost:8180` i compose). Verificeret 15-09-2026: et token hentet
+inde fra clusteret via `keycloak:8080/auth` har også `iss=http://localhost:8090/auth/realms/airport`, og
+discovery-dokumentet (`/.well-known/openid-configuration`) viser de samme localhost-URL'er uanset hvorfra det hentes.
+`KC_PROXY_HEADERS` og `KC_HOSTNAME_BACKCHANNEL_DYNAMIC` er bevidst **ikke** sat: med dem lækker ingress-nginx'
+`X-Forwarded-Port: 80` (porten inde i kind-noden, ikke 8090) ind i discovery-dokumentet, så token- og
+jwks-endpoints bliver til `http://localhost/auth/...` (set 15-09-2026; samme mekanisme som CORS-noten under
+*Alternativ: kind*). Med en fuld URL i `KC_HOSTNAME` er proxy-headerne overflødige; prisen er kun, at Keycloaks
+event-log viser ingress-poddens IP i stedet for klientens.
+Services'ne konfigureres derfor med to værdier (DP-02) og bruger aldrig discovery:
+
+| Env-var i services      | Værdi (kind)                                                           | Bruges til                                 |
+|-------------------------|------------------------------------------------------------------------|--------------------------------------------|
+| `OIDC_ISSUER_URI`       | `http://localhost:8090/auth/realms/airport`                            | den streng `iss` i tokenet skal matche     |
+| `JWK_SET_URI`           | `http://keycloak:8080/auth/realms/airport/protocol/openid-connect/certs` | hvor signeringsnøglerne hentes (in-cluster) |
+
+Spring bruger *ikke* OIDC discovery, når begge er sat, så services'ne behøver aldrig at nå `localhost:8090`
+(og et in-cluster-script, der vil hente tokens, skal selv bruge `http://keycloak:8080/auth/realms/airport/protocol/openid-connect/token`).
+Skifter du host eller port (fx minikube: `http://<minikube ip>/auth`), skal `KC_HOSTNAME` i `keycloak/keycloak.yaml`,
+`OIDC_ISSUER_URI` i `services/*.yaml` og `KEYCLOAK_URL` i `frontend/frontend.yaml` rettes sammen – ellers er
+symptomet `401` med `WWW-Authenticate: ... invalid_token ... The iss claim is not valid`.
 
 ## pgAdmin (dev/demo-værktøj)
 
