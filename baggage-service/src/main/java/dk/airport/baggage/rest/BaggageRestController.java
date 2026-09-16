@@ -1,15 +1,25 @@
 package dk.airport.baggage.rest;
 
+import dk.airport.baggage.config.OpenApiConfig;
 import dk.airport.baggage.domain.ApiException;
 import dk.airport.baggage.domain.Baggage;
 import dk.airport.baggage.rest.dto.BaggageResponse;
 import dk.airport.baggage.rest.dto.RegisterBaggageRequest;
 import dk.airport.baggage.rest.dto.UpdateBaggageStatusRequest;
 import dk.airport.baggage.service.BaggageService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.headers.Header;
+import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.Schema;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
 import org.springframework.http.MediaType;
+import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -23,6 +33,8 @@ import org.springframework.web.bind.annotation.RestController;
 import java.net.URI;
 import java.util.List;
 
+import static dk.airport.baggage.config.OpenApiConfig.PROBLEM_JSON;
+
 /**
  * REST API v1 of baggage-service (dev plan DP-09) - the same operations as the GraphQL API, for clients that
  * prefer plain HTTP: register a bag, look it up, list the bags of a booking, move a bag to a new status.
@@ -32,13 +44,22 @@ import java.util.List;
  * ({@code application/problem+json}) with the same {@code code} values as the GraphQL API - see
  * {@link RestExceptionHandler}. Who may call what is decided by URL in {@code config/SecurityConfig}: the bag
  * lookup is public, registration and the booking list need PASSENGER or OPERATIONS, the status change OPERATIONS.
+ *
+ * <p>The {@code @Operation}/{@code @ApiResponse} annotations feed the OpenAPI document (DP-10); see
+ * {@link OpenApiConfig} for the URLs of the document and Swagger UI.
  */
 @RestController
 @RequestMapping(path = BaggageRestController.BASE_PATH, produces = MediaType.APPLICATION_JSON_VALUE)
 @Validated
+@Tag(name = "Baggage")
+@ApiResponse(responseCode = "400", description = "The request is malformed (`code`: VALIDATION_ERROR)",
+        content = @Content(mediaType = PROBLEM_JSON, schema = @Schema(implementation = ProblemDetail.class)))
+@ApiResponse(responseCode = "500", description = "Unexpected error (`code`: INTERNAL_ERROR)",
+        content = @Content(mediaType = PROBLEM_JSON, schema = @Schema(implementation = ProblemDetail.class)))
 public class BaggageRestController {
 
     public static final String BASE_PATH = "/api/baggage/v1";
+
     private static final String REFERENCE_PATTERN = "^[A-Za-z0-9]{6}$";
 
     private final BaggageService baggageService;
@@ -49,6 +70,25 @@ public class BaggageRestController {
 
     /** 201 with {@code Location: /api/baggage/v1/baggage/{tagNumber}} and the new bag as body. */
     @PostMapping(path = "/baggage", consumes = MediaType.APPLICATION_JSON_VALUE)
+    @SecurityRequirement(name = OpenApiConfig.KEYCLOAK_SCHEME)
+    @Operation(summary = "Register a bag on a booking",
+            description = "The booking must be known to baggage-service (a booking.confirmed event) and be "
+                    + "CONFIRMED or CHECKED_IN. Max 3 CHECKED bags per booking, max 32 kg per bag. "
+                    + "Publishes the event `baggage.registered`. Requires PASSENGER or OPERATIONS.")
+    @ApiResponse(responseCode = "201", description = "The bag was registered",
+            headers = @Header(name = "Location", description = "URL of the new bag",
+                    schema = @Schema(type = "string")))
+    @ApiResponse(responseCode = "401", description = "No or invalid token (`code`: UNAUTHORIZED)",
+            content = @Content(mediaType = PROBLEM_JSON, schema = @Schema(implementation = ProblemDetail.class)))
+    @ApiResponse(responseCode = "403", description = "The role does not allow this (`code`: FORBIDDEN)",
+            content = @Content(mediaType = PROBLEM_JSON, schema = @Schema(implementation = ProblemDetail.class)))
+    @ApiResponse(responseCode = "404", description = "Unknown booking (`code`: NOT_FOUND)",
+            content = @Content(mediaType = PROBLEM_JSON, schema = @Schema(implementation = ProblemDetail.class)))
+    @ApiResponse(responseCode = "409", description = "The booking is not paid for (`code`: INVALID_STATE)",
+            content = @Content(mediaType = PROBLEM_JSON, schema = @Schema(implementation = ProblemDetail.class)))
+    @ApiResponse(responseCode = "422",
+            description = "A business rule says no (`code`: VALIDATION_ERROR / BAGGAGE_LIMIT_EXCEEDED)",
+            content = @Content(mediaType = PROBLEM_JSON, schema = @Schema(implementation = ProblemDetail.class)))
     public ResponseEntity<BaggageResponse> register(@Valid @RequestBody RegisterBaggageRequest request) {
         Baggage bag = baggageService.register(request.bookingReference(), request.weightKg(), request.type());
         // Relative Location on purpose: behind the Ingress the absolute scheme/host/port seen by the pod is not
@@ -59,21 +99,52 @@ public class BaggageRestController {
     }
 
     @GetMapping("/baggage/{tagNumber}")
-    public BaggageResponse byTag(@PathVariable @NotBlank String tagNumber) {
+    @Operation(summary = "Look up a bag by its tag number",
+            description = "Public, like the GraphQL query `baggage`: a passenger can follow a bag without logging "
+                    + "in, and the tag number itself is the secret.")
+    @ApiResponse(responseCode = "200", description = "The bag")
+    @ApiResponse(responseCode = "404", description = "No bag with that tag (`code`: NOT_FOUND)",
+            content = @Content(mediaType = PROBLEM_JSON, schema = @Schema(implementation = ProblemDetail.class)))
+    public BaggageResponse byTag(
+            @Parameter(description = "Tag number, e.g. BAG-7KQ2ZP14", example = "BAG-7KQ2ZP14")
+            @PathVariable @NotBlank String tagNumber) {
         return baggageService.byTag(tagNumber).map(BaggageResponse::from)
                 .orElseThrow(() -> ApiException.notFound("Baggage", tagNumber));
     }
 
     @GetMapping("/bookings/{reference}/baggage")
+    @SecurityRequirement(name = OpenApiConfig.KEYCLOAK_SCHEME)
+    @Operation(summary = "All bags of a booking",
+            description = "Ordered by registration time. Requires PASSENGER or OPERATIONS.")
+    @ApiResponse(responseCode = "200", description = "The bags of the booking (an empty list if it has none)")
+    @ApiResponse(responseCode = "401", description = "No or invalid token (`code`: UNAUTHORIZED)",
+            content = @Content(mediaType = PROBLEM_JSON, schema = @Schema(implementation = ProblemDetail.class)))
+    @ApiResponse(responseCode = "403", description = "The role does not allow this (`code`: FORBIDDEN)",
+            content = @Content(mediaType = PROBLEM_JSON, schema = @Schema(implementation = ProblemDetail.class)))
     public List<BaggageResponse> byBooking(
+            @Parameter(description = "Booking reference, 6 alphanumeric characters", example = "K7Q2ZP")
             @PathVariable @Pattern(regexp = REFERENCE_PATTERN, message = "must be 6 alphanumeric characters")
             String reference) {
         return baggageService.byBooking(reference).stream().map(BaggageResponse::from).toList();
     }
 
     @PatchMapping(path = "/baggage/{tagNumber}/status", consumes = MediaType.APPLICATION_JSON_VALUE)
-    public BaggageResponse updateStatus(@PathVariable @NotBlank String tagNumber,
-                                        @Valid @RequestBody UpdateBaggageStatusRequest request) {
+    @SecurityRequirement(name = OpenApiConfig.KEYCLOAK_SCHEME)
+    @Operation(summary = "Move a bag to a new status",
+            description = "Ground staff moving a bag through the airport (REGISTERED -> SECURITY -> LOADED -> "
+                    + "IN_TRANSIT -> ARRIVED, or LOST). A missing `location` keeps the previous one. "
+                    + "Publishes the event `baggage.status.changed`. Requires OPERATIONS.")
+    @ApiResponse(responseCode = "200", description = "The updated bag")
+    @ApiResponse(responseCode = "401", description = "No or invalid token (`code`: UNAUTHORIZED)",
+            content = @Content(mediaType = PROBLEM_JSON, schema = @Schema(implementation = ProblemDetail.class)))
+    @ApiResponse(responseCode = "403", description = "Not an OPERATIONS user (`code`: FORBIDDEN)",
+            content = @Content(mediaType = PROBLEM_JSON, schema = @Schema(implementation = ProblemDetail.class)))
+    @ApiResponse(responseCode = "404", description = "No bag with that tag (`code`: NOT_FOUND)",
+            content = @Content(mediaType = PROBLEM_JSON, schema = @Schema(implementation = ProblemDetail.class)))
+    public BaggageResponse updateStatus(
+            @Parameter(description = "Tag number of the bag", example = "BAG-7KQ2ZP14")
+            @PathVariable @NotBlank String tagNumber,
+            @Valid @RequestBody UpdateBaggageStatusRequest request) {
         return BaggageResponse.from(baggageService.updateStatus(tagNumber, request.status(), request.location()));
     }
 }

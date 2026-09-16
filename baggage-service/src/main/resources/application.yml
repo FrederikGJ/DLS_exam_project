@@ -32,7 +32,10 @@ spring:
           max-interval: 3s
   mvc:
     problemdetails:
-      enabled: true               # REST errors as RFC 9457 application/problem+json (rest/RestExceptionHandler)
+      # REST errors as RFC 9457 application/problem+json. rest/RestExceptionHandler is a
+      # ResponseEntityExceptionHandler and therefore takes over the mapping for the REST API itself (it adds the
+      # `code` member); the flag documents that the same shape applies and keeps it if that advice is ever removed.
+      enabled: true
   graphql:
     path: ${GRAPHQL_PATH:/api/baggage/graphql}
     graphiql:
@@ -47,6 +50,17 @@ spring:
           # browser-facing address the token was issued for). Both are set, so Spring never calls OIDC discovery.
           issuer-uri: ${OIDC_ISSUER_URI:http://localhost:8180/realms/airport}
           jwk-set-uri: ${JWK_SET_URI:http://localhost:8180/realms/airport/protocol/openid-connect/certs}
+
+# OpenAPI 3 for the REST API v1 (springdoc). Both paths are permitAll in config/SecurityConfig and are routed
+# through the Ingress (k8s/base/ingress.yaml), so Swagger UI works both in compose and on kind.
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method
+    display-request-duration: true
+  paths-to-match: /api/baggage/v1/**     # the GraphQL endpoint is documented by its own schema, not here
 
 server:
   port: ${SERVER_PORT:8080}

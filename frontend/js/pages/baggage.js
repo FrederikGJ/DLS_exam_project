@@ -1,5 +1,7 @@
 // Bagage: register baggage on a booking, list bags and update their status/location.
-import { baggageApi, bookingApi } from '../api.js';
+// The four baggage operations go over baggage-service's REST API v1; the booking snapshot is the same service's
+// GraphQL query, so this page shows both API styles side by side in the browser's network tab (see api.js).
+import { baggageApi } from '../api.js';
 import { esc, formatDateTime, badge, toast, showError, busy, state } from '../app.js';
 
 const TYPES = ['CHECKED', 'CABIN', 'SPECIAL'];
@@ -70,14 +72,19 @@ export async function render(container, params) {
 
   function currentRef() { return refInput.value.trim().toUpperCase(); }
 
+  // baggage-service's own snapshot of the booking - exactly the data the service checks before it accepts a
+  // registration, so the hint here cannot disagree with the answer the REST call gives a moment later.
   async function loadSnapshot(ref) {
     if (!ref) { snapshotEl.textContent = ''; return; }
     try {
-      const b = await bookingApi.bookingByReference(ref);
-      if (!b) { snapshotEl.innerHTML = `<span class="muted">Ukendt booking.</span>`; return; }
-      const ok = ['CONFIRMED', 'CHECKED_IN'].includes(b.status);
-      snapshotEl.innerHTML = `${esc(b.passenger?.firstName)} ${esc(b.passenger?.lastName)} · ${esc(b.flightNumber)} · ${badge(b.status)}
-        ${ok ? '' : '<br><span style="color:var(--warning)">Bagage kræver status Bekræftet eller Checket ind.</span>'}`;
+      const b = await baggageApi.bookingSnapshot(ref);
+      if (!b) {
+        snapshotEl.innerHTML = `<span class="muted">Bagagesystemet kender ikke denne booking endnu.</span>`;
+        return;
+      }
+      const ready = ['CONFIRMED', 'CHECKED_IN'].includes(b.status);
+      snapshotEl.innerHTML = `${esc(b.passengerName)} · ${esc(b.flightNumber)} · ${badge(b.status)}
+        ${ready ? '' : '<br><span style="color:var(--warning)">Bagage kræver status Bekræftet eller Checket ind.</span>'}`;
     } catch (_) { snapshotEl.textContent = ''; }
   }
 

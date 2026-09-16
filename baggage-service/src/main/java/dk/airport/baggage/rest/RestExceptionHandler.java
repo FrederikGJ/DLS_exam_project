@@ -97,12 +97,15 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
                 status, request);
     }
 
-    /** Malformed JSON or an unknown enum value: 400 without echoing parser internals. */
+    /**
+     * Malformed JSON or an unknown enum value: 400 without echoing parser internals. Unlike the two exceptions
+     * above, this one is not an {@code ErrorResponse}, so the ProblemDetail is built from scratch here.
+     */
     @Override
     protected ResponseEntity<Object> handleHttpMessageNotReadable(HttpMessageNotReadableException ex,
                                                                   HttpHeaders headers, HttpStatusCode status,
                                                                   WebRequest request) {
-        ProblemDetail body = withCode(ex.getBody(), ErrorCode.VALIDATION_ERROR,
+        ProblemDetail body = withCode(ProblemDetail.forStatus(status), ErrorCode.VALIDATION_ERROR,
                 "Request body is not valid JSON for this endpoint (check field names, enum values and types)");
         return handleExceptionInternal(ex, body, headers, status, request);
     }

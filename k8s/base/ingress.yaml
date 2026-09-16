@@ -1,6 +1,7 @@
 # Single entry point. No host is set so the cluster IP (e.g. `minikube ip`) works directly.
 # Each Spring service serves GraphQL at its own /api/<x>/graphql path (GRAPHQL_PATH), so no rewrite is needed.
-# /graphiql and /actuator of the services are deliberately not exposed.
+# /graphiql and /actuator of the services are deliberately not exposed; Swagger UI (/swagger-ui, /v3/api-docs) is,
+# because the OpenAPI description of the REST API is part of the public documentation.
 # /auth is Keycloak (login), which serves under that prefix itself (KC_HTTP_RELATIVE_PATH).
 # /pgadmin (dev/demo database UI) is a separate Ingress in k8s/tools/pgadmin-ingress.yaml, only deployed by the
 # dev-tools overlay; ingress-nginx merges the rules of all Ingress objects, longest prefix wins over `/`.
@@ -49,6 +50,29 @@ spec:
             backend:
               service:
                 name: shop-service
+                port:
+                  number: 8080
+          # OpenAPI document + Swagger UI of the only REST API in the system (baggage-service, DP-10).
+          # /swagger-ui.html is a separate rule because a Prefix match only matches whole path segments.
+          - path: /v3/api-docs
+            pathType: Prefix
+            backend:
+              service:
+                name: baggage-service
+                port:
+                  number: 8080
+          - path: /swagger-ui
+            pathType: Prefix
+            backend:
+              service:
+                name: baggage-service
+                port:
+                  number: 8080
+          - path: /swagger-ui.html
+            pathType: Exact
+            backend:
+              service:
+                name: baggage-service
                 port:
                   number: 8080
           - path: /auth

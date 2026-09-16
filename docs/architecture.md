@@ -43,7 +43,9 @@ Regler der overholdes:
 
 * Én PostgreSQL-database pr. service. Ingen service læser i en anden services database.
 * Synkront: frontend → service via GraphQL over HTTP (Spring for GraphQL) med Keycloak-JWT som Bearer-token på
-  beskyttede operationer (se *Sikkerhed*). Kun actuator-endpoints (`/actuator/health`, `/actuator/info`, `/actuator/metrics`) er REST.
+  beskyttede operationer (se *Sikkerhed*). `baggage-service` udstiller derudover et versioneret REST-API
+  (`/api/baggage/v1`) oven på den samme service-klasse (se *API-versionering*); øvrige REST-endpoints er
+  actuator (`/actuator/health`, `/actuator/info`, `/actuator/metrics`) og OpenAPI/Swagger UI.
 * Asynkront: service → service via events på RabbitMQ (se [events.md](events.md)).
 * Services cacher snapshots fra events (fx booking gemmer flightnummer, afgangstid, gate og flystatus;
   baggage gemmer `booking_snapshot`). Kilden til sandhed er altid den ejende service.
@@ -102,6 +104,58 @@ Bean Validation-fejl (`ConstraintViolationException`) mappes til `VALIDATION_ERR
   gentages som helhed).
 * Consumeren parser selv envelope-JSON (ingen `__TypeId__`-magi), så services kan have hver sin kopi af
   `EventEnvelope` uden delt bibliotek.
+
+## API-versionering
+
+Systemet har tre slags API'er, og de har hver sin klient og dermed hver sin måde at udvikle sig på. Fælles regel:
+**en ændring, der kan brække en eksisterende klient, må aldrig ske i den eksisterende kontrakt.**
+
+| API-type | Hvor | Versionering | Hvem påvirkes |
+|----------|------|--------------|----------------|
+| REST | `baggage-service` `/api/baggage/v1` | Version i stien; `v2` udstilles ved siden af `v1` | Eksterne HTTP-klienter, der ikke kan opdateres samtidig |
+| GraphQL | alle fem services, `/api/<x>/graphql` | Ingen version i URL'en; felter udfases med `@deprecated` | Frontenden, der deployes sammen med backenden |
+| Events | RabbitMQ `airport.events` | Nyt eventnavn med suffiks, fx `baggage.registered.v2` | Alle consumers, som deployes uafhængigt |
+
+### REST: version i stien
+
+`/api/baggage/v1/...`. Et brud – et felt fjernes, betydningen af et felt ændres, en ny påkrævet parameter
+tilføjes, en statuskode ændres – bliver til `/api/baggage/v2` **ved siden af** v1. Begge versioner kører i samme
+service og over den samme `BaggageService`, så forretningsreglerne kun findes ét sted; det er kun DTO'erne og
+controlleren, der dubleres. v1 fjernes først, når ingen klienter bruger den (kan aflæses på adgangsloggen).
+Bagudkompatible tilføjelser – et nyt valgfrit felt i svaret, en ny endpoint – sker i v1, fordi en klient, der
+ignorerer ukendte felter, ikke brækker af dem.
+
+Alternativerne (`Accept: application/vnd.airport.v2+json`, `?version=2`, header `X-API-Version`) blev fravalgt:
+sti-versionering er synlig i browseren, i logs, i Ingress-regler og i curl-eksempler, og den kræver ikke, at
+klienten kan sætte custom headers. Prisen er, at URL'en ikke længere peger på "ressourcen" i ren REST-forstand.
+
+### GraphQL: `@deprecated` i stedet for versioner
+
+GraphQL-klienten vælger selv sine felter, så et nyt felt kan ikke brække nogen: additive ændringer er gratis.
+Et felt, der skal væk, markeres i skemaet og lever videre, indtil frontenden ikke spørger efter det mere:
+
+```graphql
+type Baggage {
+  lastLocation: String
+  location: String @deprecated(reason: "Omdøbt til lastLocation i september 2026. Fjernes når frontenden er flyttet.")
+}
+```
+
+Det er muligt her, fordi frontenden er den eneste GraphQL-klient og deployes sammen med backenden. Skulle en
+tredjepart komme til, ville samme model som REST (`/api/<x>/graphql/v2`) være næste skridt.
+
+### Events: suffiks på eventtypen
+
+Envelopen (`eventId`, `eventType`, `occurredAt`, `producer`, `payload`) er stabil; det er `payload`, der udvikler
+sig. Et nyt valgfrit felt i payloaden er bagudkompatibelt, fordi consumerne læser felt for felt
+(`payload.path("x")`) og ikke fejler på ukendte felter. Et brud får et nyt eventnavn med suffiks, fx
+`baggage.registered.v2`, som publiceres **ved siden af** `baggage.registered` i en overgangsperiode. Fordi
+køerne binder på `<prefix>.#` (fx `baggage.#`), modtager eksisterende consumers automatisk begge, og de kan
+ignorere det nye navn, indtil de er flyttet – derefter stopper producenten det gamle event. Alternativet (et
+`version`-felt i envelopen) blev fravalgt, fordi routing key'en så ikke kan bruges til at filtrere.
+
+Eventkontrakterne er dokumenteret i [events.md](events.md), REST-kontrakten i
+`docs/openapi/baggage-v1.yaml` (genereret fra koden af springdoc).
 
 ## Flows
 

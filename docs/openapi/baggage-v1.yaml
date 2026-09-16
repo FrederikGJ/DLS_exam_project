@@ -1,0 +1,360 @@
+openapi: 3.1.0
+info:
+  title: Airport baggage API
+  description: |-
+    Baggage of the airport system: register a bag on a confirmed booking, look it up by tag, list the bags of a booking and move a bag to a new status.
+
+    The version is part of the path (`/api/baggage/v1`), so a breaking change becomes `/api/baggage/v2` next to it while v1 keeps working. Errors are RFC 9457 problem details (`application/problem+json`) with an extra `code` member that uses the same vocabulary as the GraphQL API's `errors[].extensions.code`.
+
+    The same operations are available over GraphQL at `/api/baggage/graphql`.
+  version: v1
+servers:
+- url: /
+  description: Same origin as the frontend (Kubernetes Ingress)
+- url: http://localhost:8084
+  description: docker compose
+tags:
+- name: Baggage
+  description: Bags bound to a booking reference
+paths:
+  /api/baggage/v1/baggage:
+    post:
+      tags:
+      - Baggage
+      summary: Register a bag on a booking
+      description: "The booking must be known to baggage-service (a booking.confirmed\
+        \ event) and be CONFIRMED or CHECKED_IN. Max 3 CHECKED bags per booking, max\
+        \ 32 kg per bag. Publishes the event `baggage.registered`. Requires PASSENGER\
+        \ or OPERATIONS."
+      operationId: register
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterBaggageRequest"
+        required: true
+      responses:
+        "201":
+          description: The bag was registered
+          headers:
+            Location:
+              description: URL of the new bag
+              style: simple
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BaggageResponse"
+        "401":
+          description: "No or invalid token (`code`: UNAUTHORIZED)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "The role does not allow this (`code`: FORBIDDEN)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "404":
+          description: "Unknown booking (`code`: NOT_FOUND)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "409":
+          description: "The booking is not paid for (`code`: INVALID_STATE)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "422":
+          description: "A business rule says no (`code`: VALIDATION_ERROR / BAGGAGE_LIMIT_EXCEEDED)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "400":
+          description: "The request is malformed (`code`: VALIDATION_ERROR)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "500":
+          description: "Unexpected error (`code`: INTERNAL_ERROR)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+      security:
+      - keycloak: []
+  /api/baggage/v1/baggage/{tagNumber}/status:
+    patch:
+      tags:
+      - Baggage
+      summary: Move a bag to a new status
+      description: "Ground staff moving a bag through the airport (REGISTERED -> SECURITY\
+        \ -> LOADED -> IN_TRANSIT -> ARRIVED, or LOST). A missing `location` keeps\
+        \ the previous one. Publishes the event `baggage.status.changed`. Requires\
+        \ OPERATIONS."
+      operationId: updateStatus
+      parameters:
+      - name: tagNumber
+        in: path
+        description: Tag number of the bag
+        required: true
+        schema:
+          type: string
+          minLength: 1
+        example: BAG-7KQ2ZP14
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateBaggageStatusRequest"
+        required: true
+      responses:
+        "200":
+          description: The updated bag
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BaggageResponse"
+        "401":
+          description: "No or invalid token (`code`: UNAUTHORIZED)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Not an OPERATIONS user (`code`: FORBIDDEN)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "404":
+          description: "No bag with that tag (`code`: NOT_FOUND)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "400":
+          description: "The request is malformed (`code`: VALIDATION_ERROR)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "500":
+          description: "Unexpected error (`code`: INTERNAL_ERROR)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+      security:
+      - keycloak: []
+  /api/baggage/v1/bookings/{reference}/baggage:
+    get:
+      tags:
+      - Baggage
+      summary: All bags of a booking
+      description: Ordered by registration time. Requires PASSENGER or OPERATIONS.
+      operationId: byBooking
+      parameters:
+      - name: reference
+        in: path
+        description: "Booking reference, 6 alphanumeric characters"
+        required: true
+        schema:
+          type: string
+          pattern: "^[A-Za-z0-9]{6}$"
+        example: K7Q2ZP
+      responses:
+        "200":
+          description: The bags of the booking (an empty list if it has none)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BaggageResponse"
+        "401":
+          description: "No or invalid token (`code`: UNAUTHORIZED)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "The role does not allow this (`code`: FORBIDDEN)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "400":
+          description: "The request is malformed (`code`: VALIDATION_ERROR)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "500":
+          description: "Unexpected error (`code`: INTERNAL_ERROR)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+      security:
+      - keycloak: []
+  /api/baggage/v1/baggage/{tagNumber}:
+    get:
+      tags:
+      - Baggage
+      summary: Look up a bag by its tag number
+      description: "Public, like the GraphQL query `baggage`: a passenger can follow\
+        \ a bag without logging in, and the tag number itself is the secret."
+      operationId: byTag
+      parameters:
+      - name: tagNumber
+        in: path
+        description: "Tag number, e.g. BAG-7KQ2ZP14"
+        required: true
+        schema:
+          type: string
+          minLength: 1
+        example: BAG-7KQ2ZP14
+      responses:
+        "200":
+          description: The bag
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BaggageResponse"
+        "404":
+          description: "No bag with that tag (`code`: NOT_FOUND)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "400":
+          description: "The request is malformed (`code`: VALIDATION_ERROR)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "500":
+          description: "Unexpected error (`code`: INTERNAL_ERROR)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+components:
+  schemas:
+    RegisterBaggageRequest:
+      type: object
+      properties:
+        bookingReference:
+          type: string
+          minLength: 1
+          pattern: "^[A-Za-z0-9]{6}$"
+        weightKg:
+          type: number
+        type:
+          type: string
+          enum:
+          - CHECKED
+          - CABIN
+          - SPECIAL
+      required:
+      - bookingReference
+      - type
+      - weightKg
+    ProblemDetail:
+      type: object
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type:
+          - string
+          - "null"
+        status:
+          type: integer
+          format: int32
+        detail:
+          type:
+          - string
+          - "null"
+        instance:
+          type:
+          - string
+          - "null"
+          format: uri
+        properties:
+          type:
+          - object
+          - "null"
+          additionalProperties: {}
+    BaggageResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        tagNumber:
+          type: string
+        bookingReference:
+          type: string
+        passengerName:
+          type: string
+        flightNumber:
+          type: string
+        weightKg:
+          type: number
+        type:
+          type: string
+          enum:
+          - CHECKED
+          - CABIN
+          - SPECIAL
+        status:
+          type: string
+          enum:
+          - REGISTERED
+          - SECURITY
+          - LOADED
+          - IN_TRANSIT
+          - ARRIVED
+          - LOST
+        lastLocation:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    UpdateBaggageStatusRequest:
+      type: object
+      properties:
+        status:
+          type: string
+          enum:
+          - REGISTERED
+          - SECURITY
+          - LOADED
+          - IN_TRANSIT
+          - ARRIVED
+          - LOST
+        location:
+          type: string
+          maxLength: 100
+          minLength: 0
+      required:
+      - status
+  securitySchemes:
+    keycloak:
+      type: http
+      description: Keycloak access token from realm `airport` (roles PASSENGER / OPERATIONS)
+      scheme: bearer
+      bearerFormat: JWT

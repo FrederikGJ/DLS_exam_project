@@ -15,6 +15,7 @@ data:
       BOOKING_URL: '/api/bookings/graphql',
       PAYMENT_URL: '/api/payments/graphql',
       BAGGAGE_URL: '/api/baggage/graphql',
+      BAGGAGE_REST_URL: '/api/baggage/v1',
       SHOP_URL: '/api/shops/graphql',
       KEYCLOAK_URL: window.location.origin + '/auth',
       KEYCLOAK_REALM: 'airport',

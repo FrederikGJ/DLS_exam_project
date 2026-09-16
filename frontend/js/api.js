@@ -1,7 +1,8 @@
-// GraphQL client + one small API module per backend service.
+// GraphQL + REST client and one small API module per backend service.
 // URLs come from js/config.js (window.AIRPORT_CONFIG). Every request carries the Keycloak access token when the
 // user is logged in (auth.js); UNAUTHORIZED/FORBIDDEN answers from the services are turned into Danish messages,
 // and UNAUTHORIZED also sends the user to the login page and back to the current route.
+// Four services are pure GraphQL; baggage-service is called over its versioned REST API v1 (see rest() below).
 import { getToken, login, username } from './auth.js';
 
 const cfg = window.AIRPORT_CONFIG || {};
@@ -13,6 +14,42 @@ export class GraphQLError extends Error {
     this.code = code;
     this.errors = errors;
   }
+}
+
+/**
+ * Call a versioned REST endpoint (currently only baggage-service /api/baggage/v1).
+ *
+ * Errors are RFC 9457 problem details (`application/problem+json`) whose `code` member uses the same vocabulary as
+ * GraphQL's errors[].extensions.code, so the pages keep one error model: the same GraphQLError with `.code` is
+ * thrown, UNAUTHORIZED sends the user to the login page and FORBIDDEN becomes a Danish message.
+ * `body` is serialised as JSON when given; the parsed response body is returned (null for 204).
+ */
+export async function rest(method, url, body = null, serviceName = 'servicen') {
+  if (!url) throw new GraphQLError(`Ingen URL konfigureret for ${serviceName} (se js/config.js)`, 'CONFIG_ERROR');
+  const headers = { Accept: 'application/json' };
+  if (body !== null) headers['Content-Type'] = 'application/json';
+  const token = await getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  let res;
+  try {
+    res = await fetch(url, { method, headers, body: body === null ? undefined : JSON.stringify(body) });
+  } catch (_) {
+    throw new GraphQLError(`Kan ikke nå ${serviceName}`, 'NETWORK_ERROR');
+  }
+  let payload = null;
+  try { payload = await res.json(); } catch (_) { /* 204 No Content or a non-JSON error page */ }
+  if (res.ok) return payload;
+
+  const code = (payload && payload.code) || (res.status === 401 ? 'UNAUTHORIZED' : 'HTTP_' + res.status);
+  if (code === 'UNAUTHORIZED') {
+    login();   // to Keycloak and back to this route; the user repeats the action once logged in
+    throw new GraphQLError('Log ind for at fortsætte', code);
+  }
+  if (code === 'FORBIDDEN') {
+    throw new GraphQLError(`${username() || 'Din bruger'} har ikke rettighed til denne handling`, code);
+  }
+  throw new GraphQLError((payload && (payload.detail || payload.title))
+    || `${serviceName} svarede HTTP ${res.status}`, code);
 }
 
 /**
@@ -141,26 +178,27 @@ export const paymentApi = {
 };
 
 // ---------------------------------------------------------------- baggage-service
-const BAGGAGE_FIELDS = `id tagNumber bookingReference passengerName flightNumber weightKg type status lastLocation updatedAt`;
+// The four baggage operations go through the REST API v1 (/api/baggage/v1) - the same service, the same rules and
+// the same error codes as the GraphQL API, but a versioned HTTP resource per operation. The REST answer has exactly
+// the fields of the GraphQL type Baggage, so the pages did not change. bookingSnapshot has no REST counterpart and
+// stays on GraphQL, which is why the baggage page talks to both APIs (visible in the browser's network tab).
+const v1 = (path) => (cfg.BAGGAGE_REST_URL ? cfg.BAGGAGE_REST_URL + path : '');
 
 export const baggageApi = {
-  registerBaggage: (bookingReference, weightKg, type) => gql(cfg.BAGGAGE_URL, `
-    mutation($bookingReference: String!, $weightKg: BigDecimal!, $type: BaggageType!) {
-      registerBaggage(bookingReference: $bookingReference, weightKg: $weightKg, type: $type) { ${BAGGAGE_FIELDS} }
-    }`, { bookingReference, weightKg, type }, 'baggage-service').then(d => d.registerBaggage),
+  registerBaggage: (bookingReference, weightKg, type) =>
+    rest('POST', v1('/baggage'), { bookingReference, weightKg, type }, 'baggage-service'),
 
-  updateBaggageStatus: (tagNumber, status, location) => gql(cfg.BAGGAGE_URL, `
-    mutation($tagNumber: String!, $status: BaggageStatus!, $location: String) {
-      updateBaggageStatus(tagNumber: $tagNumber, status: $status, location: $location) { ${BAGGAGE_FIELDS} }
-    }`, { tagNumber, status, location: location || null }, 'baggage-service').then(d => d.updateBaggageStatus),
+  updateBaggageStatus: (tagNumber, status, location) =>
+    rest('PATCH', v1(`/baggage/${encodeURIComponent(tagNumber)}/status`),
+      { status, location: location || null }, 'baggage-service'),
 
-  baggageByBooking: (reference) => gql(cfg.BAGGAGE_URL, `
-    query($reference: String!) { baggageByBooking(reference: $reference) { ${BAGGAGE_FIELDS} } }`,
-    { reference }, 'baggage-service').then(d => d.baggageByBooking),
+  baggageByBooking: (reference) =>
+    rest('GET', v1(`/bookings/${encodeURIComponent(reference)}/baggage`), null, 'baggage-service'),
 
-  baggage: (tagNumber) => gql(cfg.BAGGAGE_URL, `
-    query($tagNumber: String!) { baggage(tagNumber: $tagNumber) { ${BAGGAGE_FIELDS} } }`,
-    { tagNumber }, 'baggage-service').then(d => d.baggage),
+  // REST answers 404 for an unknown tag; the page expects null like the GraphQL query gave it.
+  baggage: (tagNumber) =>
+    rest('GET', v1(`/baggage/${encodeURIComponent(tagNumber)}`), null, 'baggage-service')
+      .catch(err => { if (err.code === 'NOT_FOUND') return null; throw err; }),
 
   bookingSnapshot: (reference) => gql(cfg.BAGGAGE_URL, `
     query($reference: String!) { bookingSnapshot(reference: $reference) { bookingReference passengerName flightNumber status } }`,

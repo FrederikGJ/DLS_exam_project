@@ -23,7 +23,7 @@ Dokumentation: [docs/architecture.md](docs/architecture.md) (diagram, flows, des
 |---------------------|-----------------------------------------------------------------------|
 | Frontend            | Vanilla JavaScript, HTML, CSS – serveret af nginx (ingen frameworks)  |
 | Backend             | Java 21, Spring Boot 3.5 (Maven)                                       |
-| API                 | GraphQL (Spring for GraphQL) – kun `/actuator/health` er REST         |
+| API                 | GraphQL (Spring for GraphQL) + versioneret REST v1 i `baggage-service` (OpenAPI/springdoc) |
 | Database            | PostgreSQL 16 – én database pr. service, migrationer med Flyway       |
 | Message broker      | RabbitMQ (Spring AMQP) – topic exchange `airport.events`              |
 | Containerisering    | Docker, multi-stage builds (maven → eclipse-temurin JRE)              |
@@ -38,7 +38,7 @@ Dokumentation: [docs/architecture.md](docs/architecture.md) (diagram, flows, des
 | `flight-service`  | Flyselskaber, fly, afgange, sæder (kilde til sandhed) | 8081       | `http://localhost:8081/api/flights/graphql` |
 | `booking-service` | Passagerer og bookinger, orkestrerer bookingflowet | 8082          | `http://localhost:8082/api/bookings/graphql` |
 | `payment-service` | Simuleret betalingsgateway, refunds               | 8083           | `http://localhost:8083/api/payments/graphql` |
-| `baggage-service` | Bagage bundet til booking, status-tracking        | 8084           | `http://localhost:8084/api/baggage/graphql` |
+| `baggage-service` | Bagage bundet til booking, status-tracking, **REST v1** | 8084      | `http://localhost:8084/api/baggage/graphql` + REST `/api/baggage/v1` |
 | `shop-service`    | Butikker + navigation (Dijkstra)                  | 8085           | `http://localhost:8085/api/shops/graphql` |
 | RabbitMQ          | Events mellem services                            | 5672 / 15672   | Management UI: http://localhost:15672 (airport/airport) |
 | Keycloak          | OpenID Connect-login, roller PASSENGER/OPERATIONS | 8180           | http://localhost:8180/realms/airport (admin: /admin/, admin/admin) |
@@ -46,6 +46,66 @@ Dokumentation: [docs/architecture.md](docs/architecture.md) (diagram, flows, des
 
 Hver service har GraphiQL på `http://localhost:808x/graphiql?path=/api/<x>/graphql` i dev-profilen
 og health-endpoints på `/actuator/health/liveness` og `/actuator/health/readiness`.
+
+## API'er: GraphQL og REST
+
+Fire services taler udelukkende GraphQL. `baggage-service` har **derudover** et versioneret REST-API v1 på
+`/api/baggage/v1` oven på præcis den samme forretningslogik – samme regler, samme events, samme roller – så
+systemet demonstrerer begge API-stilarter. Frontendens bagage-side kalder REST; booking-snapshottet hentes
+stadig over GraphQL, så begge kald kan ses i browserens netværksfane.
+
+| Metode  | Sti                                              | Rolle                | Svar ved succes    |
+|---------|--------------------------------------------------|----------------------|--------------------|
+| `POST`  | `/api/baggage/v1/baggage`                        | PASSENGER/OPERATIONS | `201` + `Location` |
+| `GET`   | `/api/baggage/v1/baggage/{tagNumber}`            | offentlig            | `200`              |
+| `GET`   | `/api/baggage/v1/bookings/{reference}/baggage`   | PASSENGER/OPERATIONS | `200` (liste)      |
+| `PATCH` | `/api/baggage/v1/baggage/{tagNumber}/status`     | OPERATIONS           | `200`              |
+
+Fejl er RFC 9457 problem details (`application/problem+json`) med et ekstra felt `code`, der bruger samme
+vokabular som GraphQL's `errors[].extensions.code`. En klient kan altså behandle fejl ens uanset API-stil:
+
+| HTTP  | `code`                                       | Hvornår                                                          |
+|-------|----------------------------------------------|------------------------------------------------------------------|
+| `400` | `VALIDATION_ERROR`                           | Forkert form: manglende felt, ugyldig reference, ulæselig JSON     |
+| `401` | `UNAUTHORIZED`                               | Manglende, udløbet eller ugyldigt token                           |
+| `403` | `FORBIDDEN`                                  | Gyldigt token, men rollen tillader ikke handlingen                |
+| `404` | `NOT_FOUND`                                  | Ukendt bagagetag eller ukendt booking                             |
+| `409` | `INVALID_STATE`, `CONFLICT`                  | Bookingen er ikke betalt/bekræftet; data konflikter               |
+| `422` | `VALIDATION_ERROR`, `BAGGAGE_LIMIT_EXCEEDED` | Formen er rigtig, men en forretningsregel siger nej (vægt, antal) |
+| `500` | `INTERNAL_ERROR`                             | Uventet fejl                                                      |
+
+### OpenAPI og Swagger UI
+
+Beskrivelsen genereres af springdoc ud fra controlleren, så den ikke kan komme bagud i forhold til koden:
+
+| Hvad                 | docker compose                             | kind (Ingress)                                  |
+|----------------------|--------------------------------------------|-------------------------------------------------|
+| Swagger UI           | http://localhost:8084/swagger-ui.html      | http://localhost:8090/swagger-ui/index.html     |
+| OpenAPI (JSON)       | http://localhost:8084/v3/api-docs          | http://localhost:8090/v3/api-docs               |
+| OpenAPI (YAML)       | http://localhost:8084/v3/api-docs.yaml     | http://localhost:8090/v3/api-docs.yaml          |
+
+En eksporteret kopi ligger i [docs/openapi/baggage-v1.yaml](docs/openapi/baggage-v1.yaml). I Swagger UI trykker
+man **Authorize** og indsætter et access token (se `token`-funktionen i `scripts/e2e-smoke.sh`) – derefter sender
+UI'et det som `Authorization: Bearer ...`.
+
+### Prøv REST-API'et med curl
+
+```bash
+TOKEN=$(curl -s -d grant_type=password -d client_id=airport-frontend -d username=anna -d password=anna \
+  http://localhost:8180/realms/airport/protocol/openid-connect/token | jq -r .access_token)
+
+# registrér bagage på en bekræftet booking (K7Q2ZP = din reference fra Flow A)
+curl -i -X POST http://localhost:8084/api/baggage/v1/baggage \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"bookingReference":"K7Q2ZP","weightKg":23.0,"type":"CHECKED"}'
+# -> 201 Created, Location: /api/baggage/v1/baggage/BAG-XXXXXXXX
+
+curl -s http://localhost:8084/api/baggage/v1/baggage/BAG-XXXXXXXX | jq          # offentligt opslag
+curl -s -X POST http://localhost:8084/api/baggage/v1/baggage \
+  -H 'Content-Type: application/json' -d '{}' | jq                              # -> 401 UNAUTHORIZED
+```
+
+Se [baggage-service/README.md](baggage-service/README.md) for alle endpoints og versioneringsreglerne.
 
 ## Kør lokalt med Docker
 
@@ -74,6 +134,23 @@ docker compose logs -f booking-service    # logs for én service
 docker compose down -v                    # stop og slet databaser (nulstil seed-data)
 ```
 
+### AI: sprogmodellen bag "Spørg om vej"
+
+`shop-service`s `askRoute` bruger en **lokal** sprogmodel, der kører i sin egen container (Ollama med
+`qwen2.5:1.5b` bagt ind i imaget – ingen API-nøgler, intet data forlader maskinen). Den er valgfri og ligger bag
+compose-profilen `ai`:
+
+```bash
+docker compose up --build                  # uden AI: askRoute svarer med nøgleordssøgning (aiUsed=false)
+docker compose --profile ai up --build     # med AI:  askRoute svarer med modellen  (aiUsed=true)
+```
+
+Første `--profile ai`-build henter modellen (~1 GB) ind i imaget; derefter starter containeren uden download.
+`shop-service` har **ikke** `depends_on` på den: servicen er sund uden AI, og et spørgsmål besvares så af
+nøgleordssøgningen med en forklaring i `fallbackReason`. Skift model med
+`docker compose build --build-arg OLLAMA_MODEL=<navn> ollama` og sæt `OLLAMA_MODEL` for `shop-service`.
+I Kubernetes tændes modellen med overlayet `k8s/overlays/demo` (se [k8s/README.md](k8s/README.md)).
+
 ### Prøv flows fra frontenden
 
 Læsning (afgange, butikker, opslag af booking) kræver ikke login. *Book*, *Betaling* og *Bagage* sender dig til
@@ -90,6 +167,11 @@ brugernavn og rolle. Operations-panelet under *Afgange* vises kun for brugere me
 - **Flow D – navigation:** *Butikker* → vælg "Security T2" → "Gate B12" → *Find rute* → trin-for-trin rute,
   afstand, estimeret tid, butikker undervejs og et SVG-kort med gangnetværk, nummererede trin, instruktionstekst,
   afstand pr. delstrækning og retningspile.
+- **Flow E – spørg om vej (AI):** *Butikker* → vælg hvor du er → skriv fx
+  *"Hvor finder jeg en kop kaffe på vej til gate B12?"* → *Spørg om vej*. En lokal sprogmodel (Ollama) oversætter
+  spørgsmålet til én butik + et evt. mål, og ruten tegnes som i Flow D. Svaret viser, hvordan spørgsmålet blev
+  forstået, og om det var modellen eller nødløsningen (nøgleordssøgning), der svarede. Kræver
+  `docker compose --profile ai up` – uden den svarer nøgleordssøgningen, og siden siger det tydeligt.
 
 ### Automatisk smoke-test af Flow A–D
 

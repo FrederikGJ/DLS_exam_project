@@ -105,6 +105,11 @@ kubectl -n airport get pods -w
 <http://localhost:8090/auth/> (admin console `/auth/admin/`, admin/admin – se *Keycloak (login)*) og pgAdmin på
 <http://localhost:8090/pgadmin/> (åbner direkte uden login).
 
+`baggage-service` har desuden et versioneret REST-API på <http://localhost:8090/api/baggage/v1> (dækket af den
+eksisterende `/api/baggage`-regel) med Swagger UI på <http://localhost:8090/swagger-ui/index.html> og OpenAPI-
+dokumentet på <http://localhost:8090/v3/api-docs> – de to sidste har egne regler i `base/ingress.yaml`, fordi de
+ikke ligger under `/api`. Se [rod-README'en](../README.md#apier-graphql-og-rest).
+
 Kør end-to-end-smoketesten mod Kubernetes-stakken gennem Ingress:
 
 ```bash

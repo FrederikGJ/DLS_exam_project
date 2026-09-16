@@ -61,6 +61,10 @@ public class SecurityConfig {
                         .requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/info").permitAll()
                         .requestMatchers(graphqlPath).permitAll()       // per-operation checks via @PreAuthorize
                         .requestMatchers("/graphiql", "/graphiql/**").permitAll()
+                        // OpenAPI document + Swagger UI (DP-10): the API description is public like the GraphQL
+                        // schema. Calls made FROM Swagger UI still need a token - it only sends what you paste in.
+                        .requestMatchers("/v3/api-docs", "/v3/api-docs/**", "/v3/api-docs.yaml").permitAll()
+                        .requestMatchers("/swagger-ui.html", "/swagger-ui/**").permitAll()
                         // REST v1 - public lookup, PASSENGER/OPERATIONS for the booking's bags and registration,
                         // OPERATIONS for status changes (mirrors the @PreAuthorize rules of the GraphQL API)
                         .requestMatchers(HttpMethod.GET, REST + "/baggage/*").permitAll()
