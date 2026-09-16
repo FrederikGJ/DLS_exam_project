@@ -1,0 +1,93 @@
+# notification-job as a KEDA ScaledJob (dev plan DP-21). KEDA polls the length of the queue `notifications` every
+# 5 s and starts Jobs for the waiting messages: one Job per 5 messages (`value`), at most 3 at a time. Each Job runs
+# the run-to-completion program from notification-job/ (drains the queue, logs one Danish mail per booking event,
+# exits 0 after IDLE_TIMEOUT_MS without messages) - see notification-job/README.md.
+#
+# Why a ScaledJob and not a ScaledObject on a Deployment: the program is built to finish, not to serve, so a Job is
+# the natural unit; nothing runs (and nothing is reserved) while there is no work, and a message that is being
+# handled is never cut off by a scale-in, because a Job is not scaled down - it ends by itself.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledJob
+metadata:
+  name: notification-job
+  labels:
+    app.kubernetes.io/name: notification-job
+    app.kubernetes.io/part-of: airport
+spec:
+  pollingInterval: 5                 # seconds between two looks at the queue length
+  maxReplicaCount: 3                 # never more than 3 Jobs at the same time
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  scalingStrategy:
+    strategy: default                # new Jobs = ceil(queue length / value) - Jobs still running
+  jobTargetRef:
+    parallelism: 1
+    completions: 1
+    backoffLimit: 2                  # exit 1 (broker unreachable) is retried twice, then the Job is failed
+    activeDeadlineSeconds: 300       # a hanging job is killed; MAX_MESSAGES bounds a normal run anyway
+    ttlSecondsAfterFinished: 30      # finished Jobs (and their pods) are deleted again after 30 s
+    template:
+      metadata:
+        labels:
+          app.kubernetes.io/name: notification-job
+          app.kubernetes.io/part-of: airport
+      spec:
+        restartPolicy: Never
+        securityContext:                 # same hardening as the services (image user app = uid 100, gid 101)
+          runAsNonRoot: true
+          runAsUser: 100
+          runAsGroup: 101
+          seccompProfile:
+            type: RuntimeDefault
+        volumes:
+          - name: tmp
+            emptyDir: {}
+        containers:
+          - name: notification-job
+            image: airport/notification-job:local
+            imagePullPolicy: IfNotPresent      # loaded with `kind load docker-image`, never pulled
+            securityContext:
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities:
+                drop: ["ALL"]
+            volumeMounts:
+              - name: tmp
+                mountPath: /tmp
+            env:
+              - name: RABBITMQ_HOST
+                value: rabbitmq
+              - name: RABBITMQ_PORT
+                value: "5672"
+              - name: RABBITMQ_USERNAME
+                valueFrom:
+                  secretKeyRef:
+                    name: rabbitmq-secret
+                    key: username
+              - name: RABBITMQ_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    name: rabbitmq-secret
+                    key: password
+              - name: NOTIFICATION_QUEUE
+                value: notifications
+              - name: MAX_MESSAGES
+                value: "50"
+              - name: IDLE_TIMEOUT_MS
+                value: "3000"
+            resources:
+              requests:
+                cpu: 100m
+                memory: 128Mi
+              limits:
+                cpu: 500m
+                memory: 256Mi
+  triggers:
+    - type: rabbitmq
+      metadata:
+        protocol: amqp
+        queueName: notifications
+        mode: QueueLength
+        value: "5"
+      authenticationRef:
+        name: keda-notifications

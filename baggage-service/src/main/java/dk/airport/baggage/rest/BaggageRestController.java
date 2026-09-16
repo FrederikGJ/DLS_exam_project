@@ -18,6 +18,7 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Size;
 import org.springframework.http.MediaType;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
@@ -27,6 +28,7 @@ import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -59,6 +61,10 @@ import static dk.airport.baggage.config.OpenApiConfig.PROBLEM_JSON;
 public class BaggageRestController {
 
     public static final String BASE_PATH = "/api/baggage/v1";
+    /** Request header with the client's idempotency key for a registration (DP-30). */
+    public static final String IDEMPOTENCY_KEY = "Idempotency-Key";
+    /** Response header telling whether a registration was a replay of an earlier request with the same key. */
+    public static final String IDEMPOTENT_REPLAYED = "Idempotent-Replayed";
 
     private static final String REFERENCE_PATTERN = "^[A-Za-z0-9]{6}$";
 
@@ -75,27 +81,47 @@ public class BaggageRestController {
             description = "The booking must be known to baggage-service (a booking.confirmed event) and be "
                     + "CONFIRMED or CHECKED_IN. Max 3 CHECKED bags per booking, max 32 kg per bag. "
                     + "Publishes the event `baggage.registered`. Requires PASSENGER or OPERATIONS.")
-    @ApiResponse(responseCode = "201", description = "The bag was registered",
-            headers = @Header(name = "Location", description = "URL of the new bag",
-                    schema = @Schema(type = "string")))
+    @ApiResponse(responseCode = "201", description = "The bag was registered (or, with a repeated "
+            + "Idempotency-Key, the bag the first request registered)",
+            headers = {
+                @Header(name = "Location", description = "URL of the new bag", schema = @Schema(type = "string")),
+                @Header(name = IDEMPOTENT_REPLAYED, description = "`true` when an earlier request with the same "
+                        + "Idempotency-Key registered the bag and nothing new was created",
+                        schema = @Schema(type = "boolean"))
+            })
     @ApiResponse(responseCode = "401", description = "No or invalid token (`code`: UNAUTHORIZED)",
             content = @Content(mediaType = PROBLEM_JSON, schema = @Schema(implementation = ProblemDetail.class)))
     @ApiResponse(responseCode = "403", description = "The role does not allow this (`code`: FORBIDDEN)",
             content = @Content(mediaType = PROBLEM_JSON, schema = @Schema(implementation = ProblemDetail.class)))
     @ApiResponse(responseCode = "404", description = "Unknown booking (`code`: NOT_FOUND)",
             content = @Content(mediaType = PROBLEM_JSON, schema = @Schema(implementation = ProblemDetail.class)))
-    @ApiResponse(responseCode = "409", description = "The booking is not paid for (`code`: INVALID_STATE)",
+    @ApiResponse(responseCode = "409", description = "The booking is not paid for (`code`: INVALID_STATE), or the "
+            + "Idempotency-Key was already used for another registration (`code`: CONFLICT)",
             content = @Content(mediaType = PROBLEM_JSON, schema = @Schema(implementation = ProblemDetail.class)))
     @ApiResponse(responseCode = "422",
             description = "A business rule says no (`code`: VALIDATION_ERROR / BAGGAGE_LIMIT_EXCEEDED)",
             content = @Content(mediaType = PROBLEM_JSON, schema = @Schema(implementation = ProblemDetail.class)))
-    public ResponseEntity<BaggageResponse> register(@Valid @RequestBody RegisterBaggageRequest request) {
-        Baggage bag = baggageService.register(request.bookingReference(), request.weightKg(), request.type());
+    public ResponseEntity<BaggageResponse> register(
+            @Valid @RequestBody RegisterBaggageRequest request,
+            @Parameter(description = "Optional key for this one registration, e.g. a UUID per form (max 64 "
+                    + "characters). A repeated request with the same key - double click, retry after a timeout - "
+                    + "answers with the bag the first request registered instead of registering a second one.",
+                    example = "3f1c2a8e-8d0e-4f3c-9a6b-1d2e3f4a5b6c")
+            @RequestHeader(name = IDEMPOTENCY_KEY, required = false)
+            @Size(max = BaggageService.MAX_IDEMPOTENCY_KEY, message = "must be at most 64 characters")
+            String idempotencyKey) {
+        BaggageService.Registration registration = baggageService.register(request.bookingReference(),
+                request.weightKg(), request.type(), idempotencyKey);
+        Baggage bag = registration.baggage();
         // Relative Location on purpose: behind the Ingress the absolute scheme/host/port seen by the pod is not
         // the one the client used (X-Forwarded-Port is 80, not 8090), and a relative reference is resolved by the
         // client against the URL it just called.
         URI location = URI.create(BASE_PATH + "/baggage/" + bag.getTagNumber());
-        return ResponseEntity.created(location).body(BaggageResponse.from(bag));
+        // A replay answers exactly like the first request (201, same Location and body), so a client that retries
+        // after a lost response cannot tell the difference - except through this header.
+        return ResponseEntity.created(location)
+                .header(IDEMPOTENT_REPLAYED, String.valueOf(registration.replayed()))
+                .body(BaggageResponse.from(bag));
     }
 
     @GetMapping("/baggage/{tagNumber}")

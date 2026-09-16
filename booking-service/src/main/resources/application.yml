@@ -73,6 +73,10 @@ app:
       payment-events: booking-service.payment-events
       flight-events: booking-service.flight-events
       dead-letter: booking-service.dlq
+      # notification-job's work queue (booking.#) and its DLQ - declared here too, see config/RabbitConfig
+      notifications: notifications
+      notifications-dead-letter: notification-job.dlq
+    notification-consumer: notification-job   # dead-letter routing key of the notifications queue
   outbox:                               # transactional outbox (see messaging/OutboxRelay)
     poll-interval-ms: ${OUTBOX_POLL_INTERVAL_MS:500}
     batch-size: 100

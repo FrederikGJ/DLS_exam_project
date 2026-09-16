@@ -21,6 +21,7 @@ resources:
   - services/payment-service.yaml
   - services/baggage-service.yaml
   - services/shop-service.yaml
+  - services/shop-service-hpa.yaml   # HorizontalPodAutoscaler 1-3 pods at 70 % CPU (needs metrics-server)
   - frontend/frontend.yaml
   - ../keycloak          # Keycloak Deployment/Service/Secret + realm ConfigMap (k8s/keycloak/kustomization.yaml)
   - ingress.yaml

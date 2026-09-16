@@ -88,6 +88,7 @@ public class SecurityConfig {
         config.setAllowedOrigins(origins);
         config.setAllowedMethods(List.of("GET", "POST", "PATCH", "OPTIONS"));   // PATCH: REST status update
         config.setAllowedHeaders(List.of("*"));
+        config.setExposedHeaders(List.of("Location", "Idempotent-Replayed"));   // readable by browser REST clients
         config.setMaxAge(3600L);
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/**", config);

@@ -14,7 +14,7 @@ const ROUTE_COLOR = { start: '#16a34a', end: '#dc2626', mid: '#1f5fbf' };
 const ASK_EXAMPLES = [
   'Hvor finder jeg en kop kaffe på vej til gate B12?',
   'Jeg vil købe parfume inden jeg går til gate C21',
-  'Hvor kan jeg få noget at spise i terminal 1?',
+  'Hvor kan jeg få noget mod køresyge?',
 ];
 
 export async function render(container, params) {
@@ -304,7 +304,7 @@ export async function render(container, params) {
     askAnswer.innerHTML = `<div class="ai-answer">
       <div class="ai-head">${source}<span class="muted small">svar på ${esc(seconds)} s</span></div>
       ${fallback}
-      <p class="ai-interpretation">“${esc(a.interpretation)}”</p>
+      <p class="ai-interpretation">${esc(a.interpretation)}</p>
       ${onward}${shop}
     </div>`;
     bindGoto(askAnswer);

@@ -18,15 +18,20 @@ import java.util.Optional;
 
 /**
  * "Spørg om vej" (dev plan DP-17): a passenger asks in natural language where to go, a local language model
- * (Ollama, see {@link OllamaClient}) maps the question to one shop and an optional destination, and the existing
- * Dijkstra routing ({@link RouteService}) produces the route. The model only ever picks ids from lists this
- * service gave it, and every id is checked against the database before it is used, so the model cannot make the
- * service route to something that does not exist.
+ * (Ollama, see {@link OllamaClient}) interprets the question, and the existing Dijkstra routing
+ * ({@link RouteService}) produces the route.
  *
- * <p>The model is optional: when AI is disabled, Ollama is unreachable or slow (timeout), the answer is not a
- * JSON object, or the chosen id is unknown, {@link KeywordMatcher} answers instead and the reply says so
- * ({@code aiUsed=false}, {@code fallbackReason}). Only the routing part can fail the query, with the same
- * NOT_FOUND / ROUTE_NOT_FOUND codes as {@code route}.
+ * <p>Division of labour: the model <em>understands</em> (it translates the question, names the need in English
+ * words and suggests one shop from a closed list, see {@link ConciergePrompt}); the code <em>decides</em>
+ * ({@link KeywordMatcher} scores every shop on the question plus the model's words, gives the suggested shop a small
+ * bonus, and ties go to the nearest shop). So the model can never route to something that does not exist, and a
+ * wrong suggestion from a small model loses to a clear match in the question. The destination ("på vej til gate
+ * B12") is found in the question itself.
+ *
+ * <p>The model is optional: when AI is disabled, Ollama is unreachable or slow (timeout) or the answer is not the
+ * promised JSON, the same scoring runs on the question alone and the reply says so ({@code aiUsed=false},
+ * {@code fallbackReason}). Only the routing part can fail the query, with the same NOT_FOUND / ROUTE_NOT_FOUND codes
+ * as {@code route}.
  *
  * <p>Not transactional on purpose: a chat call can take seconds, and no database connection should be held
  * while waiting for it. The repositories and RouteService open their own short transactions.
@@ -74,11 +79,15 @@ public class AiConciergeService {
         if (!props.enabled()) {
             return fallback(q, from, accessibleOnly, allShops, places, "AI er slået fra (AI_ENABLED=false)");
         }
+        if (allShops.isEmpty()) {
+            return fallback(q, from, accessibleOnly, allShops, places, "Der er ingen butikker at vælge imellem");
+        }
 
         long started = System.nanoTime();
         String content;
         try {
-            content = ollama.chat(ConciergePrompt.system(allShops, places), ConciergePrompt.user(q, from));
+            content = ollama.chat(ConciergePrompt.system(allShops), ConciergePrompt.user(q, from),
+                    ConciergePrompt.answerSchema(allShops));
         } catch (OllamaClient.OllamaException e) {
             log.warn("askRoute: Ollama gave no answer after {} ms, using keyword fallback: {}", millisSince(started),
                     e.getMessage());
@@ -87,34 +96,27 @@ public class AiConciergeService {
 
         Optional<ConciergeAnswer> parsed = ConciergeAnswer.parse(content, mapper);
         if (parsed.isEmpty()) {
-            log.warn("askRoute: model answer is not a JSON object, using keyword fallback: {}",
+            log.warn("askRoute: model answer is not the promised JSON, using keyword fallback: {}",
                     cut(ConciergePrompt.oneLine(content)));
             return fallback(q, from, accessibleOnly, allShops, places, "Modellens svar var ikke gyldig JSON");
         }
         ConciergeAnswer answer = parsed.get();
-        if (answer.shopId() == null) {
-            return fallback(q, from, accessibleOnly, allShops, places, "Modellen fandt ingen passende butik");
+        KeywordMatcher.Match match = KeywordMatcher.match(q, answer.need(), answer.shop(), allShops, places, from);
+        log.info("askRoute: model read \"{}\" as need \"{}\", suggested {} (fits={}) in {} ms; candidates {}",
+                answer.english(), answer.need(), answer.shop(), answer.fits(), millisSince(started),
+                match.candidates().stream().map(Shop::getName).toList());
+
+        NavNode to = match.toNode();
+        String understood = answer.need().isEmpty() ? "" : " \"" + answer.need() + "\"";
+        if (match.candidates().isEmpty()) {
+            String interpretation = "Sprogmodellen forstod spørgsmålet" + understood
+                    + ", men ingen butik i lufthavnen passer.";
+            return new AiRouteAnswer(interpretation, null, to, null, true, null, ollama.model());
         }
-        Shop shop = allShops.stream().filter(s -> s.getId().equals(answer.shopId())).findFirst().orElse(null);
-        if (shop == null) {
-            return fallback(q, from, accessibleOnly, allShops, places,
-                    "Modellen svarede med et ukendt butiks-id (" + answer.shopId() + ")");
-        }
-        if (shop.getNode() == null) {
-            return fallback(q, from, accessibleOnly, allShops, places,
-                    "Butikken " + shop.getName() + " har ingen position på kortet");
-        }
-        NavNode to = null;
-        if (answer.toNodeId() != null) {
-            to = places.stream().filter(n -> n.getId().equals(answer.toNodeId())).findFirst().orElse(null);
-            if (to == null) {
-                log.warn("askRoute: model named unknown destination node {}, ignoring it", answer.toNodeId());
-            }
-        }
+        Shop shop = nearest(from, match.candidates(), accessibleOnly);
         Route route = routeTo(from, shop, to, accessibleOnly);
-        String interpretation = answer.interpretation() != null ? answer.interpretation() : describe(shop, to);
-        log.info("askRoute: model chose {} (destination {}) in {} ms for \"{}\"", shop.getName(),
-                to == null ? "-" : to.getName(), millisSince(started), q);
+        String interpretation = "Sprogmodellen forstod" + (understood.isEmpty() ? " spørgsmålet" : understood) + ": "
+                + shop.getName() + (to == null ? "" : " på vej til " + to.getName());
         return new AiRouteAnswer(interpretation, shop, to, route, true, null, ollama.model());
     }
 
@@ -135,7 +137,7 @@ public class AiConciergeService {
         return new AiRouteAnswer(interpretation, shop, to, route, false, reason, null);
     }
 
-    /** Ties in the keyword score are settled by walking distance from the passenger; unreachable shops are skipped. */
+    /** Ties in the score are settled by walking distance from the passenger; unreachable shops are skipped. */
     private Shop nearest(NavNode from, List<Shop> candidates, boolean accessibleOnly) {
         if (candidates.size() == 1) {
             return candidates.get(0);
@@ -165,10 +167,6 @@ public class AiConciergeService {
         return to == null
                 ? routes.route(from.getId(), shopNode, accessibleOnly)
                 : routes.routeVia(from.getId(), shopNode, to.getId(), accessibleOnly);
-    }
-
-    private static String describe(Shop shop, NavNode to) {
-        return "Du leder efter " + shop.getName() + (to == null ? "" : " på vej til " + to.getName()) + ".";
     }
 
     private static String cut(String s) {

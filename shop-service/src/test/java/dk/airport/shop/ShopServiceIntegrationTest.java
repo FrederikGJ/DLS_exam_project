@@ -21,6 +21,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.graphql.test.tester.GraphQlTester;
 import org.springframework.graphql.test.tester.HttpGraphQlTester;
 import org.springframework.http.HttpHeaders;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -72,6 +73,7 @@ class ShopServiceIntegrationTest {
     @Autowired EventPublisher eventPublisher;
     @Autowired TransactionTemplate transactionTemplate;
     @Autowired MeterRegistry meterRegistry;
+    @Autowired JdbcTemplate jdbcTemplate;
 
     @BeforeEach
     void authenticatedClients() {
@@ -237,6 +239,71 @@ class ShopServiceIntegrationTest {
     }
 
     @Test
+    void deletedShopLeavesATombstoneThatNoQuerySees() {
+        long north = nodeId("Junction T1 North");
+        long central = nodeId("Junction T1 Central");
+        Long shopId = asOperations.document("""
+                mutation($nodeId: ID!) {
+                  createShop(input: { name: "Tombstone Kiosk", category: RETAIL, terminal: "T1", zone: "Pier A",
+                                      floor: 0, openingHours: "24/7", description: "gravsten", nodeId: $nodeId }) { id }
+                }""")
+                .variable("nodeId", north)
+                .execute()
+                .path("createShop.id").entity(Long.class).get();
+        assertThat(shopsAlongRoute(central, north)).contains("Tombstone Kiosk");
+
+        asOperations.document("mutation($id: ID!) { deleteShop(id: $id) }")
+                .variable("id", shopId).execute()
+                .path("deleteShop").entity(Boolean.class).isEqualTo(true);
+
+        // gone from every read path ...
+        graphQlTester.document("query($id: ID!) { shop(id: $id) { id } }")
+                .variable("id", shopId).execute()
+                .path("shop").valueIsNull();
+        graphQlTester.document("{ shops { name } }").execute()
+                .path("shops[*].name").entityList(String.class).doesNotContain("Tombstone Kiosk");
+        graphQlTester.document("{ searchShops(text: \"gravsten\") { name } }").execute()
+                .path("searchShops").entityList(Object.class).hasSize(0);
+        graphQlTester.document("{ navNodes(terminal: \"T1\") { name shops { name } } }").execute()
+                .path("navNodes[?(@.name == 'Junction T1 North')].shops[*].name").entityList(String.class)
+                .doesNotContain("Tombstone Kiosk");
+        assertThat(shopsAlongRoute(central, north)).doesNotContain("Tombstone Kiosk");
+        asOperations.document("""
+                mutation($id: ID!) {
+                  updateShop(id: $id, input: { name: "Back again", category: RETAIL, terminal: "T1", zone: "Pier A",
+                                               floor: 0, openingHours: "24/7" }) { id }
+                }""")
+                .variable("id", shopId).execute()
+                .errors().satisfy(errors ->
+                        assertThat(errors.get(0).getExtensions()).containsEntry("code", "NOT_FOUND"));
+
+        // ... but the row is still there, with the time it was deleted
+        Map<String, Object> row = jdbcTemplate.queryForMap("SELECT name, deleted_at FROM shop WHERE id = ?", shopId);
+        assertThat(row.get("name")).isEqualTo("Tombstone Kiosk");
+        assertThat(row.get("deleted_at")).isNotNull();
+    }
+
+    @Test
+    void createShopWithTheSameIdempotencyKeyCreatesOneShop() {
+        String key = UUID.randomUUID().toString();
+        long first = createShopWithKey("Idempotent Kiosk", key).path("createShop.id").entity(Long.class).get();
+        long second = createShopWithKey("Idempotent Kiosk", key).path("createShop.id").entity(Long.class).get();
+
+        assertThat(second).isEqualTo(first);
+        assertThat(jdbcTemplate.queryForObject("SELECT count(*) FROM shop WHERE idempotency_key = ?", Long.class, key))
+                .isEqualTo(1L);
+        // without a key every call creates a new shop, as before
+        assertThat(createShopWithKey("Idempotent Kiosk", null).path("createShop.id").entity(Long.class).get())
+                .isNotEqualTo(first);
+
+        // the tombstone keeps the key taken: it cannot silently create the deleted shop again
+        asOperations.document("mutation($id: ID!) { deleteShop(id: $id) }").variable("id", first).execute()
+                .path("deleteShop").entity(Boolean.class).isEqualTo(true);
+        createShopWithKey("Idempotent Kiosk", key).errors().satisfy(errors ->
+                assertThat(errors.get(0).getExtensions()).containsEntry("code", "CONFLICT"));
+    }
+
+    @Test
     void validationErrorsAreReportedWithCode() {
         asOperations.document("""
                 mutation {
@@ -315,6 +382,24 @@ class ShopServiceIntegrationTest {
                 .path("navNodes").entityList(Map.class).get();
         return nodes.stream().filter(n -> name.equals(n.get("name"))).map(n -> Long.parseLong(n.get("id").toString()))
                 .findFirst().orElseThrow(() -> new AssertionError("no node named " + name));
+    }
+
+    private GraphQlTester.Response createShopWithKey(String name, String key) {
+        return asOperations.document("""
+                mutation($name: String!, $key: String) {
+                  createShop(input: { name: $name, category: SERVICE, terminal: "T2", zone: "Landside", floor: 0,
+                                      openingHours: "06:00-22:00" }, idempotencyKey: $key) { id }
+                }""")
+                .variable("name", name).variable("key", key)
+                .execute();
+    }
+
+    private List<String> shopsAlongRoute(long from, long to) {
+        return graphQlTester.document("""
+                query($from: ID!, $to: ID!) { route(fromNodeId: $from, toNodeId: $to) { shopsAlongRoute { name } } }""")
+                .variable("from", from).variable("to", to)
+                .execute()
+                .path("route.shopsAlongRoute[*].name").entityList(String.class).get();
     }
 
     private GraphQlTester.Response routeQuery(long from, long to, boolean accessibleOnly) {

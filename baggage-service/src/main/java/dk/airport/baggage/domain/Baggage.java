@@ -44,10 +44,20 @@ public class Baggage {
     @Column(name = "updated_at", nullable = false)
     private OffsetDateTime updatedAt;
 
+    /** The client's key for the request that created this bag (DP-30); null when it sent none. */
+    @Column(name = "idempotency_key", unique = true, length = 64)
+    private String idempotencyKey;
+
     protected Baggage() {}
 
     public Baggage(String tagNumber, String bookingReference, String passengerName, String flightNumber,
                    BigDecimal weightKg, BaggageType type, String lastLocation) {
+        this(tagNumber, bookingReference, passengerName, flightNumber, weightKg, type, lastLocation, null);
+    }
+
+    public Baggage(String tagNumber, String bookingReference, String passengerName, String flightNumber,
+                   BigDecimal weightKg, BaggageType type, String lastLocation, String idempotencyKey) {
+        this.idempotencyKey = idempotencyKey;
         this.tagNumber = tagNumber;
         this.bookingReference = bookingReference;
         this.passengerName = passengerName;
@@ -71,6 +81,7 @@ public class Baggage {
     public String getLastLocation() { return lastLocation; }
     public OffsetDateTime getCreatedAt() { return createdAt; }
     public OffsetDateTime getUpdatedAt() { return updatedAt; }
+    public String getIdempotencyKey() { return idempotencyKey; }
 
     /** Moves the bag to a new status/location. A null location keeps the previous one. */
     public void moveTo(BaggageStatus newStatus, String location) {

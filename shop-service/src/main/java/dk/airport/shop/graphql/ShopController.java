@@ -99,8 +99,10 @@ public class ShopController {
 
     @MutationMapping
     @PreAuthorize("hasRole('OPERATIONS')")
-    public Shop createShop(@Argument @Valid ShopInput input) {
-        return shopService.createShop(input);
+    public Shop createShop(@Argument @Valid ShopInput input,
+                           @Argument @Size(max = 64, message = "idempotencyKey must be at most 64 characters")
+                           String idempotencyKey) {
+        return shopService.createShop(input, idempotencyKey);
     }
 
     @MutationMapping

@@ -1,12 +1,22 @@
-# CI for the airport system (dev plan DP-23).
+# CI for the airport system (dev plan DP-23, DP-25, DP-26).
 #
-# Three independent jobs:
-#   backend   - one matrix leg per Spring Boot service: `mvn -Pci verify` = unit tests, Testcontainers
-#               integration tests (Docker is available on ubuntu-latest), Checkstyle and SpotBugs/find-sec-bugs.
-#               The `ci` Maven profile and its rule files live in config/ (dev plan DP-24).
+# Five independent jobs:
+#   backend   - one matrix leg per Java module (five services + notification-job): `mvn -Pci verify` = unit tests,
+#               Testcontainers integration tests (Docker is available on ubuntu-latest), Checkstyle and
+#               SpotBugs/find-sec-bugs. The `ci` Maven profile and its rule files live in config/ (dev plan DP-24).
 #   frontend  - ESLint over the static frontend. There is no build step: nginx serves the files as they are.
 #   manifests - every Kustomize build under k8s/ is rendered with `kubectl kustomize` and validated against the
 #               Kubernetes API schemas with kubeconform (strict: unknown fields are errors).
+#   security  - gitleaks over the whole git history, Trivy over the repository (secrets, Dockerfile/Kubernetes
+#               misconfigurations, npm dependencies) and over every image the system builds (OS packages and
+#               every jar). HIGH/CRITICAL findings with a fix fail the job; accepted exceptions are documented
+#               in .gitleaks.toml and .trivyignore.yaml.
+#   system    - the whole system as a user runs it: `docker compose build` + `up --wait`, scripts/e2e-smoke.sh
+#               (Flow A-D through the real services, Keycloak and RabbitMQ), then the system-tests/ module
+#               (booking <-> payment with the built images). On failure the compose logs are uploaded.
+#
+# gitleaks and Trivy are installed as release binaries pinned by version AND SHA-256 instead of through their
+# GitHub Actions: an action runs with this workflow's token and can change behind a moving tag, a checksum cannot.
 #
 # Runs on every push, so a branch is red before a pull request is opened, and on pull requests into main.
 # A new push to the same branch cancels the run that is still going for the previous commit.
@@ -32,7 +42,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [flight-service, booking-service, payment-service, baggage-service, shop-service]
+        service: [flight-service, booking-service, payment-service, baggage-service, shop-service, notification-job]
     steps:
       - uses: actions/checkout@v7
 
@@ -115,3 +125,108 @@ jobs:
             echo "::endgroup::"
           done
           exit $failed
+
+  security:
+    name: security · gitleaks + trivy
+    runs-on: ubuntu-latest
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+      TRIVY_VERSION: 0.74.0
+      TRIVY_SHA256: 2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a
+      IMAGES: flight-service booking-service payment-service baggage-service shop-service frontend notification-job
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0     # the whole history: a secret that was committed and deleted again is still leaked
+
+      - name: Install gitleaks and Trivy (pinned version + SHA-256)
+        run: |
+          curl -fsSLo gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          sudo tar -xzf gitleaks.tar.gz -C /usr/local/bin gitleaks
+          curl -fsSLo trivy.tar.gz "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  trivy.tar.gz" | sha256sum -c -
+          sudo tar -xzf trivy.tar.gz -C /usr/local/bin trivy
+          rm gitleaks.tar.gz trivy.tar.gz
+          gitleaks version && trivy --version
+
+      - name: gitleaks - every commit
+        run: gitleaks git --config .gitleaks.toml --redact --verbose .
+
+      - name: Cache the Trivy vulnerability database
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ github.run_id }}
+          restore-keys: trivy-db-
+
+      - name: Trivy - repository (secrets, misconfigurations, npm dependencies)
+        # pom.xml files are skipped here on purpose: resolving their dependency trees means hundreds of requests to
+        # Maven Central (which rate-limits CI runners). The Java dependencies are scanned exactly - as the jars that
+        # actually ship - in the image step below.
+        run: >-
+          trivy fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --ignore-unfixed
+          --ignorefile .trivyignore.yaml --skip-files '**/pom.xml' --exit-code 1 .
+
+      - name: Build the images
+        run: docker compose build $IMAGES
+
+      - name: Trivy - images (Alpine packages + every jar)
+        run: |
+          failed=0
+          for img in $IMAGES; do
+            echo "::group::airport/${img}:local"
+            trivy image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "airport/${img}:local" \
+              || failed=1
+            echo "::endgroup::"
+          done
+          exit $failed
+
+  system:
+    name: system · compose + smoke + system-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Build the images
+        run: docker compose build
+
+      - name: Start the stack
+        # Keycloak, RabbitMQ, 5 x Postgres, 5 services and the frontend; --wait blocks until every healthcheck is green.
+        run: docker compose up -d --wait --wait-timeout 300
+
+      - name: End-to-end smoke test (Flow A-D)
+        run: ./scripts/e2e-smoke.sh
+
+      - name: Collect the compose logs
+        if: failure()
+        run: |
+          docker compose ps -a > compose-ps.txt
+          docker compose logs --no-color --timestamps > compose-logs.txt
+
+      - name: Upload the compose logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: compose-logs
+          path: |
+            compose-ps.txt
+            compose-logs.txt
+          retention-days: 14
+
+      - name: Stop the stack
+        # before the system tests, which start their own containers from the same images
+        if: always()
+        run: docker compose down -v
+
+      - name: System tests (booking <-> payment with the built images)
+        working-directory: system-tests
+        run: mvn -B -ntp verify

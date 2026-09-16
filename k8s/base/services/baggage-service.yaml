@@ -72,6 +72,19 @@ spec:
         app.kubernetes.io/name: baggage-service
         app.kubernetes.io/part-of: airport
     spec:
+      # Hardening (dev plan DP-25, checked by Trivy in CI): the image already runs as the unprivileged user `app`
+      # (uid 100, gid 101); here Kubernetes enforces it, and the containers get no capabilities, no privilege
+      # escalation and a read-only root filesystem. The JVM only writes to /tmp (Tomcat's work directory), which is
+      # an emptyDir.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: tmp
+          emptyDir: {}
       # Wait until Postgres accepts connections. The JVM now boots faster than the database on a
       # cold start, and Flyway fails hard on "Connection refused" (exit 1 -> restart with back-off).
       # postgres:16-alpine is already on the node (the databases use it), so nothing extra to pull.
@@ -88,6 +101,13 @@ spec:
                 sleep 2
               done
               echo "baggage-db:5432 accepts connections"
+          securityContext:
+            runAsUser: 70                    # the postgres user of postgres:16-alpine; pg_isready needs no root
+            runAsGroup: 70
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           resources:
             requests:
               cpu: 10m
@@ -107,6 +127,14 @@ spec:
                 name: baggage-service-config
             - secretRef:
                 name: baggage-service-secret
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           env:
             - name: JAVA_TOOL_OPTIONS
               value: "-XX:MaxRAMPercentage=75.0 -XX:TieredStopAtLevel=1 -XX:+UseSerialGC -Xss512k"

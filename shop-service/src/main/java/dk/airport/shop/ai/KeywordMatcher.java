@@ -25,6 +25,12 @@ import java.util.regex.Pattern;
  * <p>Scoring per shop: +3 for a word from the shop name, +1 for a word from the description, +2 for a category
  * word, +1 when the shop is in the terminal of the destination (or, without one, of the passenger). Shops with the
  * best score above zero are the candidates; the service settles ties by walking distance.
+ *
+ * <p>The same scoring ranks the language model's answer: the model's need in English words ("painkiller",
+ * "currency exchange") is scored together with the question, and the shop the model suggested gets
+ * {@link #SUGGESTION_BONUS}. The bonus is deliberately small: it decides between shops that fit the words equally
+ * well, and it wins on its own when no word matched at all, but it cannot beat a clear keyword match (a
+ * 1.5B model sometimes suggests a juice bar for a headache).
  */
 final class KeywordMatcher {
 
@@ -37,6 +43,9 @@ final class KeywordMatcher {
      */
     record Match(List<Shop> candidates, List<String> matchedWords, NavNode toNode) {
     }
+
+    /** Points for the shop the language model suggested (see the class comment). */
+    static final int SUGGESTION_BONUS = 1;
 
     /** Words that carry no meaning for the match ("hvor finder jeg en kop ... på vej til gate"). */
     private static final Set<String> STOP_WORDS = Set.of(
@@ -63,9 +72,10 @@ final class KeywordMatcher {
         words(ShopCategory.RETAIL, "bog", "bøger", "book", "books", "magasin", "magazine", "avis", "newspaper",
                 "tøj", "clothes", "clothing", "jakke", "jacket", "skjorte", "shirt", "legetøj", "toy", "toys", "lego",
                 "elektronik", "electronics", "oplader", "charger", "høretelefoner", "headphones", "gave", "gift",
-                "souvenir", "tilbehør", "accessories");
+                "souvenir", "tilbehør", "accessories", "sweater", "coat", "reading");
         words(ShopCategory.SERVICE, "apotek", "pharmacy", "medicin", "medicine", "hovedpine", "headache", "plaster",
                 "valuta", "currency", "exchange", "veksle", "veksling", "penge", "money", "cash", "kontanter",
+                "painkiller", "painkillers", "pain", "dollars", "euros",
                 "bagage", "luggage", "baggage", "indpakning", "wrap", "opbevaring", "storage", "kuffert", "suitcase");
         words(ShopCategory.LOUNGE, "lounge", "hvile", "rest", "slappe", "relax", "ro", "quiet", "stille");
     }
@@ -80,8 +90,21 @@ final class KeywordMatcher {
     }
 
     static Match match(String question, List<Shop> shops, List<NavNode> places, NavNode from) {
+        return match(question, "", null, shops, places, from);
+    }
+
+    /**
+     * Scores the question plus extra words, with a bonus for one suggested shop.
+     *
+     * @param extraWords more words to score with the question (the model's need); the destination is only looked
+     *     for in the question itself
+     * @param suggestedShop name of the shop the model suggested (case-insensitive), or null
+     */
+    static Match match(String question, String extraWords, String suggestedShop, List<Shop> shops,
+                       List<NavNode> places, NavNode from) {
         String q = question == null ? "" : question.toLowerCase(Locale.ROOT);
-        List<String> tokens = tokens(q);
+        List<String> tokens = new ArrayList<>(tokens(q));
+        tokens.addAll(tokens(extraWords == null ? "" : extraWords.toLowerCase(Locale.ROOT)));
         NavNode to = findPlace(q, places);
         String terminal = (to != null ? to : from).getTerminal();
 
@@ -107,6 +130,9 @@ final class KeywordMatcher {
                     score += 2;
                     matched.add(t);
                 }
+            }
+            if (suggestedShop != null && ConciergePrompt.oneLine(shop.getName()).equalsIgnoreCase(suggestedShop)) {
+                score += SUGGESTION_BONUS;
             }
             if (score > 0) {
                 if (shop.getTerminal().equalsIgnoreCase(terminal)) {

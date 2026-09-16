@@ -27,7 +27,9 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.hasItems;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.jsonPath;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
@@ -43,9 +45,10 @@ import static org.springframework.test.web.client.response.MockRestResponseCreat
  * auto-configured {@code RestClient.Builder} that {@code OllamaClient} is built from, and the customizer hands out
  * the bound server. ({@code @AutoConfigureMockRestServiceServer} cannot be used here: with RANDOM_PORT the context
  * also builds a TestRestTemplate, and the auto-configured server refuses to serve both a RestTemplate and a
- * RestClient.)
+ * RestClient.) The start-up warm-up call ({@code OllamaWarmUp}) is switched off, because the stub would count it as
+ * an unexpected request.
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = "app.ai.warm-up=false")
 @AutoConfigureHttpGraphQlTester
 @Import({TestTokens.class, AiConciergeIntegrationTest.OllamaStub.class})
 @Testcontainers
@@ -101,30 +104,29 @@ class AiConciergeIntegrationTest {
     @Test
     void modelAnswerBecomesARouteViaTheShopToTheDestination() throws Exception {
         long securityT2 = nodeId("Security T2");
-        long gateB12 = nodeId("Gate B12");
-        long starbucks = shopId("Starbucks");
         ollama.expect(requestTo(CHAT_URL))
                 .andExpect(method(HttpMethod.POST))
                 .andExpect(jsonPath("$.model").value("qwen2.5:1.5b"))
-                .andExpect(jsonPath("$.format").value("json"))
                 .andExpect(jsonPath("$.stream").value(false))
                 .andExpect(jsonPath("$.options.temperature").value(0))
+                .andExpect(jsonPath("$.format.required", contains("english", "need", "shop", "fits")))
+                .andExpect(jsonPath("$.format.properties.shop.enum", hasItems("Starbucks", "Apoteket", "SAS Lounge")))
                 .andExpect(jsonPath("$.messages[0].role").value("system"))
-                .andExpect(jsonPath("$.messages[0].content", containsString(starbucks + " | Starbucks | FOOD | T2 |")))
-                .andExpect(jsonPath("$.messages[0].content", containsString(gateB12 + " | Gate B12 | GATE | T2 |")))
+                .andExpect(jsonPath("$.messages[0].content",
+                        containsString("- Starbucks | terminal T2 | FOOD (food and drink) | Kaffe, te og bagværk.")))
                 .andExpect(jsonPath("$.messages[1].role").value("user"))
-                .andExpect(jsonPath("$.messages[1].content", containsString("Security T2")))
-                .andExpect(jsonPath("$.messages[1].content", containsString("kop kaffe")))
-                .andRespond(withSuccess(reply("{\"shopId\": " + starbucks + ", \"toNodeId\": " + gateB12
-                        + ", \"interpretation\": \"Du vil have kaffe på vej til Gate B12\"}"),
-                        MediaType.APPLICATION_JSON));
+                .andExpect(jsonPath("$.messages[1].content")
+                        .value("I am in terminal T2. Hvor finder jeg en kop kaffe på vej til gate B12?"))
+                .andRespond(withSuccess(reply("Where can I find a cup of coffee on my way to gate B12?", "coffee",
+                        "Starbucks", true), MediaType.APPLICATION_JSON));
 
         GraphQlTester.Response r = ask("Hvor finder jeg en kop kaffe på vej til gate B12?", securityT2, false);
 
         r.path("askRoute.aiUsed").entity(Boolean.class).isEqualTo(true)
                 .path("askRoute.model").entity(String.class).isEqualTo("qwen2.5:1.5b")
                 .path("askRoute.fallbackReason").valueIsNull()
-                .path("askRoute.interpretation").entity(String.class).isEqualTo("Du vil have kaffe på vej til Gate B12")
+                .path("askRoute.interpretation").entity(String.class)
+                .isEqualTo("Sprogmodellen forstod \"coffee\": Starbucks på vej til Gate B12")
                 .path("askRoute.shop.name").entity(String.class).isEqualTo("Starbucks")
                 .path("askRoute.toNode.name").entity(String.class).isEqualTo("Gate B12")
                 // Security T2 -> Central -> Starbucks (130 m), Starbucks -> Central -> Duty Free -> North -> Pier B
@@ -145,12 +147,25 @@ class AiConciergeIntegrationTest {
     }
 
     @Test
+    void modelFindsTheShopForAQuestionWithoutKnownWords() throws Exception {
+        long entranceT1 = nodeId("Entrance T1");
+        ollama.expect(requestTo(CHAT_URL)).andRespond(withSuccess(
+                reply("Where can I get something for motion sickness?", "medicine", "Apoteket", true),
+                MediaType.APPLICATION_JSON));
+
+        ask("Hvor kan jeg få noget mod køresyge?", entranceT1, false)
+                .path("askRoute.aiUsed").entity(Boolean.class).isEqualTo(true)
+                .path("askRoute.shop.name").entity(String.class).isEqualTo("Apoteket")
+                .path("askRoute.route.steps[*].node.name").entityList(String.class)
+                .satisfies(names -> assertThat(names).containsExactly("Entrance T1", "Check-in T1", "Apotek T1"));
+        ollama.verify();
+    }
+
+    @Test
     void accessibleOnlyReachesTheModelsChoiceWithoutStairs() throws Exception {
         long central = nodeId("Junction T1 Central");
-        long lounge = shopId("SAS Lounge");
         ollama.expect(requestTo(CHAT_URL)).andRespond(withSuccess(
-                reply("{\"shopId\": " + lounge + ", \"toNodeId\": null, \"interpretation\": \"Du vil i lounge\"}"),
-                MediaType.APPLICATION_JSON));
+                reply("I would like to relax in a lounge", "lounge", "SAS Lounge", true), MediaType.APPLICATION_JSON));
 
         ask("Jeg vil gerne slappe af i en lounge", central, true)
                 .path("askRoute.aiUsed").entity(Boolean.class).isEqualTo(true)
@@ -203,21 +218,18 @@ class AiConciergeIntegrationTest {
     }
 
     @Test
-    void unknownIdAndMalformedAnswersFallBack() throws Exception {
+    void unknownShopNameIsIgnoredAndMalformedAnswerFallsBack() throws Exception {
         long securityT2 = nodeId("Security T2");
         ollama.expect(requestTo(CHAT_URL)).andRespond(withSuccess(
-                reply("{\"shopId\": 999999, \"toNodeId\": null, \"interpretation\": \"x\"}"),
-                MediaType.APPLICATION_JSON));
+                reply("coffee", "coffee", "Hamburger Heaven", true), MediaType.APPLICATION_JSON));
         ask("kaffe", securityT2, false)
-                .path("askRoute.aiUsed").entity(Boolean.class).isEqualTo(false)
-                .path("askRoute.fallbackReason").entity(String.class).satisfies(reason ->
-                        assertThat(reason).contains("999999"))
+                .path("askRoute.aiUsed").entity(Boolean.class).isEqualTo(true)
                 .path("askRoute.shop.name").entity(String.class).isEqualTo("Starbucks");
         ollama.verify();
         ollama.reset();
 
         ollama.expect(requestTo(CHAT_URL)).andRespond(withSuccess(
-                reply("I am sorry, I cannot help with that."), MediaType.APPLICATION_JSON));
+                chatResponse("I am sorry, I cannot help with that."), MediaType.APPLICATION_JSON));
         ask("kaffe", securityT2, false)
                 .path("askRoute.aiUsed").entity(Boolean.class).isEqualTo(false)
                 .path("askRoute.fallbackReason").entity(String.class).satisfies(reason ->
@@ -227,19 +239,18 @@ class AiConciergeIntegrationTest {
     }
 
     @Test
-    void nothingMatchedGivesAnAnswerWithoutShopOrRoute() throws Exception {
+    void nothingFitsGivesAnAnswerWithoutShopOrRoute() throws Exception {
         long securityT2 = nodeId("Security T2");
         ollama.expect(requestTo(CHAT_URL)).andRespond(withSuccess(
-                reply("{\"shopId\": null, \"toNodeId\": null, \"interpretation\": \"Det forstod jeg ikke\"}"),
-                MediaType.APPLICATION_JSON));
+                reply("Where is the nearest toilet?", "toilet", "Starbucks", false), MediaType.APPLICATION_JSON));
 
-        ask("xyzzy plugh", securityT2, false)
-                .path("askRoute.aiUsed").entity(Boolean.class).isEqualTo(false)
-                .path("askRoute.fallbackReason").entity(String.class).satisfies(reason ->
-                        assertThat(reason).contains("ingen passende butik"))
+        ask("Hvor er nærmeste toilet?", securityT2, false)
+                .path("askRoute.aiUsed").entity(Boolean.class).isEqualTo(true)
+                .path("askRoute.fallbackReason").valueIsNull()
                 .path("askRoute.shop").valueIsNull()
                 .path("askRoute.route").valueIsNull()
-                .path("askRoute.interpretation").entity(String.class).satisfies(i -> assertThat(i).isNotBlank());
+                .path("askRoute.interpretation").entity(String.class).satisfies(i ->
+                        assertThat(i).contains("toilet").contains("ingen butik"));
     }
 
     @Test
@@ -265,8 +276,14 @@ class AiConciergeIntegrationTest {
                 .execute();
     }
 
+    /** A model answer that follows ConciergePrompt's schema, wrapped in an /api/chat response. */
+    private String reply(String english, String need, String shop, boolean fits) throws Exception {
+        return chatResponse(objectMapper.writeValueAsString(Map.of(
+                "english", english, "need", need, "shop", shop, "fits", fits)));
+    }
+
     /** An /api/chat response as Ollama sends it in non-streaming mode; {@code content} is the model's text. */
-    private String reply(String content) throws Exception {
+    private String chatResponse(String content) throws Exception {
         return objectMapper.writeValueAsString(Map.of(
                 "model", "qwen2.5:1.5b",
                 "created_at", "2026-09-15T12:00:00Z",
@@ -282,12 +299,5 @@ class AiConciergeIntegrationTest {
                 .path("navNodes").entityList(Map.class).get();
         return nodes.stream().filter(n -> name.equals(n.get("name"))).map(n -> Long.parseLong(n.get("id").toString()))
                 .findFirst().orElseThrow(() -> new AssertionError("no node named " + name));
-    }
-
-    private long shopId(String name) {
-        List<Map> shops = graphQlTester.document("{ shops { id name } }").execute()
-                .path("shops").entityList(Map.class).get();
-        return shops.stream().filter(s -> name.equals(s.get("name"))).map(s -> Long.parseLong(s.get("id").toString()))
-                .findFirst().orElseThrow(() -> new AssertionError("no shop named " + name));
     }
 }

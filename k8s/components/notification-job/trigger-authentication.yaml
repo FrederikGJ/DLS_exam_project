@@ -1,0 +1,13 @@
+# Hands the RabbitMQ connection string from the Secret to the scaler, so it never appears in the ScaledJob itself.
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: keda-notifications
+  labels:
+    app.kubernetes.io/name: notification-job
+    app.kubernetes.io/part-of: airport
+spec:
+  secretTargetRef:
+    - parameter: host
+      name: keda-notifications
+      key: host

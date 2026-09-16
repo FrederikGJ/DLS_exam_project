@@ -1,0 +1,15 @@
+# Kustomize Component (dev plan DP-21): notification-job as a KEDA ScaledJob - the "serverless function" of the
+# system. No pod runs while the queue `notifications` is empty; when booking events arrive, KEDA starts Kubernetes
+# Jobs (one per 5 waiting messages, at most 3 at a time), each job drains the queue and exits with 0, and the
+# finished Jobs are deleted again after 30 s.
+#
+# Requires KEDA in the cluster (installed once per cluster, see k8s/README.md "Demo-overlay: AI og serverless (KEDA)") and the image on
+# the node:   kind load docker-image airport/notification-job:local --name airport
+# The queue itself is declared by booking-service (and by the job), so events are kept even before the first run.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - secret.yaml
+  - trigger-authentication.yaml
+  - scaledjob.yaml

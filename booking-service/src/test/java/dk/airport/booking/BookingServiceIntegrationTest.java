@@ -37,6 +37,7 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.List;
@@ -379,7 +380,47 @@ class BookingServiceIntegrationTest {
         assertThat(meterRegistry.get("outbox.pending").gauge().value()).isZero();
     }
 
+    // ------------------------------------------------------------------ notification-job queue (dev plan DP-20)
+
+    /**
+     * booking-service declares notification-job's queue so booking events are kept before the job has ever run.
+     * The job declares the same topology itself on every run (notification-job Topology, repeated literally below);
+     * RabbitMQ refuses a re-declaration with different arguments (PRECONDITION_FAILED), so this is the contract test
+     * between the two.
+     */
+    @Test
+    void notificationsQueueKeepsBookingEventsAndMatchesNotificationJobsDeclaration() {
+        // 1. booking-service bound the queue: a booking event lands in it although nothing consumes from it
+        String eventId = UUID.randomUUID().toString();
+        publish(eventId, "booking.test", "booking-service", Map.of("marker", "NOTIF1"));
+        await().atMost(Duration.ofSeconds(10)).until(() -> receiveUntil("notifications", eventId));
+
+        // 2. notification-job's declaration is accepted as identical
+        rabbitTemplate.execute(channel -> {
+            channel.exchangeDeclare("airport.events", "topic", true);
+            channel.exchangeDeclare("airport.events.dlx", "direct", true);
+            channel.queueDeclare("notification-job.dlq", true, false, false, null);
+            channel.queueBind("notification-job.dlq", "airport.events.dlx", "notification-job");
+            channel.queueDeclare("notifications", true, false, false, Map.of(
+                    "x-dead-letter-exchange", "airport.events.dlx",
+                    "x-dead-letter-routing-key", "notification-job"));
+            channel.queueBind("notifications", "airport.events", "booking.#");
+            return null;
+        });
+    }
+
     // ------------------------------------------------------------------ helpers
+
+    /** Takes messages off the queue until one contains {@code marker}; false if the queue ran empty first. */
+    private boolean receiveUntil(String queue, String marker) {
+        Message message;
+        while ((message = rabbitTemplate.receive(queue)) != null) {
+            if (new String(message.getBody(), StandardCharsets.UTF_8).contains(marker)) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     private static Predicate<EventEnvelope> forRef(String reference, String type) {
         return e -> e.eventType().equals(type) && e.payload().path("bookingReference").asText().equals(reference);

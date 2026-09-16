@@ -1,0 +1,46 @@
+# Horizontal scaling for shop-service (dev plan DP-15). The only autoscaled service on purpose: it serves the
+# public, read-only navigation queries (route, shops, askRoute) that every passenger can hit without logging in,
+# keeps no state in the pod, and its outbox relay is safe with several replicas (Postgres advisory lock). The
+# other services stay at replicas: 1 so the whole stack still fits on a laptop (see k8s/README.md "Ressourcer").
+#
+# Needs metrics-server (kind does not ship it - see k8s/README.md "Autoscaling"). Without it the HPA shows
+# <unknown> targets and simply keeps the current replica count.
+#
+# 70 % is measured against the pod's CPU *request* (150m), so the HPA adds a pod above ~105m average per pod -
+# well below the 500m limit, i.e. before a single pod is throttled. Try it with scripts/load-shops.sh.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: shop-service
+  labels:
+    app.kubernetes.io/name: shop-service
+    app.kubernetes.io/part-of: airport
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: shop-service
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleUp:
+      # A new JVM needs ~30-50 s before it is Ready and takes load; do not add a third pod while the second boots.
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+    scaleDown:
+      # Default is 300 s; 120 s keeps a demo short while still riding out gaps between bursts of requests.
+      stabilizationWindowSeconds: 120
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60

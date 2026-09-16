@@ -33,8 +33,14 @@ Hver service har én durable kø pr. interesse og én DLQ:
 | baggage-service | `baggage-service.booking-events`   | `booking.#`     | `baggage-service.dlq`  |
 | baggage-service | `baggage-service.flight-events`    | `flight.#`      | `baggage-service.dlq`  |
 | shop-service    | `shop-service.flight-events`       | `flight.#`      | `shop-service.dlq`     |
+| notification-job | `notifications`                   | `booking.#`     | `notification-job.dlq` |
 
 > Vi bruger `#` (0..n ord) og ikke `*` (præcis 1 ord), fordi fx `flight.status.changed` har tre segmenter.
+
+`notifications` ejes af notification-job (en run-to-completion-proces, ikke en service – se afsnittet nederst), men
+booking-service erklærer den også ved opstart med præcis samme argumenter, så booking-events gemmes, fra
+booking-service starter, også før jobbet har kørt første gang. RabbitMQ accepterer kun en ny erklæring af en
+eksisterende kø, hvis argumenterne er identiske; et kontrakttest i hver af de to sider tjekker det.
 
 Dead-letter: Køerne er oprettet med `x-dead-letter-exchange: airport.events.dlx` (direct exchange) og
 `x-dead-letter-routing-key: <service-navn>`. Spring AMQP retry (stateless, 3 forsøg med backoff) afviser
@@ -113,6 +119,7 @@ Fælles booking-payload (bruges af alle fire booking-events):
 ### `booking.created`
 Lyttere: baggage-service gemmer også dette som snapshot med status `PENDING_PAYMENT`, så en kendt men ubetalt
 booking giver `INVALID_STATE` (i stedet for `NOT_FOUND`) ved bagageregistrering. payment-service ignorerer det.
+notification-job sender mailen "Din booking … er modtaget - afventer betaling".
 ```json
 {
   "bookingId": 1, "bookingReference": "K7Q2ZP",
@@ -125,17 +132,18 @@ booking giver `INVALID_STATE` (i stedet for `NOT_FOUND`) ved bagageregistrering.
 
 ### `booking.confirmed`
 Samme payload som `booking.created` med `"status": "CONFIRMED"`.
-Lyttere: flight-service (sæde `is_available=false`), baggage-service (opretter/opdaterer `booking_snapshot`).
+Lyttere: flight-service (sæde `is_available=false`), baggage-service (opretter/opdaterer `booking_snapshot`),
+notification-job (mail "Din booking … er bekræftet").
 
 ### `booking.cancelled`
 Samme payload med `"status": "CANCELLED"` og et ekstra felt `"reason"`, fx `"Flight cancelled"`
 eller `"Cancelled by passenger"` eller `"Payment failed"`.
 Lyttere: flight-service (sæde frigives), payment-service (automatisk refund hvis COMPLETED payment findes),
-baggage-service (snapshot → CANCELLED).
+baggage-service (snapshot → CANCELLED), notification-job (mail om aflysningen med `reason`).
 
 ### `booking.checkedin`
 Samme payload med `"status": "CHECKED_IN"`.
-Lyttere: baggage-service (snapshot → CHECKED_IN).
+Lyttere: baggage-service (snapshot → CHECKED_IN), notification-job (mail om check-in).
 
 ---
 
@@ -195,3 +203,13 @@ Lyttere: ingen krævede.
 
 ## shop-service
 Publicerer ingen events. Lytter på `flight.#` og logger `flight.gate.changed` (eventId + gate).
+
+## notification-job (consumer, ingen service)
+Publicerer ingen events. Tømmer køen `notifications` (`booking.#`) og skriver én dansk mail pr. event i sin log
+(`booking.created`, `booking.confirmed`, `booking.cancelled`, `booking.checkedin`); ukendte booking-events (fx en
+fremtidig `booking.x.v2`) kvitteres og springes over, og en besked, der ikke kan parses, afvises uden requeue og
+havner i `notification-job.dlq`. Jobbet har ingen database og derfor ingen `processed_event`: leveringen er
+at-least-once, og et duplikat giver en mail mere – `eventId` er den idempotensnøgle, en rigtig mailudbyder ville
+deduplikere på. Jobbet kører kun, når der er beskeder: i Kubernetes som KEDA `ScaledJob` (se
+[architecture.md](architecture.md#serverless-notification-job-som-keda-scaledjob)), i compose med
+`docker compose --profile jobs up notification-job`.

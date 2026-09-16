@@ -41,6 +41,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.time.Duration;
 import java.time.OffsetDateTime;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -299,6 +300,44 @@ class BaggageServiceIntegrationTest {
                 .path("baggage").valueIsNull();
     }
 
+    @Test
+    @Order(9)
+    void registrationWithTheSameIdempotencyKeyIsReplayedNotRepeated() throws Exception {
+        String ref = "GQLIDM";
+        Map<String, Object> payload = new HashMap<>(bookingPayload("CONFIRMED"));
+        payload.put("bookingReference", ref);
+        payload.put("flightNumber", "DY1234");
+        publish(UUID.randomUUID().toString(), "booking.confirmed", payload);
+        await().atMost(Duration.ofSeconds(10)).until(() -> snapshotRepository.findById(ref).isPresent());
+
+        String key = UUID.randomUUID().toString();
+        String tag = registerWithKey(ref, "15.0", "CHECKED", key)
+                .path("registerBaggage.tagNumber").entity(String.class).get();
+        registerWithKey(ref, "15.0", "CHECKED", key)
+                .path("registerBaggage.tagNumber").entity(String.class).isEqualTo(tag);
+        registerWithKey(ref, "16.0", "CHECKED", key).errors().satisfy(errors ->
+                assertThat(errors.get(0).getExtensions()).containsEntry("code", "CONFLICT"));
+
+        assertThat(baggageRepository.findByBookingReferenceIgnoreCaseOrderByCreatedAt(ref)).hasSize(1);
+
+        // a repeated status update is a no-op: one baggage.status.changed, not two
+        for (int i = 0; i < 2; i++) {
+            asOperations.document("mutation($tag: String!) { updateBaggageStatus(tagNumber: $tag, status: SECURITY, "
+                            + "location: \"Security T2\") { status } }")
+                    .variable("tag", tag).execute()
+                    .path("updateBaggageStatus.status").entity(String.class).isEqualTo("SECURITY");
+        }
+        await().during(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(10)).until(() -> RECEIVED.stream()
+                .filter(e -> e.eventType().equals("baggage.status.changed")
+                        && e.payload().path("tagNumber").asText().equals(tag))
+                .count() == 1);
+        // exactly one baggage.registered - give the relay a few poll intervals to send a (wrong) second one
+        await().during(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(10)).until(() -> RECEIVED.stream()
+                .filter(e -> e.eventType().equals("baggage.registered")
+                        && e.payload().path("bookingReference").asText().equals(ref))
+                .count() == 1);
+    }
+
     // ------------------------------------------------------------------ outbox guarantees
 
     @Test
@@ -359,6 +398,15 @@ class BaggageServiceIntegrationTest {
                 .variable("ref", ref)
                 .variable("w", weight)
                 .variable("t", type)
+                .execute();
+    }
+
+    private GraphQlTester.Response registerWithKey(String ref, String weight, String type, String key) {
+        return asPassenger.document("""
+                mutation($ref: String!, $w: BigDecimal!, $t: BaggageType!, $key: String) {
+                  registerBaggage(bookingReference: $ref, weightKg: $w, type: $t, idempotencyKey: $key) { tagNumber }
+                }""")
+                .variable("ref", ref).variable("w", weight).variable("t", type).variable("key", key)
                 .execute();
     }
 

@@ -27,6 +27,7 @@ flowchart LR
   PS --- PDB[(payment_db)]
   BG --- GDB[(baggage_db)]
   SS --- SDB[(shop_db)]
+  SS -. "HTTP /api/chat (valgfri, profil ai)" .-> OL[Ollama<br/>qwen2.5:1.5b]
 ```
 
 ```
@@ -233,6 +234,14 @@ sequenceDiagram
    `shopsAlongRoute` – butikker hvis node indgår i ruten. Frontend tegner gangnetværket og ruten på et SVG-kort med
    nummererede trin, instruktionstekst pr. trin, afstand pr. delstrækning og retningspile; trin på en anden etage vises som hint.
 
+### Flow E – Spørg om vej (AI)
+
+1. Frontend (*Butikker*) sender fritekst + "Hvor er jeg?" til `askRoute(question, fromNodeId, accessibleOnly)`.
+2. shop-service lader en lokal sprogmodel (Ollama) tolke spørgsmålet, scorer butikkerne og beregner ruten med samme
+   Dijkstra som Flow D – via butikken videre til et mål, hvis spørgsmålet nævner et ("… på vej til gate B12").
+3. Svaret viser tolkningen, butikken, ruten på kortet og om det var modellen (`aiUsed`) eller nøgleordssøgningen,
+   der svarede. Detaljer i afsnittet *AI: "Spørg om vej"* nedenfor.
+
 ## Sikkerhed (login og roller)
 
 Login og roller er lagt oven på systemet uden at ændre GraphQL-API'et: Keycloak er OpenID Connect-provider,
@@ -413,6 +422,363 @@ rigtig rolle går igennem, udløbet/fremmed/ugyldigt token → HTTP 401 med `inv
 kræver OPERATIONS, og CORS-preflight fra frontendens origin tillades. De øvrige integrationstests sender
 mutations med `TestTokens.passenger()`/`operations()`.
 
+## AI: "Spørg om vej" (lokal sprogmodel)
+
+`shop-service` har en query, hvor passageren spørger med egne ord i stedet for at vælge en destination i en liste:
+
+```graphql
+askRoute(question: String!, fromNodeId: ID!, accessibleOnly: Boolean = false): AiRouteAnswer!
+# AiRouteAnswer { interpretation, shop, toNode, route, aiUsed, fallbackReason, model }
+```
+
+En lokal sprogmodel ([Ollama](https://ollama.com) med `qwen2.5:1.5b`) *tolker* spørgsmålet, og den eksisterende
+kode *beslutter*: nøgleordsscoring vælger butikken, og Dijkstra (`RouteService`) beregner ruten. Modellen er valgfri:
+uden den svarer en nøgleordssøgning, og svaret siger det (`aiUsed=false`). Koden ligger i
+`shop-service/src/main/java/dk/airport/shop/ai/`.
+
+| Hvor | Sådan tændes modellen | Uden modellen |
+|------|------------------------|---------------|
+| docker-compose | `docker compose --profile ai up` (service `ollama`, image `airport/ollama:local`) | `docker compose up`: ingen Ollama-container, `askRoute` svarer med nøgleordssøgning |
+| Kubernetes | Kustomize-komponenten `k8s/components/ollama` (tændt i `k8s/overlays/demo`) – Deployment + Service + patch af `shop-service-config` (`AI_ENABLED=true`) | `kubectl apply -k k8s/`: base-ConfigMap har `AI_ENABLED=false`, Ollama kaldes aldrig |
+
+### Hvorfor en lokal model
+
+* **Ingen konti, nøgler eller netadgang.** Samme argument som for Keycloak: en demo til eksamen kan ikke forudsætte en
+  API-nøgle til en hosted model, en kreditkortkonto eller wifi. Imaget har modellen bagt ind (`ollama/Dockerfile`),
+  så intet hentes ved opstart.
+* **Passagerens tekst forlader ikke systemet.** Fritekst kan indeholde personoplysninger ("min søn har astma …"); en
+  lokal model sender intet til tredjepart (GDPR), og der er ingen pris pr. kald.
+* **Kører på en laptop-CPU.** `qwen2.5:1.5b` (Q4_K_M) fylder ca. 1 GB, bruger ca. 1,5 GB RAM, mens den er indlæst, og
+  svarer på 2–3 s med 4 kerner. Imaget er ca. 1,2 GB, fordi GPU-backends (CUDA/Vulkan, ca. 4,7 GB) er fjernet – en
+  laptop-demo bruger dem aldrig.
+* **Prisen** er lavere kvalitet end en stor hosted model. Derfor stoler koden ikke blindt på modellens valg (se
+  *Modellen forstår, koden beslutter*), og der er altid en fallback.
+
+### Kontrakten med modellen
+
+`OllamaClient` sender ét kald til `POST {OLLAMA_URL}/api/chat` pr. spørgsmål, uden streaming og med `temperature 0`
+(samme prompt giver samme svar). `format` er et JSON Schema (Ollamas *structured outputs*): serveren begrænser
+modellens tokens, så svaret altid er gyldig JSON med præcis de fire felter, og `shop` kan **kun** være et navn fra
+listen (`enum`). Felternes rækkefølge i skemaet er den rækkefølge, modellen skriver dem i, så oversættelse og behov
+kommer før valget af butik – en kort "chain of thought". Forkortet request (`ConciergePrompt`):
+
+```json
+{
+  "model": "qwen2.5:1.5b",
+  "stream": false,
+  "options": { "temperature": 0, "num_predict": 160 },
+  "format": {
+    "type": "object",
+    "properties": {
+      "english": { "type": "string" },
+      "need":    { "type": "string" },
+      "shop":    { "type": "string", "enum": ["Duty Free Copenhagen T1", "Joe & The Juice", "…", "Nordic Table"] },
+      "fits":    { "type": "boolean" }
+    },
+    "required": ["english", "need", "shop", "fits"]
+  },
+  "messages": [
+    { "role": "system", "content": "You help passengers in Copenhagen Airport find the right shop. The passenger writes in Danish or English.\nStep 1: \"english\" = the question translated to English.\nStep 2: \"need\" = what the passenger wants to buy or do, in 1-4 English words.\nStep 3: \"shop\" = the shop from the list that offers it. Prefer the passenger's terminal when two shops fit.\nStep 4: \"fits\" = false if no shop in the list offers it (e.g. toilets, parking), otherwise true.\n\nCategories: FOOD = food and drink: coffee, tea, juice, …; RETAIL = …; DUTY_FREE = …; SERVICE = …; LOUNGE = …\n\nShops (name | terminal | category | description in Danish):\n- Duty Free Copenhagen T1 | terminal T1 | DUTY_FREE (tax free) | Tax free parfume, spiritus, slik og skandinavisk design.\n- …\n- Apoteket | terminal T1 | SERVICE (services) | Apotek med håndkøbsmedicin og rejsemedicin.\n- …" },
+    { "role": "user", "content": "I am in terminal T1. Hvor kan jeg få noget mod køresyge?" }
+  ]
+}
+```
+
+Svar (`message.content`, fra loggen i compose 16-09-2026):
+
+```json
+{ "english": "I am in terminal T1. Where can I get some medicine?", "need": "medicine", "shop": "Apoteket", "fits": true }
+```
+
+Prompt-kontrakten i punktform:
+
+* **System-besked:** fire trin på engelsk (små modeller følger engelske instruktioner bedst), en kategori-guide og
+  alle butikker direkte fra databasen, sorteret efter id (samme data giver samme prompt, så Ollama kan genbruge sin
+  prompt-cache). Beskrivelser skæres ved 100 tegn. Ca. 800 tokens med seed-data.
+* **User-besked:** `I am in terminal <terminal for "Hvor er jeg?">. <spørgsmålet>` – spørgsmålet valideres i
+  `ShopController` (1–500 tegn) og samles til én linje, så det ikke kan bryde promptens layout eller en log-linje.
+* **Svar:** `english` (logges kun), `need` (1–4 engelske ord, `"none"` = intet), `shop` (et navn fra listen) og
+  `fits` (`false` = ingen butik sælger det, fx toiletter og parkering).
+* **Ikke i kontrakten:** id'er og destinationer. Den første version bad om `shopId`/`toNodeId`, og `qwen2.5:1.5b`
+  forvekslede butiks-id'er med node-id'er (begge lister starter ved 1) og svarede `shopId: null` på 4 af 6
+  realistiske spørgsmål. Destinationen ("gate B12", "B7") findes i stedet deterministisk i spørgsmålet
+  (`KeywordMatcher.findPlace`: hele ord eller gate-koden alene).
+
+### Modellen forstår, koden beslutter
+
+`AiConciergeService` bruger modellens svar som *input* til den samme scoring, som fallbacken bruger
+(`KeywordMatcher`), i stedet for at følge det blindt:
+
+| Point pr. butik | Hvornår |
+|-----------------|---------|
+| +3 | et ord fra spørgsmålet eller `need` findes i butikkens navn |
+| +1 | ellers: ordet findes i beskrivelsen |
+| +2 | ordet er et kategori-ord (`kaffe`/`coffee` → FOOD, `painkiller` → SERVICE, …) |
+| +1 | butikken er den, modellen foreslog (`fits=true`) |
+| +1 | butikken ligger i målets terminal (ellers passagerens), når den har point i forvejen |
+
+Butikker med højest score er kandidater; uafgjort afgøres af gangafstanden (Dijkstra), og butikker, der ikke kan nås
+(fx med `accessibleOnly`), springes over. Forslagets bonus er bevidst lille: det afgør uafgjorte og vinder alene, når
+intet ord matcher ("Jeg har glemt min tandbørste" → modellens forslag), men det kan ikke slå et klart match i
+spørgsmålet. Eksempler fra loggen: *"Hvor finder jeg en kop kaffe på vej til gate B12?"* fra Security T2 – modellen
+foreslog Joe & The Juice i T1, men "kaffe"/"coffee" giver uafgjort mellem Joe & The Juice, Starbucks og Lagkagehuset,
+og Starbucks er nærmest. *"Jeg har ondt i hovedet"* – modellen oversatte til "stomachache", men `need: "medicine"` og
+forslaget Apoteket gav det rigtige svar alligevel.
+
+Validering, der gør, at modellen aldrig kan få servicen til at gøre noget forkert:
+
+* `shop` begrænses af skemaets `enum` og slås alligevel op i listen; et ukendt navn giver ingen bonus.
+* Modellen kan ikke vælge en node eller en rute – kun Dijkstra over `nav_edge` laver ruter.
+* Svaret parses som et JSON-træ (`ConciergeAnswer`); tekst eller kodeblok omkring objektet tolereres, men et svar
+  uden `need`/`shop` behandles som ugyldigt. `need` skæres ved 60 tegn.
+* Tolkningen, der vises for brugeren, bygges af koden ("Sprogmodellen forstod \"medicine\": Apoteket") og ikke af
+  modellen, hvis danske sætninger var upålidelige.
+
+**Målt 16-09-2026** med 33 spørgsmål: 15 med ord, nøgleordssøgningen kender ("Jeg vil have en kanelsnegl"), og 18
+formuleret uden ("Hvor kan jeg få noget mod køresyge?", "Noget godt at læse på flyet", "Hvor kan jeg parkere
+bilen?" → ingen butik). Et svar tæller som rigtigt, når butikken sælger det (fx et hvilket som helst kaffested).
+
+| Fremgangsmåde | Rigtig butik | Snit pr. spørgsmål |
+|---------------|--------------|--------------------|
+| Nøgleordssøgning alene (fallbacken), live i compose | 19/33 (13/15 + 6/18) | < 0,1 s |
+| Modellen vælger navn fra listen alene (prompt-lab) | 20/33 | 2,5 s |
+| **Model + nøgleordsscoring (valgt), live i compose** | **29/33**, destination 33/33, `aiUsed` 33/33 | **3,0 s** (maks 9,3 s – første kald) |
+| Samme med `qwen2.5:3b` (prompt-lab) | 32/33 | 4,0 s, ca. dobbelt RAM |
+
+De fire fejl i den valgte løsning er "rigtig kategori, forkert butik" (skjorte og trøje → WHSmith i stedet for Hugo Boss,
+fadøl → 7-Eleven) og én misforståelse ("hovedpine" → juice). "Prompt-lab" er et Python-script mod samme Ollama med
+samme prompt og scoring, brugt til at sammenligne varianter uden at bygge servicen om. `qwen2.5:3b` er bedre, men for tung ved siden af kind på en laptop med 4 kerner (se *Model-skift*).
+
+### Fallback, timeouts og opvarmning
+
+| Situation | Hvad sker der | `fallbackReason` |
+|-----------|---------------|------------------|
+| `AI_ENABLED=false` (base-ConfigMap i k8s) | Ollama kaldes aldrig | `AI er slået fra (AI_ENABLED=false)` |
+| Ollama kører ikke (compose uden `--profile ai`) | connect-timeout 2 s (`AiConfig`), derefter nøgleordssøgning; målt 2,0 s i compose | `Ollama svarede ikke: Ollama is not reachable at … (…)` |
+| Modellen svarer ikke inden `AI_TIMEOUT_MS` (15 s) | read-timeout, nøgleordssøgning | `Ollama svarede ikke: …` |
+| HTTP-fejl (fx 404 model mangler) | nøgleordssøgning | `Ollama svarede ikke: … 404 …` |
+| Svaret er ikke kontraktens JSON | nøgleordssøgning | `Modellens svar var ikke gyldig JSON` |
+| Modellen svarer, men ingen butik passer | `aiUsed=true`, `shop`/`route` = null | – |
+
+Nøgleordssøgningen scorer spørgsmålet alene (tabellen ovenfor uden `need` og bonus). Kun rute-delen kan få queryen
+til at fejle – med samme koder som `route` (`NOT_FOUND`, `ROUTE_NOT_FOUND`). `askRoute` er bevidst ikke
+`@Transactional`: der holdes ingen databaseforbindelse, mens der ventes på modellen.
+
+Første spørgsmål efter opstart betaler for at indlæse modellen, og mens hele stakken booter, tog det mere end
+timeouten. Derfor beder `OllamaWarmUp` Ollama om at indlæse modellen (`POST /api/generate` med kun modelnavnet), så
+snart shop-service er startet – på en virtual thread, så readiness ikke forsinkes, og op til 6 forsøg med 10 s
+imellem, fordi Ollama kan starte efter shop-service (compose har bevidst ingen `depends_on`). Målt i compose: indlæst
+3,4 s efter opstart i første forsøg. Modellen bliver i hukommelsen i `OLLAMA_KEEP_ALIVE=5m` efter sidste kald;
+derefter koster næste spørgsmål igen 5–9 s. Slås fra med `AI_WARM_UP=false` (integrationstestene gør det).
+
+### Model-skift
+
+Prompten er ikke skrevet til en bestemt model, så et skift er konfiguration:
+
+```bash
+docker compose build --build-arg OLLAMA_MODEL=qwen2.5:3b ollama     # bager den nye model ind i imaget
+# shop-service: OLLAMA_MODEL=qwen2.5:3b i docker-compose.yml og i k8s/components/ollama/shop-service-ai.yaml
+```
+
+Modellen skal kunne JSON Schema-formatet (alle nyere Ollama-modeller kan, fordi det håndhæves i Ollamas sampler og
+ikke af modellen). Kør de 33 spørgsmål igen før et skift – et model-skift kan ændre kvaliteten mere end en
+kodeændring. Ressourcerne i komponentens Deployment (`limits.memory: 3Gi`) rækker til `qwen2.5:3b`; en 7B-model
+kræver mere RAM og GPU for at svare inden for timeouten.
+
+### Kaldsflow
+
+```mermaid
+sequenceDiagram
+  participant B as Browser (Butikker)
+  participant S as shop-service (AiConciergeService)
+  participant DB as shop_db
+  participant O as Ollama (qwen2.5:1.5b)
+
+  B->>S: askRoute(question, fromNodeId, accessibleOnly)
+  S->>DB: startnode, alle butikker, destinationsnoder
+  alt AI_ENABLED og Ollama svarer
+    S->>O: POST /api/chat (system: trin + butiksliste, user: terminal + spørgsmål, format: JSON Schema med enum)
+    O-->>S: {"english", "need", "shop", "fits"}
+    S->>S: KeywordMatcher: spørgsmål + need + bonus til forslaget, destination fra spørgsmålet
+  else slået fra, timeout, fejl eller ugyldig JSON
+    S->>S: KeywordMatcher på spørgsmålet alene (aiUsed=false, fallbackReason)
+  end
+  alt ingen kandidat
+    S-->>B: interpretation, shop=null, route=null
+  else kandidater
+    S->>DB: Dijkstra til hver kandidat (kun ved uafgjort) - nærmeste vinder
+    S->>DB: routeVia(from, butik, destination) - to Dijkstra-ben
+    S-->>B: interpretation, shop, toNode, route, aiUsed, model
+  end
+```
+
+### Designvalg og test
+
+| Nr. | Valg | Alternativ overvejet | Begrundelse |
+|-----|------|----------------------|-------------|
+| 6   | Lokal model i Ollama (`qwen2.5:1.5b`, bagt ind i imaget uden GPU-backends), valgfri via compose-profil `ai` og Kustomize-komponent; shop-service har ingen `depends_on` | Hosted LLM-API (OpenAI, Anthropic, Gemini); model hentet ved første opstart; Ollama som fast del af stakken; `qwen2.5:3b` | Ingen konti, nøgler, netadgang eller tekst til tredjepart; kendt tilstand ved hver demo; systemet virker uden modellen. 1.5B-modellen er valgt over 3B, fordi 3B kun gav 3 flere rigtige ud af 33, men dobbelt RAM og ca. 60 % længere svartid (2,5 → 4,0 s i samme prompt-lab) ved siden af kind på 4 kerner |
+| 7   | Modellen *forstår* (oversættelse, behov i engelske ord, forslag fra en lukket `enum`-liste); koden *beslutter* (nøgleordsscoring med lille bonus til forslaget, destination fra spørgsmålet, Dijkstra); nøgleordssøgning som fallback | Modellen vælger id'er direkte (første version); modellen vælger navn og følges blindt; modellen skriver ruten eller svarteksten | Målt: id'er → næsten kun `null`; navn alene 20/33; kombinationen 29/33. Modellen kan ikke route til noget, der ikke findes, et forkert forslag taber til et klart match, og samme scoring giver en forudsigelig fallback |
+
+Test (kører i CI uden Ollama): `AiConciergeServiceTest` (17 unit-tests med mocket `OllamaClient`: scoring, forslag
+der afgør uafgjort/taber til klart match, `fits=false`, ukendt navn, kodeblok, fejl → fallback, AI slået fra, ingen
+butikker, `accessibleOnly`), `KeywordMatcherTest` (tokens, kategori-ord, destinationer, `need` + bonus) og
+`AiConciergeIntegrationTest` (8 tests: GraphQL over HTTP mod rigtig PostgreSQL med seed-data, hvor
+`POST /api/chat` stubbes med `MockRestServiceServer`; tjekker request-body inkl. skema og prompt, ruten via butikken
+til gate B12, elevator ved `accessibleOnly`, HTTP 500/connection refused/ugyldigt svar → fallback og validering af
+spørgsmålet).
+
+## Serverless: notification-job som KEDA ScaledJob
+
+Passagerer skal have en mail, når deres booking oprettes, bekræftes, aflyses eller checkes ind. Det er arbejde,
+der kommer i ryk (en aflysning af et fuldt fly giver hundredvis af events på én gang) og ellers intet – derfor kører
+det som en **funktion, der kun eksisterer, mens der er arbejde**, i stedet for som endnu en altid-kørende service.
+
+```mermaid
+flowchart LR
+  BS[booking-service] -- "booking.# (outbox)" --> EX((airport.events))
+  EX -- "booking.#" --> Q[[notifications]]
+  K[KEDA operator] -. "kølængde hvert 5. s" .-> Q
+  K -- "starter Job: ceil(længde / 5), max 3" --> J1[Job: notification-job]
+  J1 -- "prefetch 1, ack pr. mail" --> Q
+  J1 -- "afvist besked" --> DLQ[[notification-job.dlq]]
+  J1 -. "exit 0 efter 3 s uden beskeder; slettes efter 30 s" .-> X((ingen pods))
+```
+
+| Del | Hvad |
+|-----|------|
+| `notification-job/` | Ren Java 21 uden Spring (amqp-client + Jackson), så JVM'en starter på få sekunder: erklærer topologien idempotent, forbruger med prefetch 1 og manuel ack, renderer én dansk mail pr. `booking.*`-event og logger den (ingen SMTP), og afslutter med exit 0, når køen har været tom i `IDLE_TIMEOUT_MS` eller `MAX_MESSAGES` er nået. Exit 1 ved forbindelsesfejl – så genstarter Kubernetes Job'et (`backoffLimit: 2`). Detaljer i [notification-job/README.md](../notification-job/README.md) |
+| Køen `notifications` | Bundet på `booking.#`, DLX til `notification-job.dlq`. Erklæres af både jobbet og booking-service med identiske argumenter, så events gemmes, også før jobbet nogensinde har kørt (se [events.md](events.md)) |
+| `k8s/components/notification-job/` | KEDA `ScaledJob` (trigger `rabbitmq`, `mode: QueueLength`, `value: 5`, `pollingInterval: 5`, `maxReplicaCount: 3`) + `TriggerAuthentication` + Secret med AMQP-URL'en. Job-spec: `ttlSecondsAfterFinished: 30`, `activeDeadlineSeconds: 300`, `requests` 100m/128Mi. Tændt i `k8s/overlays/demo` |
+| compose | Profilen `jobs`: `docker compose --profile jobs up notification-job` kører jobbet én gang mod compose-stakken |
+
+**Hvorfor KEDA og en ScaledJob.** Kubernetes' egen HPA kan ikke skalere til 0 og kender ikke kølængder uden en
+custom-metrics-adapter; KEDA leverer begge dele med én CRD og er CNCF's standardsvar på "serverless på Kubernetes".
+En `ScaledJob` passer til et program, der er bygget til at blive færdigt: et Job skaleres aldrig ned midt i en
+besked – det slutter selv – mens en `ScaledObject` på en Deployment kunne slå en pod ihjel under behandlingen.
+Fravalgt: Knative Serving (HTTP-drevet, kræver et ekstra netværkslag og en HTTP-indgang til noget, der læser en kø),
+OpenFaaS (egen gateway og egne templates) og en CronJob (poller også, når der intet er, og reagerer først ved
+næste tidspunkt). Prisen er en JVM-opstart pr. job – kort, fordi jobbet ikke bruger Spring: 0,3–0,6 s fra
+`docker run` til første forbindelsesforsøg (målt 16-09-2026) – og en ekstra komponent (KEDA), der skal installeres
+i clusteret.
+
+**Leveringsgaranti.** At-least-once: beskeden kvitteres først, når mailen er logget. Dør jobbet imellem, leveres
+beskeden igen, og mailen skrives to gange – `eventId` følger med i mailen som den idempotensnøgle, en rigtig
+mailudbyder ville deduplikere på. En besked, der ikke kan parses, afvises uden requeue (DLQ), så én dårlig besked
+ikke får hvert job til at fejle.
+
+**Verificeret på kind 16-09-2026** med `scripts/demo-keda.sh` (5 bookinger + betalinger = 10 events): KEDA startede 2
+jobs efter 3 s, køen var tom efter 6 s, jobbene var færdige efter 11 s og slettet igen efter 41 s. Uden events kører
+der ingen pods. Se tidslinjen i [k8s/README.md](../k8s/README.md#demo-overlay-ai-og-serverless-keda).
+
+## Skalerbarhed
+
+Systemet skalerer på tre forskellige måder, afhængigt af hvordan belastningen opstår:
+
+| Mekanisme | Hvor | Udløser | Hvorfor netop her |
+|-----------|------|---------|-------------------|
+| HorizontalPodAutoscaler | shop-service (`k8s/base/services/shop-service-hpa.yaml`): 1–3 pods ved 70 % CPU af `requests` | CPU fra metrics-server | shop-service bærer de offentlige, rent læsende navigationsforespørgsler (`route`, `shops`, `askRoute`), som alle passagerer kan kalde uden login – den del af systemet, der får flest kald. Servicen er stateless og kan køre i flere eksemplarer |
+| KEDA ScaledJob | notification-job: 0–3 jobs | Længden af køen `notifications` | Arbejde i ryk uden brugere, der venter: skalerer til 0 og betaler kun for tid med beskeder (se *Serverless* ovenfor) |
+| Manuel `replicas` | De øvrige fire services (1 pod) | – | Alle kan køre med flere pods uden kodeændringer, men 1 er valgt, så hele stakken kan køre på én laptop (se [k8s/README.md](../k8s/README.md#ressourcer-på-en-laptop)) |
+
+**Hvad gør det sikkert at køre flere pods?** Services er stateless (tilstanden ligger i Postgres og RabbitMQ, JWT'er
+valideres uden session), og de to steder, hvor to pods kunne træde hinanden over tæerne, er løst i koden:
+outbox-relayet tager en Postgres advisory lock (`pg_try_advisory_xact_lock`), så kun én pod ad gangen sender events,
+og events forbruges med `processed_event` som idempotensvagt, så to pods, der får samme besked (fx efter en
+genlevering), ikke udfører ændringen to gange. RabbitMQ fordeler beskederne i en kø mellem alle pods, der lytter
+(competing consumers).
+
+**Hvorfor CPU og 70 %?** Dijkstra over gangnettet og JSON-serialisering er CPU-bundet, og hukommelsen er næsten
+konstant (ca. 245 MiB pr. pod), så CPU er det signal, der følger belastningen. Målet er 70 % af `requests` (105m) – et
+godt stykke under `limits` (500m) – så der tilføjes en pod, før den første bliver throttlet. `behavior` begrænser til
+én ny pod pr. minut (en ny JVM skal nå at blive Ready) og venter 120 s, før der skaleres ned igen.
+
+**Verificeret på kind 16-09-2026** med `scripts/load-shops.sh` (8 parallelle klienter mod `route` gennem Ingress i
+180 s, ca. 126 requests/s, 0 fejl): 1 pod → 2 efter 46 s (CPU 330 %) → 3 efter 109 s; efter belastningen stoppede,
+2 pods efter 344 s og 1 efter 405 s. Tidslinjen står i [k8s/README.md](../k8s/README.md#autoscaling-hpa).
+
+**Grænser og næste skridt.** Databaserne skalerer ikke horisontalt (én Postgres pr. service, 1 replica) og er den
+reelle flaskehals ved meget høj læsebelastning; næste skridt ville være read-replicas eller en cache foran
+`navNodes`/`navEdges`, som næsten aldrig ændres. HPA'en er bevidst loftet ved 3 pods, så en demo aldrig kan fylde
+en laptop. Opstartstiden, der afgør hvor hurtigt en ny pod hjælper, er næsten halveret med CDS-arkivet (se
+[k8s/README.md](../k8s/README.md#class-data-sharing-cds-hurtigere-boot-uden-flere-ressourcer)).
+
+## Designmønstre
+
+### Tombstone og snapshot
+
+To mønstre håndterer data, der "forsvinder" eller ejes af en anden service. Fælles regel: **domænedata slettes
+aldrig fysisk.** Ingen service kalder `DELETE` på sine forretningstabeller (tjekket med grep over alle fem services);
+det eneste fysiske `DELETE` er oprydningen af allerede sendte rækker i `outbox_event` efter 7 dage, som er
+transportdata og ikke domænedata.
+
+**Tombstone – `deleteShop` i shop-service.** En slettet butik får et tidsstempel i stedet for at blive fjernet:
+
+| Del | Hvad |
+|-----|------|
+| Migration `V4__shop_tombstone.sql` | Kolonnen `deleted_at TIMESTAMPTZ` (NULL = aktiv); de fulde indekser på `terminal`, `category` og `node_id` er erstattet af partielle indekser `WHERE deleted_at IS NULL`, så gravstenene aldrig gør opslagene på aktive butikker langsommere |
+| `Shop` (entity) | `@SQLRestriction("deleted_at IS NULL")`: Hibernate tilføjer betingelsen til *alle* queries på entiteten – `findById`, `findAll`, specifications og JPQL (`searchShops`) – så ingen repository-metode skal huske et filter |
+| `ShopService.deleteShop` | `shop.markDeleted(now)` i transaktionen. Bagefter er `shop(id)` null, butikken er væk fra `shops`, `searchShops`, `NavNode.shops`, `shopsAlongRoute` og `askRoute`, og `updateShop`/`deleteShop` giver `NOT_FOUND` |
+| Test | `ShopServiceIntegrationTest.deletedShopLeavesATombstoneThatNoQuerySees`: butikken ses på en rute før sletning og ingen steder efter, men rækken findes stadig med `deleted_at` sat (læst med `JdbcTemplate` uden om Hibernate) |
+
+Hvorfor: en fysisk `DELETE` kan ikke fortrydes (`UPDATE shop SET deleted_at = NULL WHERE id = …` gendanner en
+butik), historikken bevares ("hvilke butikker fandtes, da passageren klagede?"), og et id, der er nævnt i en log, et
+event eller en fremtidig statistik, peger aldrig ud i ingenting. Prisen er, at tabellen vokser, og at et nyt
+unikhedskrav (fx unikt navn) skal være et partielt unikt indeks på aktive rækker.
+Fravalgt: Hibernates `@SoftDelete` gemmer i Hibernate 6.6 (Spring Boot 3.5) kun en boolean, ikke *hvornår* rækken
+blev slettet; et `is_deleted`-flag ville have samme mangel. shop-service publicerer ingen shop-events, og ingen anden
+service har en kopi af butikkerne, så der er ingen tombstone-*besked* på bussen. Får en service senere en kopi,
+er et `shop.deleted`-event med `shopId` tombstonen for den kopi – præcis som `booking.cancelled` er det for bookinger
+nedenfor.
+
+**Snapshot – lokale kopier af en anden services data.** En service, der har brug for andres data for at svare eller
+validere, holder en læsekopi opdateret fra events i stedet for at spørge synkront:
+
+| Service | Snapshot | Opdateres af | Bruges til |
+|---------|----------|--------------|------------|
+| booking-service | Kolonnerne `flight_number`, `departure_time`, `gate`, `flight_status` på `booking` | `flight.status.changed`, `flight.gate.changed`, `flight.cancelled` | *Min booking* viser gate og flystatus uden kald til flight-service; aflyst fly → bookingen `CANCELLED` |
+| baggage-service | Tabellen `booking_snapshot` (reference, passagernavn, flight, status) | `booking.created/confirmed/checkedin/cancelled`, `flight.cancelled` | `registerBaggage` kræver status `CONFIRMED`/`CHECKED_IN` – også når booking-service er nede |
+
+Snapshots er *eventually consistent* (typisk under et sekund: outbox-relayet sender hver 500 ms), og
+kilden til sandhed er altid den ejende service. Handlerne er idempotente (`processed_event`), så et dubleret event
+ikke ændrer kopien to gange. Tombstone og snapshot mødes her: en aflyst booking slettes ikke i
+`booking_snapshot`, men får status `CANCELLED` – en tombstone i form af en tilstand – så bagage for en aflyst
+booking afvises med `INVALID_STATE` i stedet for `NOT_FOUND`, og historikken er intakt. Hele systemet følger samme
+linje: bookinger bliver `CANCELLED`, betalinger `REFUNDED`, bagage sendes til `RETURN_DESK`; intet forsvinder.
+
+### Idempotens: hvad sker der, når en mutation gentages?
+
+Brugere dobbeltklikker, browsere og klienter gentager et request, når svaret går tabt, og RabbitMQ leverer events
+at-least-once. Hver skrivende operation har derfor en defineret opførsel ved gentagelse – enten via en naturlig
+nøgle, en tilstandsregel eller en eksplicit idempotency key:
+
+| Service | Operation | Mekanisme | Gentagelse giver |
+|---------|-----------|-----------|------------------|
+| baggage-service | `registerBaggage` (GraphQL) / `POST /api/baggage/v1/baggage` (REST) | **Idempotency key** fra klienten: GraphQL-argument `idempotencyKey`, REST-header `Idempotency-Key`; kolonnen `baggage.idempotency_key` er `UNIQUE` (`V3__baggage_idempotency.sql`) | Den bagage, første kald registrerede – intet nyt INSERT og intet nyt `baggage.registered`. REST svarer som første gang (201, samme `Location`) med `Idempotent-Replayed: true`. Samme nøgle med anden booking/vægt/type → `CONFLICT` (409) |
+| baggage-service | `updateBaggageStatus` / `PATCH …/status` | Tilstand: samme status og samme (eller ingen) lokation er en no-op | Uændret bagage, intet ekstra `baggage.status.changed` |
+| shop-service | `createShop` | **Idempotency key** (`idempotencyKey`, `shop.idempotency_key UNIQUE`, `V5__shop_idempotency.sql`) | Samme butik; er butikken siden slettet (tombstone), er nøglen stadig optaget → `CONFLICT` |
+| shop-service | `updateShop` | Naturligt idempotent (hele butikken overskrives, PUT-semantik) | Samme resultat |
+| shop-service | `deleteShop` | Tombstone | Andet kald → `NOT_FOUND`; butikken er slettet én gang |
+| booking-service | `createBooking` | Naturlig nøgle: partielt unikt indeks `ux_booking_active_seat (flight_id, seat_number) WHERE status <> 'CANCELLED'` | `SEAT_TAKEN` – sædet er allerede booket (af første kald) |
+| booking-service | `cancelBooking`, `checkIn` | Tilstandsmaskine | `INVALID_STATE` (allerede aflyst / ikke `CONFIRMED`); intet nyt event |
+| payment-service | `pay` | Tilstand: findes en `COMPLETED` betaling for referencen | `ALREADY_PAID` – kortet trækkes ikke to gange |
+| payment-service | `refund` | Tilstand: kun `COMPLETED` kan refunderes | `INVALID_STATE`; ingen dobbelt refundering |
+| flight-service | `createAirline`, `createAircraft`, `createFlight` | Naturlige nøgler: `iata_code`, `registration`, `(flight_number, scheduled_departure)` er `UNIQUE` | `CONFLICT` |
+| flight-service | `updateFlightStatus`, `updateGate` | Tilstand: samme status/gate er en no-op | Intet nyt event (en aflyst flight kan ikke ændres: `INVALID_STATE`) |
+| alle consumers | indgående events | `processed_event` med `eventId` som primærnøgle i samme transaktion som ændringen | Duplikatet logges som "skipping" og ignoreres (se *Messaging*) |
+
+**Idempotency key – hvordan og hvorfor.** Nøglen identificerer *én tilsigtet skrivning*, ikke en ressource.
+Frontenden (`frontend/js/pages/baggage.js`) laver en nøgle med `newIdempotencyKey()` (UUID v4 via
+`crypto.randomUUID()`, og via `crypto.getRandomValues()` over ren http, hvor `randomUUID` ikke findes), sender den
+uændret ved hver gentagelse af samme formular og laver en ny, når formularen ændres, eller når en bagage er
+registreret. `BaggageService.register` slår nøglen op, før der skrives; to samtidige kald med samme nøgle afgøres af
+`UNIQUE`-constrainten – taberens transaktion rulles tilbage, og opslaget gentages i en ny transaktion, hvor den finder
+vinderens bagage (derfor er metoden bevidst ikke én transaktion). Verificeret 16-09-2026: integrationstests med to
+kald og med 8 samtidige kald med samme nøgle giver én række og ét event, og i browseren giver to submits af samme
+formular og et nyt klik efter et tabt svar (Playwright kappede svaret, efter at serveren havde registreret bagagen)
+begge kun én bagage. Uden nøgle opfører API'et sig som før, så eksisterende klienter ikke brækker.
+Fravalgt: at lade serveren udlede "samme request" af indholdet (fx booking + vægt + type inden for et minut) – to
+ens kufferter på samme booking er en helt legitim situation, som kun klienten kan skelne fra et dobbeltklik.
+
 ## Designvalg (hvor spec'en gav frihed)
 
 | Emne | Valg | Begrundelse |
@@ -445,3 +811,5 @@ mutations med `TestTokens.passenger()`/`operations()`.
 | Login | Keycloak 26 med realm-import (`realm-airport.json`) og faste testbrugere `anna`/`ops` | Se *Sikkerhed (login og roller)*, designvalg 1 |
 | Autorisation | Læse-queries offentlige; `@PreAuthorize` pr. operation på controller-metoderne (én GraphQL-endpoint) | Se *Sikkerhed (login og roller)*, designvalg 2 |
 | Token-validering | `iss` låst med `KC_HOSTNAME`, nøgler fra intern `JWK_SET_URI`, ingen discovery | Se *Sikkerhed (login og roller)*, designvalg 3 |
+| AI-model | Lokal `qwen2.5:1.5b` i Ollama, valgfri (compose-profil `ai`, Kustomize-komponent `ollama`) | Se *AI: "Spørg om vej"*, designvalg 6 |
+| AI-ansvar | Modellen tolker og foreslår fra en lukket liste; nøgleordsscoring + Dijkstra beslutter; nøgleordssøgning som fallback | Se *AI: "Spørg om vej"*, designvalg 7 |

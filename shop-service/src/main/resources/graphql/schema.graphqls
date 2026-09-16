@@ -11,15 +11,21 @@ type Query {
   route(fromNodeId: ID!, toNodeId: ID!, accessibleOnly: Boolean = false): Route!
   """
   Ask for the way in natural language ("Hvor finder jeg en kop kaffe på vej til gate B12?"). A local language model
-  (Ollama) maps the question to a shop and an optional destination, and the route is computed with Dijkstra like
-  `route`. When the model is unavailable a keyword search answers instead (aiUsed = false, fallbackReason set).
+  (Ollama) interprets the question and suggests a shop, keyword scoring picks the shop, a destination named in the
+  question is recognised, and the route is computed with Dijkstra like `route`. When the model is unavailable the
+  keyword search answers alone (aiUsed = false, fallbackReason set).
   """
   askRoute(question: String!, fromNodeId: ID!, accessibleOnly: Boolean = false): AiRouteAnswer!
 }
 
 type Mutation {
-  createShop(input: ShopInput!): Shop!
+  createShop(
+    input: ShopInput!,
+    "Optional, max 64 characters (e.g. a UUID per form). Repeating the call with the same key returns the shop the first call created instead of a duplicate."
+    idempotencyKey: String
+  ): Shop!
   updateShop(id: ID!, input: ShopInput!): Shop!
+  "Soft delete: the row keeps a tombstone (deleted_at) and the shop disappears from every query"
   deleteShop(id: ID!): Boolean!
 }
 

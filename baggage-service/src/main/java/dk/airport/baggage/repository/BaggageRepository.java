@@ -14,6 +14,8 @@ public interface BaggageRepository extends JpaRepository<Baggage, Long> {
 
     boolean existsByTagNumber(String tagNumber);
 
+    Optional<Baggage> findByIdempotencyKey(String idempotencyKey);
+
     List<Baggage> findByBookingReferenceIgnoreCaseOrderByCreatedAt(String bookingReference);
 
     List<Baggage> findByFlightNumberIgnoreCaseOrderByCreatedAt(String flightNumber);

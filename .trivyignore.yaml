@@ -1,0 +1,41 @@
+# Trivy exceptions (dev plan DP-25). Every entry names the files it applies to and why it is accepted; anything not
+# listed here fails the `security` job in .github/workflows/ci.yml. Our own workloads (the five services and
+# notification-job) have no exceptions: they run as uid 100 with a read-only root filesystem, no capabilities and
+# no privilege escalation (see k8s/base/services/*.yaml).
+misconfigurations:
+  - id: KSV-0014
+    statement: >-
+      Read-only root filesystem is not set for third-party images that write to their own image directories at
+      start-up: PostgreSQL (/var/run/postgresql, initdb), RabbitMQ (generated config and Erlang cookie), Keycloak
+      (Quarkus build in /opt/keycloak), pgAdmin (config database), Ollama (runner files) and nginx (/var/cache/nginx,
+      pid file). Making them read-only means mapping every such path to a volume and re-testing each image upgrade;
+      for a local demo cluster the risk (a compromised container writing to its own layer, which disappears on
+      restart) does not justify that. Revisit before any shared cluster.
+    paths:
+      - "k8s/base/databases/*.yaml"
+      - "k8s/base/rabbitmq/statefulset.yaml"
+      - "k8s/keycloak/keycloak.yaml"
+      - "k8s/tools/pgadmin.yaml"
+      - "k8s/components/ollama/deployment.yaml"
+      - "k8s/base/frontend/frontend.yaml"
+  - id: KSV-0118
+    statement: >-
+      Default security context for the same third-party workloads (PostgreSQL, RabbitMQ, Keycloak, pgAdmin, Ollama,
+      nginx). Their official images choose their own users (postgres, rabbitmq and keycloak switch to a non-root
+      user themselves; nginx workers run as nginx); a pod-level runAsUser would have to match each image's uid and
+      break on image changes. Same trade-off and same revisit point as KSV-0014.
+    paths:
+      - "k8s/base/databases/*.yaml"
+      - "k8s/base/rabbitmq/statefulset.yaml"
+      - "k8s/keycloak/keycloak.yaml"
+      - "k8s/tools/pgadmin.yaml"
+      - "k8s/components/ollama/deployment.yaml"
+      - "k8s/base/frontend/frontend.yaml"
+  - id: DS-0002
+    statement: >-
+      frontend/Dockerfile keeps nginx:alpine's default: the master process starts as root to bind port 80 and the
+      worker processes that handle requests run as the unprivileged user nginx. ollama/Dockerfile uses the upstream
+      binary's layout (models under /root/.ollama); the container only listens inside the cluster/compose network.
+    paths:
+      - "frontend/Dockerfile"
+      - "ollama/Dockerfile"

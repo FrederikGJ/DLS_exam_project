@@ -24,9 +24,9 @@ export class GraphQLError extends Error {
  * thrown, UNAUTHORIZED sends the user to the login page and FORBIDDEN becomes a Danish message.
  * `body` is serialised as JSON when given; the parsed response body is returned (null for 204).
  */
-export async function rest(method, url, body = null, serviceName = 'servicen') {
+export async function rest(method, url, body = null, serviceName = 'servicen', extraHeaders = {}) {
   if (!url) throw new GraphQLError(`Ingen URL konfigureret for ${serviceName} (se js/config.js)`, 'CONFIG_ERROR');
-  const headers = { Accept: 'application/json' };
+  const headers = { Accept: 'application/json', ...extraHeaders };
   if (body !== null) headers['Content-Type'] = 'application/json';
   const token = await getToken();
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -50,6 +50,21 @@ export async function rest(method, url, body = null, serviceName = 'servicen') {
   }
   throw new GraphQLError((payload && (payload.detail || payload.title))
     || `${serviceName} svarede HTTP ${res.status}`, code);
+}
+
+/**
+ * A fresh idempotency key: one per intended write (e.g. per filled-in form), sent again unchanged when the same write
+ * is retried, so a double click or a retry after a lost response never creates the thing twice (dev plan DP-30).
+ * crypto.randomUUID() only exists in secure contexts (https or localhost); over plain http (http://airport.local)
+ * a UUID v4 is built from crypto.getRandomValues(), which works everywhere.
+ */
+export function newIdempotencyKey() {
+  if (globalThis.crypto && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6] & 0x0f) | 0x40;                     // version 4
+  b[8] = (b[8] & 0x3f) | 0x80;                     // variant 10xx
+  const hex = [...b].map(x => x.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 /**
@@ -185,8 +200,10 @@ export const paymentApi = {
 const v1 = (path) => (cfg.BAGGAGE_REST_URL ? cfg.BAGGAGE_REST_URL + path : '');
 
 export const baggageApi = {
-  registerBaggage: (bookingReference, weightKg, type) =>
-    rest('POST', v1('/baggage'), { bookingReference, weightKg, type }, 'baggage-service'),
+  // idempotencyKey: see newIdempotencyKey() - the same key for a retry of the same registration
+  registerBaggage: (bookingReference, weightKg, type, idempotencyKey) =>
+    rest('POST', v1('/baggage'), { bookingReference, weightKg, type }, 'baggage-service',
+      idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}),
 
   updateBaggageStatus: (tagNumber, status, location) =>
     rest('PATCH', v1(`/baggage/${encodeURIComponent(tagNumber)}/status`),

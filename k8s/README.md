@@ -5,23 +5,28 @@ Alle manifests ligger i denne mappe og deployes samlet med Kustomize:
 ```bash
 kubectl apply -k k8s/                      # selve systemet (= k8s/base/)
 kubectl apply -k k8s/overlays/dev-tools/   # systemet + pgAdmin (dev/demo-værktøj)
+kubectl apply -k k8s/overlays/demo/        # systemet + lokal AI-model (Ollama) + notification-job som KEDA ScaledJob
 ```
 
-`k8s/kustomization.yaml` er kun en tynd henvisning til `base/`. Selve systemet ligger i `base/`, valgfrie
-tilføjelser i `overlays/` (og senere `components/`), fordi Kustomize ikke tillader, at et overlay ligger inde i sin
-egen base-mappe. Indhold:
+`k8s/kustomization.yaml` er kun en tynd henvisning til `base/`. Selve systemet ligger i `base/`, valgfrie dele som
+Kustomize-components i `components/` og de kombinationer, der deployes, i `overlays/`, fordi Kustomize ikke tillader,
+at et overlay ligger inde i sin egen base-mappe. Indhold:
 
 | Mappe/fil                    | Indhold                                                                                   |
 |------------------------------|-------------------------------------------------------------------------------------------|
 | `base/namespace.yaml`        | Namespace `airport`                                                                       |
 | `base/rabbitmq/`             | StatefulSet + Service (5672/15672) + Secret                                               |
 | `base/databases/`            | 5 × PostgreSQL 16 StatefulSet (1 replica, PVC 1Gi) + Service + Secret, én pr. service     |
-| `base/services/`             | 5 × Deployment (1 replica, `requests` 150m/256Mi, `limits` 500m/640Mi – se *Ressourcer på en laptop*) + ClusterIP Service + ConfigMap + Secret, liveness/readiness, initContainer `wait-for-db` der venter på servicens Postgres med `pg_isready`. Kan skaleres til flere replicas uden kodeændringer: en Postgres advisory lock sikrer, at kun én pod ad gangen kører outbox-relayet |
+| `base/services/`             | 5 × Deployment (1 replica, `requests` 150m/256Mi, `limits` 500m/640Mi – se *Ressourcer på en laptop*) + ClusterIP Service + ConfigMap + Secret, liveness/readiness, initContainer `wait-for-db` der venter på servicens Postgres med `pg_isready`. Hærdet: kører som uid 100 med read-only rodfilsystem (kun `/tmp` er et `emptyDir`), uden capabilities og uden privilege escalation (tjekket af Trivy i CI). Kan skaleres til flere replicas uden kodeændringer: en Postgres advisory lock sikrer, at kun én pod ad gangen kører outbox-relayet |
+| `base/services/shop-service-hpa.yaml` | HorizontalPodAutoscaler: shop-service 1–3 pods ved 70 % CPU – se *Autoscaling (HPA)* |
 | `base/frontend/`             | nginx Deployment + Service + ConfigMap der overskriver `js/config.js` med Ingress-stier    |
 | `base/ingress.yaml`          | Én Ingress: `/` → frontend, `/api/<x>/graphql` → den enkelte service, `/auth` → Keycloak |
 | `keycloak/`                  | Keycloak 26 (login, roller): Deployment + Service + Secret + `realm-airport.json` (bliver til ConfigMap `keycloak-realm` via `configMapGenerator`); egen kustomization, som `base/` henviser til, så compose kan mounte samme realm-fil – se *Keycloak (login)* |
 | `tools/`                     | pgAdmin (dev/demo-værktøj, ikke en del af systemet): Deployment + Service + ConfigMap + Secret + egen Ingress på `/pgadmin` (`pgadmin-ingress.yaml`). Deployes kun via `overlays/dev-tools` |
 | `overlays/dev-tools/`        | `base` + `tools`: systemet med pgAdmin                                                    |
+| `components/ollama/`         | Lokal sprogmodel til `askRoute`: Ollama Deployment (`airport/ollama:local`, model bagt ind) + Service + patch der sætter `AI_ENABLED=true` for shop-service – se *Demo-overlay* |
+| `components/notification-job/` | notification-job som KEDA `ScaledJob` på køen `notifications` + `TriggerAuthentication` + Secret – kræver KEDA, se *Demo-overlay* |
+| `overlays/demo/`             | `base` + begge components: systemet med AI og serverless-jobbet                          |
 | `kind-config.yaml`           | kind-cluster med port-mapping 80/443 → 8090/8443                                          |
 
 Secrets indeholder **dev-værdier** (fx `flight/flight`). Skift dem før brug i et delt cluster.
@@ -92,6 +97,10 @@ docker compose build
 for img in flight-service booking-service payment-service baggage-service shop-service frontend; do
   kind load docker-image "airport/${img}:local" --name airport
 done
+# Kun til k8s/overlays/demo/ (se *Demo-overlay*):
+#   docker compose --profile ai build ollama && docker compose build notification-job
+#   kind load docker-image airport/ollama:local --name airport
+#   kind load docker-image airport/notification-job:local --name airport
 
 # Ingress-controller til kind
 kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
@@ -218,6 +227,142 @@ timeout 90 docker run --rm --network dls_exam_default --cpus 0.5 --memory 640m \
   -e JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75.0 -XX:TieredStopAtLevel=1 -XX:+UseSerialGC -Xss512k" \
   airport/flight-service:local 2>&1 | grep -m1 'Started FlightServiceApplication'
 ```
+
+### Class Data Sharing (CDS): hurtigere boot uden flere ressourcer
+
+Alle fem Java-images bygger siden 16-09-2026 et **CDS-arkiv** ind i imaget (Spring Boots anbefalede opsætning, se
+kommentaren i `flight-service/Dockerfile`): jar'en pakkes ud (`java -Djarmode=tools -jar app.jar extract`), og en
+træningskørsel starter applikationskonteksten én gang med `-XX:ArchiveClassesAtExit=app.jsa` og
+`-Dspring.context.exit=onRefresh` (uden database og broker: Flyway slået fra, Hibernate får dialekten oplyst). Ved
+opstart mapper JVM'en arkivet (`-XX:SharedArchiveFile=app.jsa`) i stedet for at indlæse og verificere de samme
+tusindvis af klasser igen. Træningen kører med præcis de `JAVA_TOOL_OPTIONS`, pods og compose bruger; passer arkivet
+ikke til JVM'en, ignoreres det, og servicen starter bare uden gevinsten.
+
+Målt 16-09-2026 på `flight-service` med samme metode som ovenfor (Docker, `--memory 640m`, databasen migreret, én
+opvarmningskørsel), før = det gamle image med fat jar, efter = CDS-imaget, begge bygget fra samme kildekode:
+
+| Variant | Uden CPU-grænse | Begrænset (0,5 CPU) | RSS efter boot, begrænset |
+|---------|-----------------|---------------------|---------------------------|
+| Før: fat jar | 6,3 s · 7,0 s | 21,2 s · 21,6 s · 21,4 s | ca. 249 MiB |
+| Efter: udpakket + CDS-arkiv | 2,6 s · 2,5 s | 11,5 s · 12,5 s · 12,6 s | ca. 212 MiB |
+
+Gevinsten er 42 % under podens CPU-limit (og ca. 60 % uden), altså langt over tærsklen på 20 %, så opsætningen er
+kopieret til alle fem Dockerfiles (de er identiske). I compose bootede alle fem services samtidig på 9,4–10,8 s
+(før: ca. 25 s), og `scripts/e2e-smoke.sh` var grøn. Prisen er større images: arkivet fylder ca. 107 MB, så hvert
+service-image vokser fra ca. 430 MB til ca. 560 MB (og `kind load` tager tilsvarende længere), og arkivet skal
+bygges med samme JDK som runtime-imaget (begge `eclipse-temurin:21`). Det kombineres med de lettere JVM-flag
+ovenfor – de to optimeringer angriber hver sin del af boot-tiden (JIT-arbejde vs. klasseindlæsning).
+
+Gentag målingen med `docker run` som ovenfor; se om arkivet bruges med `-Xlog:cds`:
+
+```bash
+docker run --rm --entrypoint java airport/flight-service:local -Xshare:on -XX:SharedArchiveFile=/app/app.jsa \
+  -XX:TieredStopAtLevel=1 -XX:+UseSerialGC -Xlog:cds -version 2>&1 | head -5
+```
+
+## Demo-overlay: AI og serverless (KEDA)
+
+`overlays/demo/` er selve systemet plus to valgfrie dele, der viser AI-integrationen og en serverless-funktion.
+Hverken Ollama eller KEDA er en del af `kubectl apply -k k8s/`: uden dem svarer `askRoute` med nøgleordssøgning,
+og booking-events bliver liggende i køen `notifications`, indtil et job tømmer den.
+
+**1. Images på kind-noden.** Modellen er bagt ind i Ollama-imaget, så intet hentes i clusteret. Imaget bygges af
+compose og lægges på noden som de andre (`kind load` virker for lokalt byggede images, ikke for multi-platform-images
+fra Docker Hub):
+
+```bash
+docker compose --profile ai build ollama             # airport/ollama:local, ca. 1,1 GB
+docker compose build notification-job                # airport/notification-job:local
+kind load docker-image airport/ollama:local --name airport
+kind load docker-image airport/notification-job:local --name airport
+```
+
+Alle otte images (fem services, frontend, Ollama, notification-job) tog 57 s at loade 16-09-2026.
+
+**2. KEDA installeres én gang pr. cluster**, fastlåst til en version (CRD'erne `ScaledJob`/`TriggerAuthentication`
+skal findes, før overlayet kan anvendes, og KEDA's admission webhook skal være klar):
+
+```bash
+kubectl apply --server-side -f https://github.com/kedacore/keda/releases/download/v2.20.2/keda-2.20.2.yaml
+kubectl -n keda wait --for=condition=ready pod --all --timeout=240s
+```
+
+`--server-side` er nødvendigt, fordi KEDA's CRD'er er for store til `kubectl apply`s annotation. Opgradér ved at
+skifte versionen i URL'en; afinstallér med `kubectl delete -f <samme URL>`.
+
+**3. Deploy og prøv.**
+
+```bash
+kubectl apply -k k8s/overlays/demo/
+kubectl -n airport get pods -w                         # 14 pods: systemet + ollama
+kubectl -n airport get scaledjob notification-job       # READY True, ACTIVE False (tom kø)
+./scripts/demo-keda.sh                                  # 5 bookinger + betalinger -> jobs starter og forsvinder igen
+```
+
+På et helt nyt cluster kan KEDA's første forbindelse til RabbitMQ fejle, fordi RabbitMQ stadig starter; så står
+`kubectl -n airport get scaledjob` på `READY False`, og KEDA prøver igen med stigende pause (set 16-09-2026: klar
+efter ca. 6 minutter). Events går ikke tabt – de ligger i køen – men jobbene starter først, når ScaledJob'en er Ready,
+og derfor venter `scripts/demo-keda.sh` på det, før den laver bookinger.
+
+Ollama brugte 1,27 GiB RAM med modellen indlæst og 60 MiB uden (målt med `kubectl top`; `limits` 4 CPU / 3 GiB),
+og modellen smides ud efter 5 minutter uden spørgsmål (`OLLAMA_KEEP_ALIVE`). shop-service beder den indlæse
+modellen, så snart servicen er startet (`OllamaWarmUp`). Kører shop-service allerede, når overlayet anvendes, skal
+den genstartes for at læse den patchede ConfigMap: `kubectl -n airport rollout restart deployment/shop-service`.
+
+**Verificeret på kind 16-09-2026** (nyt cluster, `kubectl apply -k k8s/overlays/demo/`, images for Postgres,
+RabbitMQ og Keycloak hentet undervejs):
+
+| Måling | Resultat |
+|--------|----------|
+| Alle 14 pods Ready | efter 131 s, 0 restarts (Ollama efter 7 s, databaser 66–92 s, Java-services 106–122 s, Keycloak 131 s) |
+| Ollama-opvarmning | modellen indlæst 3,0 s efter shop-service startede |
+| `askRoute` gennem Ingress | `aiUsed=true`; "Hvor kan jeg få noget mod køresyge?" → Apoteket på 9,1 s (første kald), næste spørgsmål 3,7 s |
+| Hærdede pods (uid 100, read-only rodfilsystem, `/tmp` som `emptyDir`) | Alle 14 pods Ready med 0 restarts; `touch /app/x` giver "Read-only file system", smoke-test og KEDA-demo grønne |
+| `scripts/demo-keda.sh` (10 events i køen) | KEDA startede 2 jobs efter 3 s, køen var tom efter 6 s, jobbene færdige efter 11 s og slettet igen efter 41 s (`ttlSecondsAfterFinished: 30`); alle DLQ'er tomme, mails i jobbenes log |
+| `scripts/e2e-smoke.sh` gennem Ingress | alle flows grønne |
+
+Se mails fra et job, mens det findes: `kubectl -n airport logs -l app.kubernetes.io/name=notification-job --tail=20`.
+
+## Autoscaling (HPA)
+
+`base/services/shop-service-hpa.yaml` skalerer shop-service mellem 1 og 3 pods, når gennemsnits-CPU'en overstiger
+70 % af podens `requests` (150m). En HorizontalPodAutoscaler læser CPU fra **metrics-server**, som kind ikke har med.
+Installér den én gang pr. cluster; på kind skal den have `--kubelet-insecure-tls`, fordi kubelets certifikat er
+selvsigneret og ikke udstedt til nodens IP:
+
+```bash
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.9.0/components.yaml
+kubectl -n kube-system patch deployment metrics-server --type=json \
+  -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+kubectl -n airport get hpa shop-service                 # TARGETS "cpu: 3%/70%" når metrics-server svarer
+```
+
+Uden metrics-server viser HPA'en `<unknown>` og beholder bare antallet af pods. Belast servicen og se den skalere:
+
+```bash
+./scripts/load-shops.sh                                 # 8 workers i 180 s mod route-queryen gennem Ingress
+kubectl -n airport get hpa shop-service -w              # i en anden terminal
+```
+
+`behavior` i HPA'en holder demoen kort og rolig: højst én pod mere pr. minut (en ny JVM skal nå at blive Ready,
+før den næste lægges til) og 120 s stabilisering før nedskalering i stedet for standardens 300 s.
+
+**Verificeret på kind 16-09-2026** (`scripts/load-shops.sh` med 8 workers i 180 s, ca. 126 requests/s, 0 fejl):
+
+| Tid | CPU (mål 70 %) | Pods (ønsket/Ready) |
+|-----|----------------|---------------------|
+| 0 s | 3 % | 1/1 |
+| 31 s | 140 % | 1/1 |
+| 46 s | 330 % | 2/1 – anden pod startes |
+| 62 s | 330 % | 2/2 |
+| 109 s | 192 % | 3/2 – tredje pod startes |
+| 140 s | 321 % | 3/3 |
+| 221 s | 50 % | 3/3 – belastningen er stoppet |
+| 344 s | 3 % | 2/2 – første nedskalering (120 s stabilisering) |
+| 405 s | 3 % | 1/1 |
+
+CPU'en blev over målet selv med tre pods, fordi `maxReplicas: 3` er loftet; det er bevidst, så en demo aldrig kan
+fylde laptoppen. `scripts/e2e-smoke.sh` var grøn bagefter.
 
 ## Keycloak (login)
 

@@ -1,11 +1,13 @@
-# Demo stack = the base airport system + optional components that are not part of the system itself.
-# Today: the local LLM behind shop-service's askRoute (k8s/components/ollama). Further components (e.g.
-# observability) are added to the `components` list.
+# Demo stack = the base airport system + optional components that are not part of the system itself:
+#   - k8s/components/ollama            the local LLM behind shop-service's askRoute (DP-16)
+#   - k8s/components/notification-job  notification-job as a KEDA ScaledJob (DP-21) - needs KEDA installed first
+# Further components (e.g. observability) are added to the `components` list.
 #
 #     docker compose --profile ai build ollama                        # builds airport/ollama:local (model baked in)
 #     kind load docker-image airport/ollama:local --name airport      # put the image on the kind node
 #     kubectl apply -k k8s/overlays/demo/
 #     kubectl -n airport rollout restart deployment/shop-service      # only if shop-service was already running
+#     kind load docker-image airport/notification-job:local --name airport   # + KEDA, see k8s/README.md
 #
 # `kubectl apply -k k8s/` (base) or k8s/overlays/dev-tools/ deploy no Ollama; askRoute then uses the keyword fallback.
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -18,3 +20,4 @@ resources:
 
 components:
   - ../../components/ollama
+  - ../../components/notification-job

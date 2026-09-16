@@ -245,6 +245,28 @@ services:
       retries: 6
       start_period: 10s
 
+  # ---------------------------------------------------------- jobs (optional)
+  # notification-job (dev plan DP-20): drains the `notifications` queue (all booking.# events, declared by
+  # booking-service), logs one Danish e-mail per event and exits with 0 once the queue has been idle for
+  # IDLE_TIMEOUT_MS. Run-to-completion, so it is not part of a plain `docker compose up`; run it on demand with
+  #     docker compose --profile jobs up notification-job        (build first: docker compose build notification-job)
+  # In Kubernetes the same image runs as a KEDA ScaledJob that scales on the queue length (DP-21).
+  notification-job:
+    build: ./notification-job
+    image: airport/notification-job:local
+    profiles: [jobs]
+    restart: "no"
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USERNAME: airport
+      RABBITMQ_PASSWORD: airport
+      NOTIFICATION_QUEUE: notifications
+      MAX_MESSAGES: "100"
+      IDLE_TIMEOUT_MS: "5000"
+    depends_on:
+      rabbitmq: { condition: service_healthy }
+
   # -------------------------------------------------------------- frontend
   frontend:
     build: ./frontend

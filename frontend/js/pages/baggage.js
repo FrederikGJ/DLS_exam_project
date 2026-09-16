@@ -1,7 +1,7 @@
 // Bagage: register baggage on a booking, list bags and update their status/location.
 // The four baggage operations go over baggage-service's REST API v1; the booking snapshot is the same service's
 // GraphQL query, so this page shows both API styles side by side in the browser's network tab (see api.js).
-import { baggageApi } from '../api.js';
+import { baggageApi, newIdempotencyKey } from '../api.js';
 import { esc, formatDateTime, badge, toast, showError, busy, state } from '../app.js';
 
 const TYPES = ['CHECKED', 'CABIN', 'SPECIAL'];
@@ -60,7 +60,13 @@ export async function render(container, params) {
   const listRef = container.querySelector('#list-ref');
   const snapshotEl = container.querySelector('#snapshot');
 
-  container.querySelector('#reg-form').addEventListener('submit', (e) => {
+  // One idempotency key per intended registration (DP-30): it stays the same while the user retries the same
+  // form - a double click, a second click after "Kan ikke nå baggage-service" - so baggage-service registers the
+  // bag once, and it is renewed when the form is changed or a bag has been registered.
+  const regForm = container.querySelector('#reg-form');
+  let registrationKey = newIdempotencyKey();
+  regForm.addEventListener('input', () => { registrationKey = newIdempotencyKey(); });
+  regForm.addEventListener('submit', (e) => {
     e.preventDefault();
     busy(container.querySelector('#reg-btn'), registerBag);
   });
@@ -96,7 +102,8 @@ export async function render(container, params) {
     result.innerHTML = '';
     if (!ref) { toast('Angiv bookingreference', 'error'); return; }
     try {
-      const bag = await baggageApi.registerBaggage(ref, weight, type);
+      const bag = await baggageApi.registerBaggage(ref, weight, type, registrationKey);
+      registrationKey = newIdempotencyKey();       // the next bag is a new registration
       state.bookingRef = ref;
       result.innerHTML = `<div class="alert success">Bagage registreret. Tag: <span class="ref" style="font-size:1.2rem">${esc(bag.tagNumber)}</span><br>
         ${esc(bag.passengerName)} · ${esc(bag.flightNumber)} · ${esc(bag.weightKg)} kg · ${badge(bag.type)} · ${badge(bag.status)}</div>`;
@@ -108,6 +115,7 @@ export async function render(container, params) {
         INVALID_STATE: 'Bookingen skal være bekræftet eller checket ind, før bagage kan registreres.',
         NOT_FOUND: 'Bookingen er ikke kendt af bagagesystemet endnu. Er den betalt og bekræftet?',
         VALIDATION_ERROR: 'Ugyldige oplysninger.',
+        CONFLICT: 'Formularen er allerede brugt til en anden registrering – genindlæs siden og prøv igen.',
       }[err.code];
       result.innerHTML = `<div class="alert error">${esc(friendly ? friendly + ' ' : '')}${esc(err.message)} <span class="mono small">(${esc(err.code)})</span></div>`;
       showError(err);

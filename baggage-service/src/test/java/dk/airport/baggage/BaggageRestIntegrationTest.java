@@ -35,10 +35,18 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.time.Duration;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
@@ -86,6 +94,9 @@ class BaggageRestIntegrationTest {
     /** A booking that is still PENDING_PAYMENT - registration must be refused with 409. */
     static final String UNPAID_REF = "RST002";
     static final String FLIGHT_NUMBER = "SK1501";
+    /** Confirmed bookings used only by the idempotency tests, so their bag counts are exact. */
+    static final String IDEMPOTENT_REF = "RST003";
+    static final String CONCURRENT_REF = "RST004";
 
     /** Every event published on airport.events with routing key baggage.# ends up here. */
     static final List<EventEnvelope> RECEIVED = new CopyOnWriteArrayList<>();
@@ -124,9 +135,13 @@ class BaggageRestIntegrationTest {
         // baggage-service only knows the bookings it has heard about from booking-service
         publish("booking.confirmed", bookingPayload(CONFIRMED_REF, "CONFIRMED"));
         publish("booking.created", bookingPayload(UNPAID_REF, "PENDING_PAYMENT"));
+        publish("booking.confirmed", bookingPayload(IDEMPOTENT_REF, "CONFIRMED"));
+        publish("booking.confirmed", bookingPayload(CONCURRENT_REF, "CONFIRMED"));
         await().atMost(Duration.ofSeconds(20)).untilAsserted(() -> {
             assertThat(snapshots.findById(CONFIRMED_REF)).isPresent();
             assertThat(snapshots.findById(UNPAID_REF)).isPresent();
+            assertThat(snapshots.findById(IDEMPOTENT_REF)).isPresent();
+            assertThat(snapshots.findById(CONCURRENT_REF)).isPresent();
         });
     }
 
@@ -300,6 +315,80 @@ class BaggageRestIntegrationTest {
                 .andExpect(jsonPath("$.paths['" + BASE + "/bookings/{reference}/baggage'].get").exists())
                 .andExpect(jsonPath("$.paths['" + BASE + "/baggage/{tagNumber}/status'].patch").exists())
                 .andExpect(jsonPath("$.components.securitySchemes.keycloak.scheme").value("bearer"));
+    }
+
+    @Test
+    @Order(9)
+    void repeatedRequestWithTheSameIdempotencyKeyRegistersOneBag() throws Exception {
+        String key = UUID.randomUUID().toString();
+        MvcResult first = mvc.perform(register(IDEMPOTENT_REF, "12.5", "CABIN").header("Idempotency-Key", key))
+                .andExpect(status().isCreated())
+                .andExpect(header().string("Idempotent-Replayed", "false"))
+                .andReturn();
+        String firstTag = mapper.readTree(first.getResponse().getContentAsString()).path("tagNumber").asText();
+
+        // a retry (lost response, double click): same answer, nothing new
+        mvc.perform(register(IDEMPOTENT_REF, "12.5", "CABIN").header("Idempotency-Key", key))
+                .andExpect(status().isCreated())
+                .andExpect(header().string("Idempotent-Replayed", "true"))
+                .andExpect(header().string(HttpHeaders.LOCATION, BASE + "/baggage/" + firstTag))
+                .andExpect(jsonPath("$.tagNumber").value(firstTag));
+
+        // the same key for a different bag is a client bug
+        mvc.perform(register(IDEMPOTENT_REF, "20", "CHECKED").header("Idempotency-Key", key))
+                .andExpect(status().isConflict())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.code").value("CONFLICT"))
+                .andExpect(jsonPath("$.detail", containsString(firstTag)));
+
+        // without a key every request is a new bag, as before
+        mvc.perform(register(IDEMPOTENT_REF, "12.5", "CABIN")).andExpect(status().isCreated());
+
+        mvc.perform(get(BASE + "/bookings/" + IDEMPOTENT_REF + "/baggage")
+                        .header(HttpHeaders.AUTHORIZATION, TestTokens.passenger()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(2));
+        await().during(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(10)).until(() -> RECEIVED.stream()
+                .filter(e -> e.eventType().equals("baggage.registered")
+                        && e.payload().path("tagNumber").asText().equals(firstTag))
+                .count() == 1);
+    }
+
+    @Test
+    @Order(10)
+    void concurrentRequestsWithTheSameIdempotencyKeyRegisterOneBag() throws Exception {
+        String key = UUID.randomUUID().toString();
+        int requests = 8;
+        ExecutorService pool = Executors.newFixedThreadPool(requests);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            List<Future<MvcResult>> futures = new ArrayList<>();
+            for (int i = 0; i < requests; i++) {
+                futures.add(pool.submit(() -> {
+                    start.await();
+                    return mvc.perform(register(CONCURRENT_REF, "9.0", "CABIN").header("Idempotency-Key", key))
+                            .andReturn();
+                }));
+            }
+            start.countDown();                   // all requests race for the same key at once
+            Set<String> tags = new HashSet<>();
+            int created = 0;
+            for (Future<MvcResult> f : futures) {
+                MvcResult r = f.get(30, TimeUnit.SECONDS);
+                assertThat(r.getResponse().getStatus()).isEqualTo(201);
+                tags.add(mapper.readTree(r.getResponse().getContentAsString()).path("tagNumber").asText());
+                if ("false".equals(r.getResponse().getHeader("Idempotent-Replayed"))) {
+                    created++;
+                }
+            }
+            assertThat(tags).hasSize(1);
+            assertThat(created).isEqualTo(1);
+        } finally {
+            pool.shutdownNow();
+        }
+        mvc.perform(get(BASE + "/bookings/" + CONCURRENT_REF + "/baggage")
+                        .header(HttpHeaders.AUTHORIZATION, TestTokens.passenger()))
+                .andExpect(jsonPath("$.length()").value(1));
     }
 
     // ------------------------------------------------------------------ helpers

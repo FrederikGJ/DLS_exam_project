@@ -22,6 +22,11 @@ API-stilarter er repræsenteret oven på den samme forretningslogik.
 - 0 < vægt ≤ 32 kg pr. stykke (`VALIDATION_ERROR`/422).
 - Tag'et har formen `BAG-XXXXXXXX` og genereres af servicen.
 - Aflyses flyet, sendes alle stykker der ikke er `ARRIVED`/`LOST` tilbage til `RETURN_DESK`.
+- Registrering er idempotent med en nøgle fra klienten (REST-header `Idempotency-Key`, GraphQL-argument
+  `idempotencyKey`): samme nøgle igen giver den bagage, første kald registrerede (REST: `201` +
+  `Idempotent-Replayed: true`), aldrig en ny; samme nøgle med andre data er `CONFLICT`/409. Et gentaget statusskift
+  til samme status og lokation er en no-op uden nyt event. Se "Idempotens" i
+  [docs/architecture.md](../docs/architecture.md#idempotens-hvad-sker-der-når-en-mutation-gentages).
 
 ## REST-API v1
 

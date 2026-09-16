@@ -7,21 +7,24 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.Optional;
 
 /**
- * The model's answer as promised by {@link ConciergePrompt}: {@code {"shopId", "toNodeId", "interpretation"}}.
- * Ids are raw values from the model and still have to be checked against the database by the caller.
+ * The model's answer as promised by {@link ConciergePrompt#answerSchema}:
+ * {@code {"english", "need", "shop", "fits"}}. The shop name is a raw value from the model and still has to be
+ * looked up by the caller.
  *
- * @param shopId id of the chosen shop, or null when the model found no match (or sent something unusable)
- * @param toNodeId id of the destination node named in the question, or null
- * @param interpretation the model's one-sentence reading of the question, or null when missing
+ * @param english the question translated to English (logged only; it is the model's first reasoning step)
+ * @param need what the passenger is looking for in a few English words; empty when the model gave none
+ * @param shop name of the shop the model suggests, or null when missing or {@code fits} is false
+ * @param fits false when the model says no shop offers what the passenger wants
  */
-record ConciergeAnswer(Long shopId, Long toNodeId, String interpretation) {
+record ConciergeAnswer(String english, String need, String shop, boolean fits) {
 
-    /** Longest interpretation that is passed on to the client. */
-    static final int MAX_INTERPRETATION = 300;
+    /** Longest need that is passed on to the keyword scoring and the interpretation. */
+    static final int MAX_NEED = 60;
 
     /**
-     * Parses the message content. Tolerates a code fence or text around the object (the first {@code {} ... {@code }}
-     * is taken) and ids sent as strings; returns empty when there is no JSON object at all.
+     * Parses the message content. Ollama's schema-constrained decoding should always give a bare object, but a code
+     * fence or text around it is tolerated (the first {@code {} ... last {@code }} is taken); returns empty when
+     * there is no JSON object with a {@code need} or {@code shop} at all.
      */
     static Optional<ConciergeAnswer> parse(String content, ObjectMapper mapper) {
         if (content == null) {
@@ -38,34 +41,24 @@ record ConciergeAnswer(Long shopId, Long toNodeId, String interpretation) {
         } catch (JsonProcessingException e) {
             return Optional.empty();
         }
-        if (root == null || !root.isObject()) {
+        if (root == null || !root.isObject() || !(root.path("need").isTextual() || root.path("shop").isTextual())) {
             return Optional.empty();
         }
-        return Optional.of(new ConciergeAnswer(id(root.get("shopId")), id(root.get("toNodeId")),
-                text(root.get("interpretation"))));
+        String need = text(root.get("need"), MAX_NEED);
+        if ("none".equalsIgnoreCase(need)) {
+            need = "";
+        }
+        boolean fits = !root.path("fits").isBoolean() || root.path("fits").asBoolean();
+        String shop = fits ? text(root.get("shop"), Integer.MAX_VALUE) : "";
+        return Optional.of(new ConciergeAnswer(text(root.get("english"), 300), need, shop.isEmpty() ? null : shop,
+                fits));
     }
 
-    private static Long id(JsonNode node) {
-        if (node == null || node.isNull()) {
-            return null;
-        }
-        if (node.isIntegralNumber()) {
-            return node.asLong();
-        }
-        if (node.isTextual() && node.asText().trim().matches("\\d{1,18}")) {
-            return Long.parseLong(node.asText().trim());
-        }
-        return null;
-    }
-
-    private static String text(JsonNode node) {
+    private static String text(JsonNode node, int max) {
         if (node == null || !node.isTextual()) {
-            return null;
+            return "";
         }
         String t = ConciergePrompt.oneLine(node.asText());
-        if (t.isEmpty()) {
-            return null;
-        }
-        return t.length() <= MAX_INTERPRETATION ? t : t.substring(0, MAX_INTERPRETATION - 1) + "…";
+        return t.length() <= max ? t : t.substring(0, max);
     }
 }

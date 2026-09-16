@@ -15,6 +15,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
+import java.time.Instant;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.List;
@@ -80,9 +81,35 @@ public class ShopService {
 
     @Transactional
     public Shop createShop(ShopInput in) {
+        return createShop(in, null);
+    }
+
+    /**
+     * Creates a shop, idempotently when the client sends a key (dev plan DP-30): a repeated call with the same key
+     * returns the shop the first call created instead of a duplicate. A key whose shop has since been deleted is
+     * CONFLICT (the tombstone keeps the key taken). Two calls racing with the same key are settled by the unique
+     * constraint: the loser gets CONFLICT and a retry of it returns the winner's shop.
+     */
+    @Transactional
+    public Shop createShop(ShopInput in, String idempotencyKey) {
+        String key = idempotencyKey == null || idempotencyKey.isBlank() ? null : idempotencyKey.trim();
+        if (key != null) {
+            Optional<Shop> earlier = shops.findByIdempotencyKey(key);
+            if (earlier.isPresent()) {
+                log.info("Idempotent replay: shop {} ({}) was already created with this key",
+                        earlier.get().getName(), earlier.get().getId());
+                return earlier.get();
+            }
+            if (shops.idempotencyKeyUsed(key)) {
+                throw new ApiException(ErrorCode.CONFLICT,
+                        "The idempotency key was used for a shop that has since been deleted");
+            }
+        }
         NavNode node = resolveNode(in.nodeId());
-        Shop shop = shops.save(new Shop(in.name().trim(), in.category(), in.terminal().trim().toUpperCase(),
-                in.zone().trim(), in.floor(), in.openingHours().trim(), trimToNull(in.description()), node));
+        Shop shop = new Shop(in.name().trim(), in.category(), in.terminal().trim().toUpperCase(),
+                in.zone().trim(), in.floor(), in.openingHours().trim(), trimToNull(in.description()), node);
+        shop.setIdempotencyKey(key);
+        shop = shops.saveAndFlush(shop);
         log.info("Created shop {} ({})", shop.getName(), shop.getId());
         return shop;
     }
@@ -102,11 +129,16 @@ public class ShopService {
         return shop;
     }
 
+    /**
+     * Deletes a shop by leaving a tombstone (dev plan DP-29): the row gets {@code deleted_at} and is filtered out of
+     * every later query, so {@code shop(id)} returns null and {@code updateShop}/{@code deleteShop} give NOT_FOUND.
+     * Nothing is physically deleted.
+     */
     @Transactional
     public boolean deleteShop(Long id) {
         Shop shop = shops.findById(id).orElseThrow(() -> ApiException.notFound("Shop", id));
-        shops.delete(shop);
-        log.info("Deleted shop {} ({})", shop.getName(), id);
+        shop.markDeleted(Instant.now());
+        log.info("Deleted shop {} ({}) - tombstone kept", shop.getName(), id);
         return true;
     }
 

@@ -24,6 +24,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -38,16 +39,16 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * askRoute with a mocked {@link OllamaClient} (dev plan DP-17): the model's answer is validated against the data,
- * the route goes via the shop, and every failure mode (unknown id, client error, malformed JSON, AI disabled,
- * nothing matched) ends in the keyword fallback instead of an error.
+ * askRoute with a mocked {@link OllamaClient} (dev plan DP-17): the model's need and suggested shop are scored
+ * together with the question, the route goes via the chosen shop, and every failure mode (client error, malformed
+ * JSON, AI disabled) ends in the keyword fallback instead of an error.
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
 class AiConciergeServiceTest {
 
     static final AiProperties ENABLED =
-            new AiProperties(true, "http://localhost:11434", "qwen2.5:1.5b", Duration.ofSeconds(15));
+            new AiProperties(true, "http://localhost:11434", "qwen2.5:1.5b", Duration.ofSeconds(15), false);
 
     @Mock OllamaClient ollama;
     @Mock ShopRepository shops;
@@ -73,6 +74,7 @@ class AiConciergeServiceTest {
     final Route toStarbucks = new Route(List.of(), 130, 2, List.of());
     final Route toLagkagehuset = new Route(List.of(), 200, 3, List.of());
     final Route toDutyFree = new Route(List.of(), 130, 2, List.of());
+    final Route toSevenEleven = new Route(List.of(), 500, 7, List.of());
     final Route viaRoute = new Route(List.of(), 470, 6, List.of());
 
     AiConciergeService service;
@@ -88,14 +90,13 @@ class AiConciergeServiceTest {
         when(routes.route(24L, 38L, false)).thenReturn(toStarbucks);
         when(routes.route(24L, 41L, false)).thenReturn(toLagkagehuset);
         when(routes.route(24L, 36L, false)).thenReturn(toDutyFree);
-        when(routes.route(24L, 15L, false)).thenReturn(new Route(List.of(), 500, 7, List.of()));
+        when(routes.route(24L, 15L, false)).thenReturn(toSevenEleven);
         when(routes.routeVia(eq(24L), anyLong(), eq(31L), eq(false))).thenReturn(viaRoute);
     }
 
     @Test
-    void modelAnswerIsValidatedAndRoutedViaTheShop() {
-        when(ollama.chat(anyString(), anyString())).thenReturn(
-                "{\"shopId\": 10, \"toNodeId\": 31, \"interpretation\": \"Du vil have kaffe på vej til Gate B12\"}");
+    void modelAnswerIsScoredAndRoutedViaTheShopToTheDestinationInTheQuestion() {
+        modelAnswers("Where can I find a cup of coffee on my way to gate B12?", "coffee", "Starbucks", true);
 
         AiRouteAnswer a = service.askRoute("Hvor finder jeg en kop kaffe på vej til gate B12?", 24L, false);
 
@@ -103,90 +104,133 @@ class AiConciergeServiceTest {
         assertThat(a.shop()).isSameAs(starbucks);
         assertThat(a.toNode()).isSameAs(gateB12);
         assertThat(a.route()).isSameAs(viaRoute);
-        assertThat(a.interpretation()).isEqualTo("Du vil have kaffe på vej til Gate B12");
+        assertThat(a.interpretation()).isEqualTo("Sprogmodellen forstod \"coffee\": Starbucks på vej til Gate B12");
         assertThat(a.fallbackReason()).isNull();
         assertThat(a.model()).isEqualTo("qwen2.5:1.5b");
         verify(routes).routeVia(24L, 38L, 31L, false);
     }
 
     @Test
-    void promptListsShopsAndDestinationsButNoJunctions() {
-        when(ollama.chat(anyString(), anyString())).thenReturn("{\"shopId\": 10}");
+    void promptAndSchemaListEveryShopByName() {
+        modelAnswers("coffee now", "coffee", "Starbucks", true);
 
         service.askRoute("kaffe\n\tnu", 24L, false);
 
         ArgumentCaptor<String> system = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<String> user = ArgumentCaptor.forClass(String.class);
-        verify(ollama).chat(system.capture(), user.capture());
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> format = ArgumentCaptor.forClass(Map.class);
+        verify(ollama).chat(system.capture(), user.capture(), format.capture());
         assertThat(system.getValue())
-                .contains("10 | Starbucks | FOOD | T2 | Airside | 0 | Kaffe, te og bagværk.")
-                .contains("31 | Gate B12 | GATE | T2 | 0")
-                .contains("24 | Security T2 | SECURITY | T2 | 0")
-                .doesNotContain("Junction T2 Central")
-                .doesNotContain("Starbucks T2 | SHOP")
-                .contains("{\"shopId\": <id or null>, \"toNodeId\": <id or null>, \"interpretation\": \"<sentence>\"}");
-        assertThat(user.getValue()).contains("The passenger is at: Security T2 (terminal T2, floor 0)")
-                .contains("Question: \"kaffe nu\"");        // control characters collapsed to one space
+                .contains("- Starbucks | terminal T2 | FOOD (food and drink) | Kaffe, te og bagværk.")
+                .contains("- Duty Free Copenhagen T2 | terminal T2 | DUTY_FREE (tax free) |")
+                .contains("\"need\"")
+                .doesNotContain("Gate B12");               // destinations are found in the question, not by the model
+        assertThat(user.getValue()).isEqualTo("I am in terminal T2. kaffe nu");   // control characters collapsed
+
+        Map<String, Object> schema = format.getValue();
+        assertThat(schema).containsEntry("required", List.of("english", "need", "shop", "fits"));
+        @SuppressWarnings("unchecked")
+        Map<String, Map<String, Object>> properties = (Map<String, Map<String, Object>>) schema.get("properties");
+        assertThat(properties.keySet()).containsExactly("english", "need", "shop", "fits");   // the model's order
+        assertThat(properties.get("shop").get("enum"))
+                .isEqualTo(List.of("7-Eleven", "Duty Free Copenhagen T2", "Starbucks", "Lagkagehuset"));
     }
 
     @Test
-    void idsAsStringsCodeFenceAndMissingInterpretationAreTolerated() {
-        when(ollama.chat(anyString(), anyString()))
-                .thenReturn("```json\n{\"shopId\": \"10\", \"toNodeId\": null}\n```");
+    void modelWordsFindWhatTheKeywordsCannotAndTheSuggestionSettlesTheTie() {
+        modelAnswers("I need some caffeine before boarding", "coffee", "Lagkagehuset", true);
+
+        AiRouteAnswer a = service.askRoute("Jeg trænger til koffein inden boarding", 24L, false);
+
+        // "coffee" makes Starbucks and Lagkagehuset equal (FOOD + terminal T2); the suggestion beats the shorter walk
+        assertThat(a.aiUsed()).isTrue();
+        assertThat(a.shop()).isSameAs(lagkagehuset);
+        assertThat(a.route()).isSameAs(toLagkagehuset);
+
+        // without the model, not a single word of the question is known
+        when(ollama.chat(anyString(), anyString(), any())).thenThrow(new OllamaClient.OllamaException("timeout"));
+        assertThat(service.askRoute("Jeg trænger til koffein inden boarding", 24L, false).shop()).isNull();
+    }
+
+    @Test
+    void clearKeywordMatchBeatsAWrongSuggestion() {
+        modelAnswers("Where can I buy perfume?", "perfume", "Starbucks", true);
+
+        AiRouteAnswer a = service.askRoute("Hvor kan jeg købe parfume?", 24L, false);
+
+        assertThat(a.aiUsed()).isTrue();
+        assertThat(a.shop()).isSameAs(dutyFree);
+        assertThat(a.route()).isSameAs(toDutyFree);
+    }
+
+    @Test
+    void suggestionAloneIsEnoughWhenNoWordMatches() {
+        modelAnswers("I forgot my toothbrush", "toothbrush", "7-Eleven", true);
+
+        AiRouteAnswer a = service.askRoute("Jeg har glemt min tandbørste", 24L, false);
+
+        assertThat(a.aiUsed()).isTrue();
+        assertThat(a.shop()).isSameAs(sevenEleven);
+        assertThat(a.route()).isSameAs(toSevenEleven);
+        assertThat(a.interpretation()).isEqualTo("Sprogmodellen forstod \"toothbrush\": 7-Eleven");
+    }
+
+    @Test
+    void modelSayingNothingFitsGivesAnAnswerWithoutShopOrRoute() {
+        modelAnswers("Where is the nearest toilet?", "toilet", "Starbucks", false);
+
+        AiRouteAnswer a = service.askRoute("Hvor er nærmeste toilet?", 24L, false);
+
+        assertThat(a.aiUsed()).isTrue();
+        assertThat(a.shop()).isNull();
+        assertThat(a.route()).isNull();
+        assertThat(a.fallbackReason()).isNull();
+        assertThat(a.interpretation()).contains("\"toilet\"").contains("ingen butik");
+        verifyNoInteractions(routes);
+    }
+
+    @Test
+    void unknownSuggestedShopIsIgnored() {
+        modelAnswers("coffee", "coffee", "Hamburger Heaven", true);
+
+        AiRouteAnswer a = service.askRoute("kaffe", 24L, false);
+
+        // Starbucks and Lagkagehuset score the same without a valid suggestion; the nearer one (130 m < 200 m) wins
+        assertThat(a.aiUsed()).isTrue();
+        assertThat(a.shop()).isSameAs(starbucks);
+    }
+
+    @Test
+    void codeFenceAndNoneAsNeedAreTolerated() {
+        when(ollama.chat(anyString(), anyString(), any())).thenReturn(
+                "```json\n{\"english\": \"coffee\", \"need\": \"none\", \"shop\": \"Starbucks\", \"fits\": true}\n```");
 
         AiRouteAnswer a = service.askRoute("kaffe", 24L, false);
 
         assertThat(a.aiUsed()).isTrue();
         assertThat(a.shop()).isSameAs(starbucks);
-        assertThat(a.toNode()).isNull();
-        assertThat(a.route()).isSameAs(toStarbucks);
-        assertThat(a.interpretation()).contains("Starbucks");
-    }
-
-    @Test
-    void unknownDestinationFromModelIsIgnored() {
-        when(ollama.chat(anyString(), anyString())).thenReturn("{\"shopId\": 10, \"toNodeId\": 25}");   // a junction
-
-        AiRouteAnswer a = service.askRoute("kaffe", 24L, false);
-
-        assertThat(a.aiUsed()).isTrue();
-        assertThat(a.toNode()).isNull();
-        assertThat(a.route()).isSameAs(toStarbucks);
-        verify(routes, never()).routeVia(anyLong(), anyLong(), anyLong(), any(Boolean.class));
-    }
-
-    @Test
-    void unknownShopIdFallsBackToKeywordsAndNearestShop() {
-        when(ollama.chat(anyString(), anyString()))
-                .thenReturn("{\"shopId\": 999, \"toNodeId\": null, \"interpretation\": \"?\"}");
-
-        AiRouteAnswer a = service.askRoute("Hvor finder jeg en kop kaffe?", 24L, false);
-
-        assertThat(a.aiUsed()).isFalse();
-        assertThat(a.fallbackReason()).contains("999");
-        assertThat(a.model()).isNull();
-        // Starbucks and Lagkagehuset both score FOOD + "kaffe" + terminal T2; the nearer one (130 m < 200 m) wins
-        assertThat(a.shop()).isSameAs(starbucks);
-        assertThat(a.route()).isSameAs(toStarbucks);
-        assertThat(a.interpretation()).contains("kaffe").contains("Starbucks");
+        assertThat(a.interpretation()).isEqualTo("Sprogmodellen forstod spørgsmålet: Starbucks");
     }
 
     @Test
     void clientFailureFallsBack() {
-        when(ollama.chat(anyString(), anyString()))
+        when(ollama.chat(anyString(), anyString(), any()))
                 .thenThrow(new OllamaClient.OllamaException("Ollama call failed: Connection refused"));
 
         AiRouteAnswer a = service.askRoute("Hvor kan jeg købe parfume?", 24L, false);
 
         assertThat(a.aiUsed()).isFalse();
         assertThat(a.fallbackReason()).contains("Connection refused");
+        assertThat(a.model()).isNull();
         assertThat(a.shop()).isSameAs(dutyFree);
         assertThat(a.route()).isSameAs(toDutyFree);
+        assertThat(a.interpretation()).isEqualTo("Nøgleordssøgning på \"parfume\": Duty Free Copenhagen T2");
     }
 
     @Test
     void malformedAnswerFallsBack() {
-        when(ollama.chat(anyString(), anyString()))
+        when(ollama.chat(anyString(), anyString(), any()))
                 .thenReturn("Sure! The passenger wants coffee, so Starbucks it is.");
 
         AiRouteAnswer a = service.askRoute("kaffe", 24L, false);
@@ -197,20 +241,18 @@ class AiConciergeServiceTest {
     }
 
     @Test
-    void nullShopIdFromModelFallsBack() {
-        when(ollama.chat(anyString(), anyString()))
-                .thenReturn("{\"shopId\": null, \"toNodeId\": null, \"interpretation\": \"Ingen butik\"}");
+    void jsonWithoutTheContractFieldsFallsBack() {
+        when(ollama.chat(anyString(), anyString(), any())).thenReturn("{\"shopId\": 10, \"toNodeId\": 31}");
 
         AiRouteAnswer a = service.askRoute("kaffe", 24L, false);
 
         assertThat(a.aiUsed()).isFalse();
-        assertThat(a.fallbackReason()).contains("ingen passende butik");
-        assertThat(a.shop()).isSameAs(starbucks);
+        assertThat(a.fallbackReason()).contains("JSON");
     }
 
     @Test
     void disabledAiNeverCallsOllama() {
-        AiProperties off = new AiProperties(false, ENABLED.url(), ENABLED.model(), ENABLED.timeout());
+        AiProperties off = new AiProperties(false, ENABLED.url(), ENABLED.model(), ENABLED.timeout(), false);
         service = new AiConciergeService(ollama, off, shops, nodes, routes, new ObjectMapper());
 
         AiRouteAnswer a = service.askRoute("kaffe", 24L, false);
@@ -218,12 +260,12 @@ class AiConciergeServiceTest {
         assertThat(a.aiUsed()).isFalse();
         assertThat(a.fallbackReason()).contains("AI_ENABLED");
         assertThat(a.shop()).isSameAs(starbucks);
-        verify(ollama, never()).chat(anyString(), anyString());
+        verify(ollama, never()).chat(anyString(), anyString(), any());
     }
 
     @Test
     void fallbackWithoutAnyMatchGivesNoShopAndNoRoute() {
-        when(ollama.chat(anyString(), anyString())).thenThrow(new OllamaClient.OllamaException("timeout"));
+        when(ollama.chat(anyString(), anyString(), any())).thenThrow(new OllamaClient.OllamaException("timeout"));
 
         AiRouteAnswer a = service.askRoute("xyzzy plugh", 24L, false);
 
@@ -237,7 +279,7 @@ class AiConciergeServiceTest {
 
     @Test
     void fallbackDetectsDestinationNamedInQuestion() {
-        when(ollama.chat(anyString(), anyString())).thenThrow(new OllamaClient.OllamaException("timeout"));
+        when(ollama.chat(anyString(), anyString(), any())).thenThrow(new OllamaClient.OllamaException("timeout"));
 
         AiRouteAnswer a = service.askRoute("Jeg vil købe parfume på vej til gate B12", 24L, false);
 
@@ -249,8 +291,19 @@ class AiConciergeServiceTest {
     }
 
     @Test
+    void noShopsMeansNoModelCall() {
+        when(shops.findAll(any(Sort.class))).thenReturn(List.of());
+
+        AiRouteAnswer a = service.askRoute("kaffe", 24L, false);
+
+        assertThat(a.aiUsed()).isFalse();
+        assertThat(a.shop()).isNull();
+        verify(ollama, never()).chat(anyString(), anyString(), any());   // an empty enum is not a valid schema
+    }
+
+    @Test
     void accessibleOnlyIsPassedOnToRouting() {
-        when(ollama.chat(anyString(), anyString())).thenReturn("{\"shopId\": 10}");
+        modelAnswers("coffee", "coffee", "Starbucks", true);
         when(routes.route(24L, 38L, true)).thenReturn(toStarbucks);
 
         service.askRoute("kaffe", 24L, true);
@@ -269,6 +322,11 @@ class AiConciergeServiceTest {
     }
 
     // ------------------------------------------------------------------ fixtures (ids are DB-generated, set here)
+
+    private void modelAnswers(String english, String need, String shop, boolean fits) {
+        when(ollama.chat(anyString(), anyString(), any())).thenReturn("{\"english\": \"" + english
+                + "\", \"need\": \"" + need + "\", \"shop\": \"" + shop + "\", \"fits\": " + fits + "}");
+    }
 
     static NavNode node(long id, String name, String terminal, NodeType type) {
         NavNode n = new NavNode(name, terminal, 0, 0, 0, type);

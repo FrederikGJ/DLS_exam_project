@@ -71,6 +71,7 @@ app:
     url: ${OLLAMA_URL:http://localhost:11434}
     model: ${OLLAMA_MODEL:qwen2.5:1.5b} # must be present in the ollama image (ollama/Dockerfile)
     timeout: ${AI_TIMEOUT_MS:15000}ms   # read timeout for one /api/chat call; then keyword fallback
+    warm-up: ${AI_WARM_UP:true}         # load the model in Ollama right after start-up (ai/OllamaWarmUp)
   messaging:
     exchange: airport.events
     dead-letter-exchange: airport.events.dlx

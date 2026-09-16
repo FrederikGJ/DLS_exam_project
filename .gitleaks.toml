@@ -1,0 +1,16 @@
+# gitleaks configuration (dev plan DP-25): the default rule set plus ONE documented exception.
+#
+# The READMEs show how to talk to the RabbitMQ management API of the local dev stack with
+#     curl -u airport:airport ...
+# airport/airport is the development user that docker-compose.yml and k8s/base/rabbitmq/secret.yaml create for the
+# local stack (marked "DEV VALUES ONLY" there); it protects nothing outside a laptop and is published on purpose so
+# the examples can be copied. The exception matches exactly that user/password pair for the curl rule - any other
+# credential in a curl command, and every other rule, still fails the build.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Documented local dev RabbitMQ user (airport/airport) in curl examples"
+targetRules = ["curl-auth-user"]
+regexTarget = "match"
+regexes = ['''-u\s+airport:airport\b''']

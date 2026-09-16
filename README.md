@@ -27,7 +27,9 @@ Dokumentation: [docs/architecture.md](docs/architecture.md) (diagram, flows, des
 | Database            | PostgreSQL 16 – én database pr. service, migrationer med Flyway       |
 | Message broker      | RabbitMQ (Spring AMQP) – topic exchange `airport.events`              |
 | Containerisering    | Docker, multi-stage builds (maven → eclipse-temurin JRE)              |
-| Orkestrering        | Kubernetes (Kustomize), verificeret på kind – minikube-kommandoer i k8s/README.md |
+| Orkestrering        | Kubernetes (Kustomize), verificeret på kind – minikube-kommandoer i k8s/README.md; HPA på shop-service |
+| Serverless          | `notification-job` (ren Java 21) som KEDA `ScaledJob` på RabbitMQ-kølængde – skalerer til 0 |
+| AI                  | Lokal sprogmodel (Ollama, `qwen2.5:1.5b`) bag `askRoute` i `shop-service` – valgfri |
 | Tests               | JUnit 5, Testcontainers (Postgres + RabbitMQ), Spring GraphQL Tester, WireMock (system-test) |
 
 ## Komponenter
@@ -39,7 +41,9 @@ Dokumentation: [docs/architecture.md](docs/architecture.md) (diagram, flows, des
 | `booking-service` | Passagerer og bookinger, orkestrerer bookingflowet | 8082          | `http://localhost:8082/api/bookings/graphql` |
 | `payment-service` | Simuleret betalingsgateway, refunds               | 8083           | `http://localhost:8083/api/payments/graphql` |
 | `baggage-service` | Bagage bundet til booking, status-tracking, **REST v1** | 8084      | `http://localhost:8084/api/baggage/graphql` + REST `/api/baggage/v1` |
-| `shop-service`    | Butikker + navigation (Dijkstra)                  | 8085           | `http://localhost:8085/api/shops/graphql` |
+| `shop-service`    | Butikker + navigation (Dijkstra) + "Spørg om vej" (lokal AI) | 8085 | `http://localhost:8085/api/shops/graphql` |
+| `notification-job` | Dansk mail pr. booking-event fra køen `notifications`; kører kun, når der er beskeder | – | – (profil `jobs` i compose, KEDA ScaledJob i Kubernetes) |
+| Ollama            | Lokal sprogmodel til `askRoute` (valgfri)          | 11434          | kun med `docker compose --profile ai` |
 | RabbitMQ          | Events mellem services                            | 5672 / 15672   | Management UI: http://localhost:15672 (airport/airport) |
 | Keycloak          | OpenID Connect-login, roller PASSENGER/OPERATIONS | 8180           | http://localhost:8180/realms/airport (admin: /admin/, admin/admin) |
 | PostgreSQL ×5     | `flight_db`, `booking_db`, `payment_db`, `baggage_db`, `shop_db` | 5433–5437 | – |
@@ -149,6 +153,9 @@ Første `--profile ai`-build henter modellen (~1 GB) ind i imaget; derefter star
 `shop-service` har **ikke** `depends_on` på den: servicen er sund uden AI, og et spørgsmål besvares så af
 nøgleordssøgningen med en forklaring i `fallbackReason`. Skift model med
 `docker compose build --build-arg OLLAMA_MODEL=<navn> ollama` og sæt `OLLAMA_MODEL` for `shop-service`.
+Servicen beder Ollama indlæse modellen lige efter opstart (`AI_WARM_UP`), så første spørgsmål ikke venter på det;
+et svar tager derefter typisk 2–3 s på en laptop-CPU. Sådan virker det, og hvorfor modellen kun *foreslår* en butik,
+står i [docs/architecture.md](docs/architecture.md#ai-spørg-om-vej-lokal-sprogmodel).
 I Kubernetes tændes modellen med overlayet `k8s/overlays/demo` (se [k8s/README.md](k8s/README.md)).
 
 ### Prøv flows fra frontenden
@@ -168,10 +175,29 @@ brugernavn og rolle. Operations-panelet under *Afgange* vises kun for brugere me
   afstand, estimeret tid, butikker undervejs og et SVG-kort med gangnetværk, nummererede trin, instruktionstekst,
   afstand pr. delstrækning og retningspile.
 - **Flow E – spørg om vej (AI):** *Butikker* → vælg hvor du er → skriv fx
-  *"Hvor finder jeg en kop kaffe på vej til gate B12?"* → *Spørg om vej*. En lokal sprogmodel (Ollama) oversætter
-  spørgsmålet til én butik + et evt. mål, og ruten tegnes som i Flow D. Svaret viser, hvordan spørgsmålet blev
-  forstået, og om det var modellen eller nødløsningen (nøgleordssøgning), der svarede. Kræver
-  `docker compose --profile ai up` – uden den svarer nøgleordssøgningen, og siden siger det tydeligt.
+  *"Hvor finder jeg en kop kaffe på vej til gate B12?"* → *Spørg om vej*. En lokal sprogmodel (Ollama) tolker
+  spørgsmålet og foreslår en butik, koden vælger butikken og et evt. mål i spørgsmålet, og ruten tegnes som i Flow D.
+  Svaret viser, hvordan spørgsmålet blev forstået, og om det var modellen eller nødløsningen (nøgleordssøgning), der
+  svarede. Kræver `docker compose --profile ai up` – uden den svarer nøgleordssøgningen, og siden siger det tydeligt.
+  Prøv også eksemplet *"Hvor kan jeg få noget mod køresyge?"*: modellen finder Apoteket, nøgleordssøgningen intet.
+
+### Serverless-demo: notification-job
+
+`notification-job` er en lille, ren Java-proces (ingen Spring), der tømmer køen `notifications`, skriver én dansk
+mail pr. booking-event i sin log og stopper igen. I compose køres den ved behov:
+
+```bash
+./scripts/e2e-smoke.sh                                   # laver bookinger, betalinger og aflysninger -> events i køen
+docker compose build notification-job
+docker compose --profile jobs up notification-job        # mails i loggen, exit 0 når køen er tom
+```
+
+I Kubernetes kører den som KEDA `ScaledJob`, der starter jobs efter kølængden og ingen pods har, når køen er tom:
+`kubectl apply -k k8s/overlays/demo/` og `./scripts/demo-keda.sh` (5 bookinger → jobs starter, køen tømmes på få
+sekunder, og jobbene forsvinder igen). Installation af KEDA og målinger står i
+[k8s/README.md](k8s/README.md#demo-overlay-ai-og-serverless-keda), designet i
+[docs/architecture.md](docs/architecture.md#serverless-notification-job-som-keda-scaledjob) og selve jobbet i
+[notification-job/README.md](notification-job/README.md).
 
 ### Automatisk smoke-test af Flow A–D
 
@@ -264,13 +290,27 @@ Se [system-tests/README.md](system-tests/README.md).
 ### CI og statisk analyse
 
 GitHub Actions ([.github/workflows/ci.yml](.github/workflows/ci.yml)) kører ved hvert push og på pull requests
-mod `main`; et nyt push til samme branch afbryder den kørsel, der stadig er i gang. Tre uafhængige jobs:
+mod `main`; et nyt push til samme branch afbryder den kørsel, der stadig er i gang. Fem uafhængige jobs:
 
 | Job         | Hvad                                                                                                          |
 |-------------|---------------------------------------------------------------------------------------------------------------|
-| `backend`   | Én matrix-kørsel pr. service: `mvn -Pci verify` = unit + Testcontainers-tests, Checkstyle og SpotBugs/find-sec-bugs. Surefire-, Checkstyle- og SpotBugs-rapporter uploades som artifacts. |
+| `backend`   | Én matrix-kørsel pr. Java-modul (fem services + `notification-job`): `mvn -Pci verify` = unit + Testcontainers-tests, Checkstyle og SpotBugs/find-sec-bugs. Surefire-, Checkstyle- og SpotBugs-rapporter uploades som artifacts. |
 | `frontend`  | `npm ci && npx eslint js/` i `frontend/` (ESLint *recommended* + browser-globals; frontenden har intet build-step) |
 | `manifests` | `kubectl kustomize` + `kubeconform -strict` mod Kubernetes-API-skemaerne for hver kustomization under `k8s/`   |
+| `security`  | **gitleaks** over hele git-historikken (`fetch-depth: 0`), **Trivy** over repoet (hemmeligheder, fejlkonfiguration i Dockerfiles og Kubernetes-manifests, npm-afhængigheder) og over alle syv byggede images (Alpine-pakker + hver jar i imaget). HIGH/CRITICAL-fund med en rettelse gør jobbet rødt |
+| `system`    | Hele systemet som en bruger kører det: `docker compose build` + `up --wait`, `scripts/e2e-smoke.sh` (Flow A–D), `docker compose down -v` og derefter `system-tests/` mod de byggede images. Fejler noget, uploades `docker compose logs` som artifact |
+
+**Sikkerhedsscanning.** gitleaks og Trivy installeres som release-binærer, fastlåst på version *og* SHA-256, i stedet
+for via deres GitHub Actions: en action kører med workflowets token og kan ændre sig bag et flyttet tag, det kan en
+checksum ikke. Accepterede fund står med begrundelse i [.gitleaks.toml](.gitleaks.toml) (kun dev-brugeren
+`airport:airport` i curl-eksemplerne) og [.trivyignore.yaml](.trivyignore.yaml) (read-only rodfilsystem og
+security context for tredjeparts-images som Postgres, RabbitMQ og Keycloak). Vores egne workloads har ingen
+undtagelser: de fem services og notification-job kører som uid 100 med read-only rodfilsystem, uden capabilities og
+uden privilege escalation, og images kører `apk upgrade` oven på base-imaget. Den første scanning (16-09-2026) fandt
+CRITICAL-sårbarheder i Tomcat 10.1.55 og HIGH i PostgreSQL-driveren og RabbitMQ-klienten, som Spring Boot 3.5.16
+(den sidste 3.5.x) stadig styrer, og efter opgraderingen af RabbitMQ-klienten også i den Netty, den trækker ind – de
+er løftet med versions-properties i hver pom (`tomcat.version`, `postgresql.version`, `rabbit-amqp-client.version`,
+`netty.version`), med CVE-numrene i en kommentar.
 
 Maven-profilen `ci` findes i alle fem poms og bruger `config/checkstyle.xml` (Google-stil med 4 spaces og
 120 tegn) og `config/spotbugs-exclude.xml` (hver undtagelse er begrundet i filen). Uden `-Pci` er
@@ -280,6 +320,10 @@ Maven-profilen `ci` findes i alle fem poms og bruger `config/checkstyle.xml` (Go
 cd flight-service && mvn -Pci verify          # som pipelinen: tests + Checkstyle + SpotBugs
 cd frontend && npm ci && npx eslint js/
 kubectl kustomize k8s/ | kubeconform -strict -summary
+gitleaks git --config .gitleaks.toml --redact .
+trivy fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --ignore-unfixed \
+  --ignorefile .trivyignore.yaml --skip-files '**/pom.xml' --exit-code 1 .
+trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 airport/flight-service:local
 ```
 
 ## Kubernetes
@@ -288,8 +332,11 @@ Manifests ligger i `k8s/` (Kustomize): namespace `airport`, Deployment (1 replic
 [Ressourcer på en laptop](k8s/README.md#ressourcer-på-en-laptop)) + Service + ConfigMap + Secret pr. backend-service, StatefulSet + PVC + Service pr. database, RabbitMQ StatefulSet, frontend og én Ingress.
 Selve systemet ligger i `k8s/base/` (`kubectl apply -k k8s/`); pgAdmin som dev/demo-værktøj på `/pgadmin` ligger i
 `k8s/tools/` og deployes kun med overlayet `kubectl apply -k k8s/overlays/dev-tools/` – det er ikke en del af selve systemet.
+Overlayet `kubectl apply -k k8s/overlays/demo/` lægger den lokale AI-model (Ollama) og notification-job som KEDA
+`ScaledJob` oven på systemet, og shop-service har en HorizontalPodAutoscaler (1–3 pods), der kræver metrics-server –
+se [Demo-overlay](k8s/README.md#demo-overlay-ai-og-serverless-keda) og [Autoscaling](k8s/README.md#autoscaling-hpa).
 
-Manifests er verificeret på et **kind**-cluster (13/13 pods Ready efter ca. 70 s på en laptop, alle flows grønne gennem Ingress). Kort version for
+Manifests er verificeret på et **kind**-cluster (demo-overlayet: 14/14 pods Ready efter 131 s på et nyt cluster inkl. image-pulls, 0 restarts, alle flows grønne gennem Ingress, 16-09-2026). Kort version for
 minikube – se
 [k8s/README.md](k8s/README.md) for detaljer og kind-alternativet:
 
@@ -387,8 +434,12 @@ Alle services konfigureres via environment variables. Defaults i `application.ym
   baggage-service/         ... dk/airport/baggage/...
   shop-service/            ... dk/airport/shop/...
     (hver: src/main/resources/graphql/schema.graphqls, db/migration/V1__init.sql (+V2__seed.sql), src/test/java)
-  k8s/                     base/ (namespace, rabbitmq/, databases/, services/, frontend/, ingress.yaml), keycloak/ (realm-airport.json), tools/ (pgAdmin), overlays/dev-tools/
+  notification-job/        pom.xml, Dockerfile, README.md, src/main/java/dk/airport/notification/ (ren Java, ingen Spring)
+  ollama/                  Dockerfile – Ollama med modellen qwen2.5:1.5b bagt ind
+  k8s/                     base/ (namespace, rabbitmq/, databases/, services/ inkl. shop-service-hpa.yaml, frontend/, ingress.yaml), keycloak/ (realm-airport.json), tools/ (pgAdmin), components/ (ollama/, notification-job/), overlays/ (dev-tools/, demo/)
   scripts/e2e-smoke.sh     end-to-end smoke-test af Flow A-D mod en kørende compose-stak
+  scripts/demo-keda.sh     KEDA-demo på kind: 5 bookinger -> notification-jobs starter og forsvinder igen
+  scripts/load-shops.sh    belastning af shop-service, så HPA'en skalerer op og ned
   system-tests/            system-test af booking ↔ payment med de byggede images (Testcontainers + WireMock)
 ```
 

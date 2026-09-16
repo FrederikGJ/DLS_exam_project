@@ -16,7 +16,11 @@ type Mutation {
    - max 3 CHECKED bags per booking
    - max 32 kg per bag
   """
-  registerBaggage(bookingReference: String!, weightKg: BigDecimal!, type: BaggageType!): Baggage!
+  registerBaggage(
+    bookingReference: String!, weightKg: BigDecimal!, type: BaggageType!,
+    "Optional, max 64 characters (e.g. a UUID per form). Repeating the call with the same key returns the bag the first call registered instead of a new one; the same key with other data is CONFLICT."
+    idempotencyKey: String
+  ): Baggage!
   updateBaggageStatus(tagNumber: String!, status: BaggageStatus!, location: String): Baggage!
 }
 

@@ -59,8 +59,9 @@ public class BaggageController {
             String bookingReference,
             @Argument @NotNull @DecimalMin("0.1") @DecimalMax("32.0") @Digits(integer = 3, fraction = 2)
             BigDecimal weightKg,
-            @Argument @NotNull BaggageType type) {
-        return baggageService.register(bookingReference, weightKg, type);
+            @Argument @NotNull BaggageType type,
+            @Argument @Size(max = BaggageService.MAX_IDEMPOTENCY_KEY) String idempotencyKey) {
+        return baggageService.register(bookingReference, weightKg, type, idempotencyKey).baggage();
     }
 
     @MutationMapping

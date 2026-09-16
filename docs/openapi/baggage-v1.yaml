@@ -27,6 +27,19 @@ paths:
         \ 32 kg per bag. Publishes the event `baggage.registered`. Requires PASSENGER\
         \ or OPERATIONS."
       operationId: register
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        description: "Optional key for this one registration, e.g. a UUID per form\
+          \ (max 64 characters). A repeated request with the same key - double click,\
+          \ retry after a timeout - answers with the bag the first request registered\
+          \ instead of registering a second one."
+        required: false
+        schema:
+          type: string
+          maxLength: 64
+          minLength: 0
+        example: 3f1c2a8e-8d0e-4f3c-9a6b-1d2e3f4a5b6c
       requestBody:
         content:
           application/json:
@@ -35,8 +48,15 @@ paths:
         required: true
       responses:
         "201":
-          description: The bag was registered
+          description: "The bag was registered (or, with a repeated Idempotency-Key,\
+            \ the bag the first request registered)"
           headers:
+            Idempotent-Replayed:
+              description: '`true` when an earlier request with the same Idempotency-Key
+                registered the bag and nothing new was created'
+              style: simple
+              schema:
+                type: boolean
             Location:
               description: URL of the new bag
               style: simple
@@ -65,7 +85,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
         "409":
-          description: "The booking is not paid for (`code`: INVALID_STATE)"
+          description: "The booking is not paid for (`code`: INVALID_STATE), or the\
+            \ Idempotency-Key was already used for another registration (`code`: CONFLICT)"
           content:
             application/problem+json:
               schema:
