@@ -376,8 +376,8 @@ kørsel på `dev_max`, 17-09-2026: alle grønne på 4,8 min):
 
 **Sikkerhedsscanning.** gitleaks og Trivy installeres som release-binærer, fastlåst på version *og* SHA-256, i stedet
 for via deres GitHub Actions: en action kører med workflowets token og kan ændre sig bag et flyttet tag, det kan en
-checksum ikke. Accepterede fund står med begrundelse i [.gitleaks.toml](.gitleaks.toml) (kun dev-brugeren
-`airport:airport` i curl-eksemplerne) og [.trivyignore.yaml](.trivyignore.yaml) (read-only rodfilsystem og
+checksum ikke. Accepterede fund står med begrundelse i [.gitleaks.toml](.gitleaks.toml) (dev-brugeren
+`airport:airport` i curl-eksemplerne og én falsk positiv i kravmatrixens tech stack-celle) og [.trivyignore.yaml](.trivyignore.yaml) (read-only rodfilsystem og
 security context for tredjeparts-images som Postgres, RabbitMQ og Keycloak). Vores egne workloads har ingen
 undtagelser: de fem services og notification-job kører som uid 100 med read-only rodfilsystem, uden capabilities og
 uden privilege escalation, og images kører `apk upgrade` oven på base-imaget. Den første scanning (16-09-2026) fandt

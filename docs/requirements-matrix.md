@@ -5,7 +5,9 @@ eftervist*. Beviserne er af fire slags, og der står altid mindst én:
 
 - **Test** – en testklasse, der kører i CI (`mvn -Pci verify` i hver modul, `system-tests/`, `scripts/e2e-smoke.sh`).
 - **CI** – GitHub Actions ([.github/workflows/ci.yml](../.github/workflows/ci.yml)); seneste kørsel på `dev_max`
-  (commit `4d4a634`, 17-09-2026) var grøn i alle 10 jobs på 4,8 min. Jobbet `contracts` (AsyncAPI) er tilføjet efter den kørsel og er kun kørt lokalt.
+  (commit `4d4a634`, 17-09-2026) var grøn i alle 10 jobs på 4,8 min. Kørslen for `b855b12`, den første med jobbet
+  `contracts` (AsyncAPI), var grøn i 10 af 11 jobs: `security` blev rød på en falsk positiv fra gitleaks, som nu er
+  undtaget med begrundelse i [.gitleaks.toml](../.gitleaks.toml) (grøn lokalt, afventer næste kørsel).
 - **Verificeret** – kørt og målt mod compose eller kind; tal og dato står i det linkede afsnit.
 - **Dok.** – hvor valget er beskrevet og begrundet.
 
@@ -64,10 +66,10 @@ notification-job 36, system-tests 5 – i alt 290 tests.
 | 4.6 | Udviklingsmiljø med docker-compose | `docker-compose.yml` med healthchecks, profiler `ai`, `jobs`, `observability` | CI: `system`-jobbet starter stakken og kører smoke-testen · Dok. [README – Kør lokalt](../README.md#kør-lokalt-med-docker) |
 | 4.7 | Produktion simuleret i lokalt Kubernetes | kind-cluster (`k8s/kind-config.yaml`) med Ingress, `prod`-profil, ressourcer, probes, hærdede pods; minikube-kommandoer også beskrevet | Verificeret: demo-overlay med 18 pods Ready og smoke grøn på kind 17-09-2026 · Dok. [k8s/README.md](../k8s/README.md) |
 | 4.8 | Monorepo i Git | Ét GitHub-repo med alle services, frontend, manifests, docs og CI | – |
-| 4.9 | CI/CD-pipeline med automatiske tests | GitHub Actions på hver push og pull request mod `main`: `backend` (6 moduler), `frontend`, `manifests`, `contracts`, `security`, `system` | CI: grøn kørsel på `dev_max` (4,8 min). Forbehold: ingen kørsel på `main` endnu; `contracts` kun kørt lokalt; CD (automatisk deploy) er bevidst udeladt – der er intet delt miljø at deploye til, og `system`-jobbet kører i stedet de byggede images end-to-end |
+| 4.9 | CI/CD-pipeline med automatiske tests | GitHub Actions på hver push og pull request mod `main`: `backend` (6 moduler), `frontend`, `manifests`, `contracts`, `security`, `system` | CI: grøn kørsel på `dev_max` (4,8 min). Forbehold: ingen kørsel på `main` endnu; CD (automatisk deploy) er bevidst udeladt – der er intet delt miljø at deploye til, og `system`-jobbet kører i stedet de byggede images end-to-end |
 | 4.10 | Pipelinen kører unit-, integrations- og systemtests | `mvn -Pci verify` (unit + Testcontainers-integration), `system`: `e2e-smoke.sh` + `system-tests/` | CI: alle jobs grønne i kørslen ovenfor; system-tests-steppet 38 s |
-| 4.11 | Statisk analyse i pipelinen | Checkstyle + SpotBugs/find-sec-bugs (Maven-profil `ci`, regler i `config/`), ESLint, gitleaks, Trivy (kode, manifests, images), kubeconform, AsyncAPI CLI | CI: `backend`, `frontend`, `security`, `manifests` (grønne); `contracts` lokalt grøn |
-| 4.12 | Fejlende tests får pipelinen til at fejle | `mvn verify` fejler på en rød test eller en Checkstyle/SpotBugs-fejl; hvert job fejler på exit code ≠ 0 | CI: kørslen for `e9ec9ca` blev rød, da baggage-service ikke kompilerede. Forbehold: en rød *test* er endnu ikke set i CI (TASKS 06.07) |
+| 4.11 | Statisk analyse i pipelinen | Checkstyle + SpotBugs/find-sec-bugs (Maven-profil `ci`, regler i `config/`), ESLint, gitleaks, Trivy (kode, manifests, images), kubeconform, AsyncAPI CLI | CI: `backend`, `frontend`, `security`, `manifests`, `contracts` (grønne) |
+| 4.12 | Fejlende tests får pipelinen til at fejle | `mvn verify` fejler på en rød test eller en Checkstyle/SpotBugs-fejl; hvert job fejler på exit code ≠ 0 | CI: kørslen for `e9ec9ca` blev rød, da baggage-service ikke kompilerede, og kørslen for `b855b12`, da gitleaks fandt et (falsk positivt) fund. Forbehold: en rød *test* er endnu ikke set i CI (TASKS 06.07) |
 
 ## 5. Versionering
 
@@ -96,4 +98,4 @@ notification-job 36, system-tests 5 – i alt 290 tests.
 | 7.1 | README for monorepoet og for hver microservice | [README.md](../README.md), [k8s/README.md](../k8s/README.md), [system-tests/README.md](../system-tests/README.md) og en README pr. modul efter [service-readme-template.md](service-readme-template.md): [flight](../flight-service/README.md), [booking](../booking-service/README.md), [payment](../payment-service/README.md), [baggage](../baggage-service/README.md), [shop](../shop-service/README.md), [notification-job](../notification-job/README.md) | Dok. – eksemplerne i service-READMEs er kørt mod kind 17-09-2026 |
 | 7.2 | Swagger/OpenAPI for alle REST-API'er | springdoc i baggage-service: `/v3/api-docs`, Swagger UI, eksporteret til [openapi/baggage-v1.yaml](openapi/baggage-v1.yaml) | Verificeret: den eksporterede fil matcher det kørende endpoint · Dok. [baggage-service/README.md](../baggage-service/README.md) |
 | 7.3 | GraphQL-skema og endpoint-dokumentation | `schema.graphqls` med beskrivelser i hver service, GraphiQL, operationstabeller med roller i hver service-README | Dok. [README – Komponenter](../README.md#komponenter) |
-| 7.4 | AsyncAPI (eller tilsvarende) for events | [asyncapi.yaml](asyncapi.yaml) (AsyncAPI 3.1): alle 14 eventtyper, 9 forbruger-køer, 6 dead-letter queues, send/receive pr. service; prosaudgave i [events.md](events.md) | CI-job `contracts` (AsyncAPI CLI uden warnings + `scripts/check-asyncapi.sh`), lokalt grønt · Verificeret: 24 rigtige events fra kind valideret mod skemaerne uden fejl |
+| 7.4 | AsyncAPI (eller tilsvarende) for events | [asyncapi.yaml](asyncapi.yaml) (AsyncAPI 3.1): alle 14 eventtyper, 9 forbruger-køer, 6 dead-letter queues, send/receive pr. service; prosaudgave i [events.md](events.md) | CI-job `contracts` (AsyncAPI CLI uden warnings + `scripts/check-asyncapi.sh`), grønt i CI fra `b855b12` · Verificeret: 24 rigtige events fra kind valideret mod skemaerne uden fejl |

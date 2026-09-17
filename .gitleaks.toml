@@ -1,5 +1,6 @@
-# gitleaks configuration (dev plan DP-25): the default rule set plus ONE documented exception.
+# gitleaks configuration (dev plan DP-25): the default rule set plus TWO documented exceptions.
 #
+# 1. RabbitMQ dev user in curl examples.
 # The READMEs show how to talk to the RabbitMQ management API of the local dev stack with
 #     curl -u airport:airport ...
 # airport/airport is the development user that docker-compose.yml and k8s/base/rabbitmq/secret.yaml create for the
@@ -14,3 +15,12 @@ description = "Documented local dev RabbitMQ user (airport/airport) in curl exam
 targetRules = ["curl-auth-user"]
 regexTarget = "match"
 regexes = ['''-u\s+airport:airport\b''']
+
+# 2. False positive in docs/requirements-matrix.md (commit b855b12, already pushed): generic-api-key reads the tech
+# stack cell "Keycloak 26, Kubernetes/Kustomize" as key = value, because "Keycloak" contains "key". The exception
+# matches exactly that phrase; a real key after the word "Keycloak" would look different and still fail.
+[[allowlists]]
+description = "Tech stack list 'Keycloak <version>, Kubernetes/Kustomize' is not an API key"
+targetRules = ["generic-api-key"]
+regexTarget = "match"
+regexes = ['''Keycloak \d+, Kubernetes/Kustomize''']
