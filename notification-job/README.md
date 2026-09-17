@@ -10,13 +10,20 @@ der hober sig beskeder op (dev plan DP-21). Lokalt køres det med docker compose
 
 | | |
 |---|---|
-| Type | run-to-completion job (ingen port, ingen health-endpoint) |
-| Kø ind | `notifications` ← `airport.events` med binding `booking.#` |
-| Dead-letter | `airport.events.dlx` → `notification-job.dlq` (routing key `notification-job`) |
-| Events med mail | `booking.created`, `booking.confirmed`, `booking.cancelled`, `booking.checkedin` |
+| Ansvar | Mails til passagerer om deres booking |
+| Port | ingen – run-to-completion job uden HTTP og uden health-endpoint |
+| API | ingen |
+| Database | ingen |
+| Events ud | ingen |
+| Events ind | `booking.created`, `booking.confirmed`, `booking.cancelled`, `booking.checkedin` (kø `notifications`, binding `booking.#`); andre `booking.*` springes over |
 | Image | `airport/notification-job:local` (`eclipse-temurin:21-jre-alpine`, non-root) |
 
-## Hvad jobbet gør
+## Ansvar og data
+
+Jobbet ejer ingen data og har ingen database – kun køen `notifications` med dead-letter queue `notification-job.dlq`
+(via `airport.events.dlx`, routing key `notification-job`). Det kalder ingen andre services; alt, mailen skal bruge,
+står i eventets payload. Det gør bevidst ikke: sender rigtig mail, husker hvilke mails der er sendt, eller reagerer
+på events uden for `booking.#`.
 
 ```
 declare topologi (idempotent) -> basicQos(1) -> basicConsume(autoAck=false)
@@ -35,6 +42,19 @@ stop consumer, luk forbindelsen -> exit 0
 - **Prefetch 1 + manuel ack.** Brokeren udleverer én besked ad gangen, og den kvitteres først, når mailen er
   renderet og logget. Når `MAX_MESSAGES` er nået, annulleres consumeren *før* sidste ack, så der ikke udleveres en
   ekstra besked, der bare skulle lægges tilbage.
+
+## API
+
+Ingen. Jobbet har hverken HTTP-port eller health-endpoint; det styres udelukkende af køen og afslutter med en exit
+code (se *Konfiguration*).
+
+## Forretningsregler
+
+- **Én mail pr. booking-event med skabelon** (`mail/MailRenderer`), emnet fx `Din booking K7Q2ZP er modtaget - afventer
+  betaling` (`booking.created`), `… er bekræftet` (`booking.confirmed`), `… er annulleret` (`booking.cancelled`, med
+  `reason` i teksten) og en mail om check-in (`booking.checkedin`).
+- **Eventtyper uden skabelon** – fx `booking.payment.rejected` eller et fremtidigt `booking.x.v2` – kvitteres og
+  springes over (loglinje `Skipping`), så en ny eventtype hos booking-service aldrig blokerer køen.
 - **Ugyldige beskeder** (ikke JSON, mangler `eventId`/`eventType`, `payload.bookingReference`, `flightNumber`,
   `departureTime` eller `passenger.email`) kan ikke blive gyldige ved at prøve igen. De afvises uden requeue og
   lander i `notification-job.dlq` med RabbitMQ's `x-death`-header (reason `rejected`). Det samme gælder, hvis en
@@ -43,16 +63,28 @@ stop consumer, luk forbindelsen -> exit 0
   går i stykker. Valgfrie felter (fornavn, sæde, pris, årsag) udelades bare af mailen, hvis de mangler.
 - **Tider og beløb** vises i dansk tid (Europe/Copenhagen) og dansk talformat: `11. september 2026 kl. 16:00`,
   `1.299,00 DKK`.
+- **Leveringsgaranti: at-least-once.** En besked kvitteres først, når mailen er afleveret. Dør jobbet imellem (pod
+  slået ihjel, forbindelsen tabt), lægger RabbitMQ beskeden tilbage i køen, og næste kørsel renderer mailen igen.
+  **Dubletter er altså mulige.** En rigtig mailudbyder (SMTP-relay, SendGrid, SES …) skulle have `eventId` med som
+  idempotency-nøgle – `eventId` følger allerede med i `Mail`-recorden. Fejler selve afsendelsen (`MailSender`
+  kaster), stopper jobbet uden ack med exit code 1, og beskeden prøves igen ved næste kørsel.
 
-### Leveringsgaranti: at-least-once
+## Events
 
-En besked kvitteres først, når mailen er afleveret. Dør jobbet imellem (pod slået ihjel, forbindelsen tabt), lægger
-RabbitMQ beskeden tilbage i køen, og næste kørsel renderer mailen igen. **Dubletter er altså mulige.** En rigtig
-mailudbyder (SMTP-relay, SendGrid, SES …) skulle have `eventId` med som idempotency-nøgle, så den samme mail ikke
-sendes to gange – `eventId` følger allerede med i `Mail`-recorden. Fejler selve afsendelsen (`MailSender` kaster),
-stopper jobbet uden ack med exit code 1, og beskeden prøves igen ved næste kørsel.
+**Publicerer:** ingen.
 
-## Konfiguration (miljøvariabler)
+**Forbruger:**
+
+| Kø | Binding | Events der bruges | Effekt |
+|----|---------|-------------------|--------|
+| `notifications` | `booking.#` på `airport.events` | `booking.created`, `booking.confirmed`, `booking.cancelled`, `booking.checkedin` | Én simuleret mail i loggen pr. event; andre `booking.*` kvitteres og springes over; ulæselige beskeder → `notification-job.dlq` |
+
+Køen erklæres med præcis samme argumenter af både jobbet (`Topology`) og booking-service (`config/RabbitConfig`), så
+events gemmes, fra booking-service starter. Ingen `processed_event`: leveringen er at-least-once, og en dublet giver en
+mail mere (`eventId` er idempotensnøglen, en rigtig mailudbyder skulle deduplikere på). Eventkontrakten:
+[events.md](../docs/events.md#events-fra-booking-service) og [asyncapi.yaml](../docs/asyncapi.yaml).
+
+## Konfiguration
 
 | Variabel | Default | Betydning |
 |---|---|---|
@@ -67,7 +99,7 @@ stopper jobbet uden ack med exit code 1, og beskeden prøves igen ved næste kø
 Defaults passer til compose-stakken og er **kun til lokal udvikling**; i Kubernetes kommer brugernavn og password
 fra et Secret. Mere log fra amqp-client: `JAVA_TOOL_OPTIONS=-Dorg.slf4j.simpleLogger.defaultLogLevel=debug`.
 
-### Exit codes
+**Exit codes**
 
 | Kode | Betydning |
 |---|---|
@@ -152,22 +184,44 @@ notification-job-1 exited with code 0
 ## Test
 
 ```bash
-mvn -B verify          # unit tests + integrationstest (kræver Docker til Testcontainers)
-mvn -B -Pci verify     # + Checkstyle og SpotBugs/find-sec-bugs, som i CI
+mvn -B -Pci verify     # 36 tests + Checkstyle og SpotBugs/find-sec-bugs, som i CI (Docker kræves til Testcontainers)
 ```
 
-- `MailRendererTest` – emne og tekst for hver af de fire eventtyper, årsag ved annullering, dansk tid og talformat,
-  ukendte felter, eventtyper uden skabelon og ugyldige beskeder.
-- `JobConfigTest` – defaults, overrides, ugyldige værdier (exit code 2), password ikke i `toString`.
-- `NotificationJobIntegrationTest` (Testcontainers `rabbitmq:3.13-management-alpine`) – kører hele jobbet
-  (`Main.run`): 2 gyldige + 1 ugyldig besked → 2 mails, den ugyldige i `notification-job.dlq`, køen tom, exit 0;
-  ukendt eventtype ackes og springes over; `MAX_MESSAGES` efterlader resten urørt; tom kø stopper efter idle
-  timeout; kø med andre argumenter, forkert password og utilgængelig broker giver exit 1. Topologien erklæres først
-  præcis som `booking-service` gør, så testen også beviser, at de to erklæringer er identiske.
+| Testklasse | Type | Hvad den viser |
+|------------|------|----------------|
+| `MailRendererTest` (24) | unit | Emne og tekst for hver af de fire eventtyper, årsag ved annullering, dansk tid og talformat, ukendte felter, eventtyper uden skabelon og ugyldige beskeder |
+| `JobConfigTest` (5) | unit | Defaults, overrides, ugyldige værdier (exit code 2), password ikke i `toString` |
+| `NotificationJobIntegrationTest` (7) | integration (Testcontainers `rabbitmq:3.13-management-alpine`) | Hele jobbet (`Main.run`): 2 gyldige + 1 ugyldig besked → 2 mails, den ugyldige i `notification-job.dlq`, køen tom, exit 0; ukendt eventtype ackes og springes over; `MAX_MESSAGES` efterlader resten urørt; tom kø stopper efter idle timeout; kø med andre argumenter, forkert password og utilgængelig broker giver exit 1. Topologien erklæres først præcis som booking-service gør, så testen også beviser, at de to erklæringer er identiske |
 
-## Kubernetes
+## Drift
 
-Dev plan DP-21 kører samme image som en KEDA `ScaledJob` med en `rabbitmq`-trigger på køen `notifications`: KEDA
-starter et Job, når der ligger beskeder i køen, og ingen pods, når den er tom. Jobbet selv skal ikke vide noget om
-KEDA – det tømmer køen og stopper, og `MAX_MESSAGES` sikrer, at ét job ikke kører i det uendelige, hvis der hele tiden
-kommer nye events.
+- **Kubernetes:** KEDA `ScaledJob` i `k8s/components/notification-job/` (tændt i `k8s/overlays/demo`, kræver KEDA i
+  clusteret): KEDA kigger på længden af `notifications` hvert 5. sekund og starter ét Job pr. 5 ventende beskeder,
+  højst 3 ad gangen. Hvert Job kører programmet til ende (`MAX_MESSAGES` 50, `IDLE_TIMEOUT_MS` 3000), fejlede Jobs
+  prøves 2 gange, et hængende Job dræbes efter 300 s, og færdige Jobs slettes igen efter 30 s. Ressourcer 100m/128Mi →
+  500m/256Mi, uid 100 som services'ne. Installation, målinger og `scripts/demo-keda.sh`:
+  [k8s/README.md](../k8s/README.md#demo-overlay-ai-og-serverless-keda).
+- **Overvågning:** jobbet har ingen metrics-endpoint (det lever kun sekunder). Kølængden og `notification-job.dlq` ses
+  i RabbitMQ-UI'et og som `rabbitmq_detailed_queue_messages` i Grafana; alarmen `MessagesDeadLettered` fyrer også for
+  `notification-job.dlq` ([Observability](../docs/architecture.md#observability-metrics-logs-og-alarmer)).
+- **Logs:** i Kubernetes samler Alloy også jobbenes logs, så mailene kan søges i Loki (`{app="notification-job"}`), og
+  med `kubectl -n airport logs -l app.kubernetes.io/name=notification-job` mens et Job findes. Nyttige linjer:
+  `notification-job starting: …`, `Mail (simulated, not sent) eventType=… eventId=…`, `Skipping …`,
+  `notification-job done (IDLE): received=… sent=… skipped=… rejected=…`.
+
+## Designvalg
+
+| Valg | Begrundelse | Mere |
+|------|-------------|------|
+| Run-to-completion-program som KEDA `ScaledJob` (ikke en Deployment med `ScaledObject`) | Programmet er bygget til at blive færdigt; intet kører, når der ikke er arbejde, og en besked under behandling afbrydes aldrig af en nedskalering | [Serverless](../docs/architecture.md#serverless-notification-job-som-keda-scaledjob) |
+| Ren Java uden Spring | Hurtig opstart og lille image – det betyder noget, når en pod startes pr. burst af beskeder | [Serverless](../docs/architecture.md#serverless-notification-job-som-keda-scaledjob) |
+| Køen erklæres både af jobbet og af booking-service | Events gemmes, før jobbet har kørt første gang; identiske argumenter er en kontrakt, som testen tjekker | `config/RabbitConfig` i booking-service |
+| Prefetch 1 + manuel ack efter mailen | Højst én besked i luften pr. job; en død pod mister ingen mail | Afsnittet om leveringsgaranti ovenfor |
+| Ingen `processed_event` | Jobbet har ingen database; en dublet er en ekstra mail, og `eventId` er klar som idempotensnøgle hos en rigtig udbyder | [events.md](../docs/events.md) |
+
+## Se også
+
+- [docs/architecture.md – Serverless](../docs/architecture.md#serverless-notification-job-som-keda-scaledjob)
+- [k8s/README.md – Demo-overlay: AI og serverless (KEDA)](../k8s/README.md#demo-overlay-ai-og-serverless-keda)
+- [docs/events.md](../docs/events.md) og [docs/asyncapi.yaml](../docs/asyncapi.yaml) – booking-events og køen `notifications`
+- [booking-service/README.md](../booking-service/README.md) – producenten af `booking.*`

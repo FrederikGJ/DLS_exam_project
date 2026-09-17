@@ -26,6 +26,8 @@ import org.springframework.boot.test.autoconfigure.graphql.tester.AutoConfigureH
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.context.annotation.Import;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.graphql.GraphQlResponse;
 import org.springframework.graphql.test.tester.GraphQlTester;
 import org.springframework.graphql.test.tester.HttpGraphQlTester;
 import org.springframework.http.HttpHeaders;
@@ -39,10 +41,16 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.time.Duration;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -328,8 +336,58 @@ class PaymentServiceIntegrationTest {
                 .path("pay.id").entity(Long.class).get();
     }
 
+    /**
+     * Dev plan DP-30: eight simultaneous pay calls for one booking. The ALREADY_PAID check is a read before the
+     * insert, so on its own it could let several of them through; the partial unique index ux_payment_one_completed
+     * guarantees exactly one COMPLETED payment and one payment.completed event, and every other caller gets
+     * ALREADY_PAID - whichever of the two guards stopped it.
+     */
     @Test
     @Order(9)
+    void simultaneousPaymentsForOneBookingCompleteOnlyOnce() throws Exception {
+        int callers = 8;
+        ExecutorService pool = Executors.newFixedThreadPool(callers);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<GraphQlResponse>> calls = new ArrayList<>();
+        for (int i = 0; i < callers; i++) {
+            calls.add(pool.submit(() -> {
+                start.await();
+                return asPassenger.document(PAY)
+                        .variable("ref", "RACE01").variable("amount", 899.00)
+                        .variable("card", "4242424242424242").variable("expiry", "12/30").variable("cvv", "123")
+                        .execute().returnResponse();
+            }));
+        }
+        start.countDown();
+        int completed = 0;
+        for (Future<GraphQlResponse> call : calls) {
+            GraphQlResponse response = call.get(60, TimeUnit.SECONDS);
+            if (response.getErrors().isEmpty()) {
+                assertThat(response.field("pay.status").<String>getValue()).isEqualTo("COMPLETED");
+                completed++;
+            } else {
+                assertThat(response.getErrors().get(0).getExtensions()).containsEntry("code", "ALREADY_PAID");
+            }
+        }
+        pool.shutdown();
+
+        assertThat(completed).isEqualTo(1);
+        assertThat(paymentRepository.findByBookingReferenceOrderByCreatedAt("RACE01")).singleElement()
+                .satisfies(p -> assertThat(p.getStatus().name()).isEqualTo("COMPLETED"));
+        await().during(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(5)).until(() -> RECEIVED.stream()
+                .filter(e -> e.eventType().equals("payment.completed")
+                        && e.payload().path("bookingReference").asText().equals("RACE01")).count() == 1);
+
+        // the database guard on its own, independent of timing: a second COMPLETED row is refused
+        assertThatThrownBy(() -> jdbcTemplate.update(
+                "insert into payment (booking_reference, amount, card_last4, status)"
+                        + " values ('RACE01', 899.00, '4242', 'COMPLETED')"))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .hasMessageContaining("ux_payment_one_completed");
+    }
+
+    @Test
+    @Order(10)
     void invalidInputIsValidationError() {
         asPassenger.document(PAY)
                 .variable("ref", "ABC123").variable("amount", 10.00)

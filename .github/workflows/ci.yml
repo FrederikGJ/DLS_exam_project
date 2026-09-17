@@ -1,6 +1,6 @@
 # CI for the airport system (dev plan DP-23, DP-25, DP-26).
 #
-# Five independent jobs:
+# Six independent jobs:
 #   backend   - one matrix leg per Java module (five services + notification-job): `mvn -Pci verify` = unit tests,
 #               Testcontainers integration tests (Docker is available on ubuntu-latest), Checkstyle and
 #               SpotBugs/find-sec-bugs. The `ci` Maven profile and its rule files live in config/ (dev plan DP-24).
@@ -11,6 +11,8 @@
 #               misconfigurations, npm dependencies) and over every image the system builds (OS packages and
 #               every jar). HIGH/CRITICAL findings with a fix fail the job; accepted exceptions are documented
 #               in .gitleaks.toml and .trivyignore.yaml.
+#   contracts - docs/asyncapi.yaml (the event contract) must be valid for the AsyncAPI CLI without warnings, and every
+#               event name and queue declared in the code must be in it (scripts/check-asyncapi.sh).
 #   system    - the whole system as a user runs it: `docker compose build` + `up --wait`, scripts/e2e-smoke.sh
 #               (Flow A-D through the real services, Keycloak and RabbitMQ), then the system-tests/ module
 #               (booking <-> payment with the built images). On failure the compose logs are uploaded.
@@ -125,6 +127,27 @@ jobs:
             echo "::endgroup::"
           done
           exit $failed
+
+  contracts:
+    name: contracts · asyncapi
+    runs-on: ubuntu-latest
+    env:
+      ASYNCAPI_CLI_VERSION: 6.1.0
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Validate docs/asyncapi.yaml with the AsyncAPI CLI
+        # --fail-severity=warn: governance warnings (e.g. an outdated spec version) fail the job as well
+        run: |
+          npx --yes "@asyncapi/cli@${ASYNCAPI_CLI_VERSION}" config analytics --disable
+          npx --yes "@asyncapi/cli@${ASYNCAPI_CLI_VERSION}" validate --fail-severity=warn docs/asyncapi.yaml
+
+      - name: Every event and queue in the code is in the contract
+        run: ./scripts/check-asyncapi.sh
 
   security:
     name: security · gitleaks + trivy

@@ -32,6 +32,8 @@ import java.util.stream.Collectors;
 public class GraphQlExceptionResolver extends DataFetcherExceptionResolverAdapter {
 
     private static final Logger log = LoggerFactory.getLogger(GraphQlExceptionResolver.class);
+    /** Partial unique index: at most one COMPLETED payment per booking reference. */
+    static final String ONE_COMPLETED_INDEX = "ux_payment_one_completed";
     private static final AuthenticationTrustResolver TRUST_RESOLVER = new AuthenticationTrustResolverImpl();
 
     public GraphQlExceptionResolver() {
@@ -68,7 +70,11 @@ public class GraphQlExceptionResolver extends DataFetcherExceptionResolverAdapte
         if (ex instanceof IllegalArgumentException iae) {
             return error(env, ErrorCode.VALIDATION_ERROR, iae.getMessage());
         }
-        if (ex instanceof DataIntegrityViolationException) {
+        if (ex instanceof DataIntegrityViolationException dive) {
+            // two simultaneous pay calls for one booking: the loser hits ux_payment_one_completed (V4 migration)
+            if (String.valueOf(dive.getMostSpecificCause().getMessage()).contains(ONE_COMPLETED_INDEX)) {
+                return error(env, ErrorCode.ALREADY_PAID, "The booking was paid at the same moment by another request");
+            }
             return error(env, ErrorCode.CONFLICT, "The operation conflicts with existing data");
         }
         log.error("Unhandled error in data fetcher {}", env.getExecutionStepInfo().getPath(), ex);

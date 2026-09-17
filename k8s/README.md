@@ -20,7 +20,7 @@ at et overlay ligger inde i sin egen base-mappe. Indhold:
 | `base/services/`             | 5 × Deployment (1 replica, `requests` 150m/256Mi, `limits` 500m/640Mi – se *Ressourcer på en laptop*) + ClusterIP Service + ConfigMap + Secret, liveness/readiness, initContainer `wait-for-db` der venter på servicens Postgres med `pg_isready`. Hærdet: kører som uid 100 med read-only rodfilsystem (kun `/tmp` er et `emptyDir`), uden capabilities og uden privilege escalation (tjekket af Trivy i CI). Kan skaleres til flere replicas uden kodeændringer: en Postgres advisory lock sikrer, at kun én pod ad gangen kører outbox-relayet |
 | `base/services/shop-service-hpa.yaml` | HorizontalPodAutoscaler: shop-service 1–3 pods ved 70 % CPU – se *Autoscaling (HPA)* |
 | `base/frontend/`             | nginx Deployment + Service + ConfigMap der overskriver `js/config.js` med Ingress-stier    |
-| `base/ingress.yaml`          | Én Ingress: `/` → frontend, `/api/<x>/graphql` → den enkelte service, `/auth` → Keycloak |
+| `base/ingress.yaml`          | Én Ingress: `/` → frontend, `/api/<x>` → den enkelte service (GraphQL og REST v1), `/v3/api-docs` + `/swagger-ui` → baggage-service, `/auth` → Keycloak |
 | `keycloak/`                  | Keycloak 26 (login, roller): Deployment + Service + Secret + `realm-airport.json` (bliver til ConfigMap `keycloak-realm` via `configMapGenerator`); egen kustomization, som `base/` henviser til, så compose kan mounte samme realm-fil – se *Keycloak (login)* |
 | `tools/`                     | pgAdmin (dev/demo-værktøj, ikke en del af systemet): Deployment + Service + ConfigMap + Secret + egen Ingress på `/pgadmin` (`pgadmin-ingress.yaml`). Deployes kun via `overlays/dev-tools` |
 | `overlays/dev-tools/`        | `base` + `tools`: systemet med pgAdmin                                                    |
@@ -31,6 +31,59 @@ at et overlay ligger inde i sin egen base-mappe. Indhold:
 | `kind-config.yaml`           | kind-cluster med port-mapping 80/443 → 8090/8443                                          |
 
 Secrets indeholder **dev-værdier** (fx `flight/flight`). Skift dem før brug i et delt cluster.
+
+Diagram over deploymentet og designvalgene bag base, components og overlays:
+[docs/architecture.md – Deployment i Kubernetes](../docs/architecture.md#deployment-i-kubernetes). Konfiguration og
+drift af den enkelte service står i dens README: [flight](../flight-service/README.md),
+[booking](../booking-service/README.md), [payment](../payment-service/README.md),
+[baggage](../baggage-service/README.md), [shop](../shop-service/README.md) og
+[notification-job](../notification-job/README.md).
+
+## Hurtig reference: hele demo-stakken på kind
+
+Samlet rækkefølge for et nyt cluster med `overlays/demo` (detaljer og målinger i afsnittene nedenfor):
+
+```bash
+kind create cluster --config k8s/kind-config.yaml                                   # ~1 min
+
+# images: bygget af compose, lagt på noden (tredjeparts-images hentes af noden selv)
+docker compose build && docker compose --profile ai build ollama && docker compose build notification-job
+for img in flight-service booking-service payment-service baggage-service shop-service frontend notification-job ollama; do
+  kind load docker-image "airport/${img}:local" --name airport
+done
+
+# cluster-tilføjelser: Ingress, KEDA (ScaledJob) og metrics-server (HPA)
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+kubectl apply --server-side -f https://github.com/kedacore/keda/releases/download/v2.20.2/keda-2.20.2.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.9.0/components.yaml
+kubectl -n kube-system patch deployment metrics-server --type=json \
+  -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+kubectl -n ingress-nginx wait --for=condition=ready pod -l app.kubernetes.io/component=controller --timeout=240s
+kubectl -n keda wait --for=condition=ready pod --all --timeout=240s
+
+kubectl apply -k k8s/overlays/demo/
+kubectl -n airport get pods -w                                                      # 18 pods Ready efter ca. 2,5 min
+
+# prøv det
+FLIGHT_URL=http://localhost:8090/api/flights/graphql BOOKING_URL=http://localhost:8090/api/bookings/graphql \
+PAYMENT_URL=http://localhost:8090/api/payments/graphql BAGGAGE_URL=http://localhost:8090/api/baggage/graphql \
+SHOP_URL=http://localhost:8090/api/shops/graphql KEYCLOAK_URL=http://localhost:8090/auth ./scripts/e2e-smoke.sh
+./scripts/demo-keda.sh
+
+kind delete cluster --name airport                                                  # ryd op
+```
+
+| Adresse på kind (host-port 8090) | Hvad | Login |
+|----------------------------------|------|-------|
+| <http://localhost:8090/> | Frontend | `anna`/`anna` (PASSENGER), `ops`/`ops` (OPERATIONS) |
+| <http://localhost:8090/api/flights/graphql> (`bookings`, `payments`, `baggage`, `shops`) | GraphQL-API'erne | Bearer-token til beskyttede operationer |
+| <http://localhost:8090/api/baggage/v1> | REST-API v1 | Bearer-token |
+| <http://localhost:8090/swagger-ui/index.html> · <http://localhost:8090/v3/api-docs> | Swagger UI · OpenAPI (JSON) | *Authorize* med token |
+| <http://localhost:8090/auth/> · `/auth/admin/` | Keycloak · admin console | `admin`/`admin` |
+| <http://localhost:8090/grafana/> | Grafana (kun `overlays/demo`) | anonym læsning, `admin`/`admin` |
+| <http://localhost:8090/pgadmin/> | pgAdmin (kun `overlays/dev-tools`) | åbner uden login |
+| `kubectl -n airport port-forward svc/rabbitmq 15672` → <http://localhost:15672/> | RabbitMQ management | `airport`/`airport` |
+| `kubectl -n airport port-forward deploy/prometheus 9090` → <http://localhost:9090/> | Prometheus (targets, alarmer) | – |
 
 ## Minikube
 

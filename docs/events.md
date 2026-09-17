@@ -3,6 +3,12 @@
 Alle services kommunikerer asynkront via **én topic exchange** `airport.events`.
 Routing key = eventnavn (fx `booking.confirmed`).
 
+Dette dokument er den læsevenlige udgave med begrundelser. Den maskinlæsbare kontrakt er
+[asyncapi.yaml](asyncapi.yaml) (AsyncAPI 3.1): hvert event som channel med JSON Schema for envelope og payload og et
+eksempel, hver kø med binding og dead-letter queue, og send/receive-operationer pr. service. CI validerer den med
+AsyncAPI CLI og fejler, hvis et event eller en kø i koden mangler i den (`scripts/check-asyncapi.sh`). 24 rigtige events
+fra alle 14 eventtyper, opsamlet fra RabbitMQ på kind 17-09-2026, validerede mod skemaerne uden fejl.
+
 ## Envelope
 
 Alle events er JSON med samme envelope. `payload` er event-specifik (se nedenfor).
@@ -67,7 +73,8 @@ den tilstandsændring eventet medfører. Et event med kendt `eventId` ignoreres 
   sendes i `id`-orden, og en fejlet batch gentages som helhed. Det betyder fx at `booking.confirmed` aldrig
   overhaler `booking.created` fra samme service. Rækkefølge *på tværs* af producenter garanteres ikke.
 * **Observerbarhed.** Ubekræftede events kan ses i `outbox_event` (`published_at IS NULL`, `attempts`,
-  `last_error`) og som gauge `outbox.pending` på `/actuator/metrics/outbox.pending`.
+  `last_error`) og som gauge `outbox_pending` på `/actuator/prometheus` (åben; `/actuator/metrics/outbox.pending`
+  kræver OPERATIONS).
 
 ## Rækkefølge og kommutativitet
 
@@ -81,7 +88,7 @@ hvor mange gange et event leveres (**idempotent**, `processed_event`). Handlerne
 |--------|------|-------|-------------------|
 | **Tilstand, der kun går fremad** | baggage-service: `booking_snapshot.status` (`BookingSnapshot.apply`) | `PENDING_PAYMENT` < `CONFIRMED` < `CHECKED_IN` < `CANCELLED`; den status, der er længst fremme, vinder | En booking går aldrig tilbage i sin livscyklus. Reglen kræver derfor intet ur, så events fra booking-service og flight-service kan blandes frit |
 | **Last-writer-wins på `occurredAt`** | flight-service: `seat.is_available` (`availability_changed_at`). booking-service: `booking.flight_status` og `booking.gate` (`flight_status_changed_at`, `gate_changed_at`) og betalings-/bagagelinjerne i read-modellen `booking_overview` | Et event, der er ældre end det, som sidst satte værdien, ignoreres. Uafgjort afgøres ens i begge rækkefølger: sæde optaget vinder over frit, ellers den alfabetisk største værdi | Værdien kan gå frem og tilbage (et sæde bliver optaget, frit og optaget af en ny booking; en gate skifter A → B → A), så kun tidspunktet kan afgøre det. Alle events om samme værdi kommer fra én producent, så tidsstemplerne er fra samme ur. Status og gate har hver sit tidsstempel, fordi `flight.gate.changed` kun bærer gaten: en ældre statusændring med den gamle gate må ikke rulle en nyere gateændring tilbage |
-| **Absorberende sluttilstand** | booking-service: `flight_status = CANCELLED`. baggage-service: `booking_snapshot.status = CANCELLED` | Når `CANCELLED` er nået, ændrer intet senere event værdien – uanset tidsstempel | flight-service ændrer aldrig et aflyst fly igen, og en aflyst booking genopstår aldrig. Det gør reglen robust over for skæve ure mellem producenter (`flight.cancelled` sammenlignes aldrig med `booking.*`-tider) |
+| **Absorberende sluttilstand** | booking-service: `flight_status = CANCELLED`. baggage-service: `booking_snapshot.status = CANCELLED` | Når `CANCELLED` er nået, ændrer intet senere event værdien – uanset tidsstempel | flight-service ændrer aldrig status på et aflyst fly igen (kun gaten kan stadig ændres), og en aflyst booking genopstår aldrig. Det gør reglen robust over for skæve ure mellem producenter (`flight.cancelled` sammenlignes aldrig med `booking.*`-tider) |
 | **Tilstandsmaskine** | booking-service: `payment.completed` / `payment.failed` | Virker kun på en booking i `PENDING_PAYMENT`; ellers logges eventet og ignoreres | Fandtes før DP-31 |
 
 **Detaljer, der gør reglerne rigtige i praksis.**

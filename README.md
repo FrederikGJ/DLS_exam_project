@@ -14,8 +14,17 @@ Et lufthavnssystem bestående af én frontend og fem uafhængige backend-microse
 - registrere bagage og binde den til en passager/booking
 - vise lufthavnens butikker og navigere passageren til dem (Dijkstra)
 
-Dokumentation: [docs/architecture.md](docs/architecture.md) (diagram, flows, designvalg) ·
-[docs/events.md](docs/events.md) (alle events med eksempler) · [k8s/README.md](k8s/README.md) (minikube/kind).
+## Dokumentation
+
+| Dokument | Indhold |
+|----------|---------|
+| [docs/architecture.md](docs/architecture.md) | Overblik og diagrammer, flows A–E, sikkerhed, AI, serverless, Kubernetes-deployment, skalerbarhed, observability, designmønstre (tombstone, idempotens, CQRS, saga, kommutative handlers) og designvalg |
+| [docs/events.md](docs/events.md) · [docs/asyncapi.yaml](docs/asyncapi.yaml) | Eventkontrakten i prosa med begrundelser · maskinlæsbart som AsyncAPI 3.1 (valideret i CI) |
+| [docs/openapi/baggage-v1.yaml](docs/openapi/baggage-v1.yaml) | REST-API v1 som OpenAPI (genereret af springdoc) |
+| [docs/requirements-matrix.md](docs/requirements-matrix.md) | Hvert krav → hvor det er implementeret → test, CI-kørsel eller måling, der beviser det |
+| Service-READMEs: [flight](flight-service/README.md) · [booking](booking-service/README.md) · [payment](payment-service/README.md) · [baggage](baggage-service/README.md) · [shop](shop-service/README.md) · [notification-job](notification-job/README.md) | Ansvar, API med roller, regler, events, konfiguration, tests og drift pr. modul – samme skabelon ([docs/service-readme-template.md](docs/service-readme-template.md)) |
+| [k8s/README.md](k8s/README.md) | kind/minikube, overlays og components, ressourcer, Keycloak, KEDA, HPA, observability – med målinger |
+| [system-tests/README.md](system-tests/README.md) | System-testen af booking ↔ payment med de byggede images |
 
 ## Tech stack
 
@@ -38,19 +47,24 @@ Dokumentation: [docs/architecture.md](docs/architecture.md) (diagram, flows, des
 | Service           | Ansvar                                            | Port (compose) | GraphQL-endpoint                          |
 |-------------------|---------------------------------------------------|----------------|-------------------------------------------|
 | `frontend`        | SPA: afgange, book, betaling, min booking, bagage, butikker | 8080  | –                                          |
-| `flight-service`  | Flyselskaber, fly, afgange, sæder (kilde til sandhed) | 8081       | `http://localhost:8081/api/flights/graphql` |
-| `booking-service` | Passagerer og bookinger, orkestrerer bookingflowet | 8082          | `http://localhost:8082/api/bookings/graphql` |
-| `payment-service` | Simuleret betalingsgateway, refunds               | 8083           | `http://localhost:8083/api/payments/graphql` |
-| `baggage-service` | Bagage bundet til booking, status-tracking, **REST v1** | 8084      | `http://localhost:8084/api/baggage/graphql` + REST `/api/baggage/v1` |
-| `shop-service`    | Butikker + navigation (Dijkstra) + "Spørg om vej" (lokal AI) | 8085 | `http://localhost:8085/api/shops/graphql` |
-| `notification-job` | Dansk mail pr. booking-event fra køen `notifications`; kører kun, når der er beskeder | – | – (profil `jobs` i compose, KEDA ScaledJob i Kubernetes) |
+| [`flight-service`](flight-service/README.md)  | Flyselskaber, fly, afgange, sæder (kilde til sandhed) | 8081       | `http://localhost:8081/api/flights/graphql` |
+| [`booking-service`](booking-service/README.md) | Passagerer og bookinger, booking-sagaen, read model til *Min booking* | 8082          | `http://localhost:8082/api/bookings/graphql` |
+| [`payment-service`](payment-service/README.md) | Simuleret betalingsgateway, refunds               | 8083           | `http://localhost:8083/api/payments/graphql` |
+| [`baggage-service`](baggage-service/README.md) | Bagage bundet til booking, status-tracking, **REST v1** | 8084      | `http://localhost:8084/api/baggage/graphql` + REST `/api/baggage/v1` |
+| [`shop-service`](shop-service/README.md)    | Butikker + navigation (Dijkstra) + "Spørg om vej" (lokal AI) | 8085 | `http://localhost:8085/api/shops/graphql` |
+| [`notification-job`](notification-job/README.md) | Dansk mail pr. booking-event fra køen `notifications`; kører kun, når der er beskeder | – | – (profil `jobs` i compose, KEDA ScaledJob i Kubernetes) |
 | Ollama            | Lokal sprogmodel til `askRoute` (valgfri)          | 11434          | kun med `docker compose --profile ai` |
 | RabbitMQ          | Events mellem services                            | 5672 / 15672   | Management UI: http://localhost:15672 (airport/airport) |
 | Keycloak          | OpenID Connect-login, roller PASSENGER/OPERATIONS | 8180           | http://localhost:8180/realms/airport (admin: /admin/, admin/admin) |
 | PostgreSQL ×5     | `flight_db`, `booking_db`, `payment_db`, `baggage_db`, `shop_db` | 5433–5437 | – |
+| Grafana / Prometheus | Dashboard, logs (Loki via Alloy) og alarmer (valgfri)    | 3000 / 9090    | kun med `docker compose --profile observability` |
 
-Hver service har GraphiQL på `http://localhost:808x/graphiql?path=/api/<x>/graphql` i dev-profilen
-og health-endpoints på `/actuator/health/liveness` og `/actuator/health/readiness`.
+Hver service har GraphiQL på `http://localhost:808x/graphiql?path=/api/<x>/graphql` (slået fra i `prod`-profilen),
+health-endpoints på `/actuator/health/liveness` og `/actuator/health/readiness` og metrics på `/actuator/prometheus`.
+
+**Hver service har sin egen README** (linket i tabellen) bygget over samme skabelon,
+[docs/service-readme-template.md](docs/service-readme-template.md): ansvar og data, API med roller og et kørt eksempel,
+forretningsregler, events ind og ud, konfiguration, kør lokalt, tests, drift og designvalg.
 
 ## API'er: GraphQL og REST
 
@@ -87,7 +101,7 @@ Beskrivelsen genereres af springdoc ud fra controlleren, så den ikke kan komme 
 |----------------------|--------------------------------------------|-------------------------------------------------|
 | Swagger UI           | http://localhost:8084/swagger-ui.html      | http://localhost:8090/swagger-ui/index.html     |
 | OpenAPI (JSON)       | http://localhost:8084/v3/api-docs          | http://localhost:8090/v3/api-docs               |
-| OpenAPI (YAML)       | http://localhost:8084/v3/api-docs.yaml     | http://localhost:8090/v3/api-docs.yaml          |
+| OpenAPI (YAML)       | http://localhost:8084/v3/api-docs.yaml     | – (Ingress-reglen `/v3/api-docs` matcher kun hele segmenter; brug JSON eller den eksporterede fil) |
 
 En eksporteret kopi ligger i [docs/openapi/baggage-v1.yaml](docs/openapi/baggage-v1.yaml). I Swagger UI trykker
 man **Authorize** og indsætter et access token (se `token`-funktionen i `scripts/e2e-smoke.sh`) – derefter sender
@@ -293,7 +307,7 @@ docker compose exec booking-db psql -U booking -d booking_db \
 # -> booking.created står med published_at = NULL og attempts der tæller op
 docker compose start rabbitmq
 # få sekunder senere: published_at er sat, og baggage-service kender bookingen (Flow B kan fortsætte)
-curl -s localhost:8082/actuator/metrics/outbox.pending | jq '.measurements[0].value'   # 0 = tom backlog
+curl -s localhost:8082/actuator/prometheus | grep '^outbox_pending'                     # 0.0 = tom backlog
 ```
 
 ### Kør en enkelt service uden Docker (udvikling)
@@ -305,26 +319,30 @@ cd flight-service && mvn spring-boot:run     # bruger dev-defaults i application
 
 ## Tests
 
-Hver service har unit tests for domænelogik og én integrationstest med Testcontainers
-(rigtig PostgreSQL 16 + RabbitMQ). Docker skal køre. Integrationstestene kalder GraphQL over HTTP gennem
-Spring Securitys filterkæde; mutations sendes med et test-JWT fra `TestTokens` (`passenger()` = anna,
-`operations()` = ops), som signeres med en testnøgle, så Keycloak ikke behøver køre.
+290 tests i syv Maven-moduler, alle kørt af CI ved hvert push. Integrationstestene starter rigtig PostgreSQL 16 og
+RabbitMQ 3.13 med Testcontainers, så **Docker skal køre**. De kalder API'erne over HTTP gennem Spring Securitys
+filterkæde med test-JWT'er fra `TestTokens` (`passenger()` = anna, `operations()` = ops), signeret med en testnøgle,
+så Keycloak ikke behøver køre.
 
 ```bash
-cd flight-service  && mvn test
-cd booking-service && mvn test
-cd payment-service && mvn test
-cd baggage-service && mvn test
-cd shop-service    && mvn test
+cd booking-service && mvn -Pci verify     # tests + Checkstyle + SpotBugs/find-sec-bugs, præcis som CI
 ```
 
-| Service         | Unit tests                                     | Integrationstest dækker                                                 |
-|-----------------|------------------------------------------------|-------------------------------------------------------------------------|
-| flight-service  | `PricingService`, `SeatGenerator`              | seed, filtre, `booking.confirmed` → sæde optaget (idempotent), aflysning publicerer events, validering, outbox (rollback, relay-retry, publish uden transaktion) |
-| booking-service | bookingreference, tilstandsovergange           | createBooking → `payment.completed` → CONFIRMED, SEAT_TAKEN, `flight.cancelled` |
-| payment-service | `PaymentSimulator` (0000, udløbet kort)        | pay → COMPLETED/FAILED events, refund ved `booking.cancelled`, kortnummer gemmes ikke |
-| baggage-service | `BaggageRules` (3 stk., 32 kg), tag-format     | snapshot via events, register/limit, statusopdatering, RETURN_DESK ved aflysning |
-| shop-service    | `Dijkstra`, `OpeningHours`                     | rute Security T2 → Gate B12, accessibleOnly, søgning, CRUD, idempotens |
+| Modul | Tests | Unit tests af kernelogik | Integrationstests (Testcontainers) |
+|-------|------:|--------------------------|------------------------------------|
+| flight-service | 32 | `PricingServiceTest`, `SeatGeneratorTest`, `SeatTest` | `FlightServiceIntegrationTest`, `EventOrderIntegrationTest`, `SecurityIntegrationTest` |
+| booking-service | 51 | `BookingStateTest`, `BookingReferenceGeneratorTest`, `OverviewLinesTest`, `PaymentTimeoutJobTest` | `BookingServiceIntegrationTest`, `BookingOverviewIntegrationTest`, `EventOrderIntegrationTest`, `SagaCompensationIntegrationTest`, `ObservabilityIntegrationTest`, `SecurityIntegrationTest` |
+| payment-service | 27 | `PaymentSimulatorTest` | `PaymentServiceIntegrationTest`, `SecurityIntegrationTest` |
+| baggage-service | 68 | `BaggageRulesTest`, `TagGeneratorTest`, `BookingSnapshotTest` | `BaggageServiceIntegrationTest`, `BaggageRestIntegrationTest`, `EventOrderIntegrationTest`, `SecurityIntegrationTest` |
+| shop-service | 71 | `DijkstraTest`, `OpeningHoursTest`, `KeywordMatcherTest`, `AiConciergeServiceTest` | `ShopServiceIntegrationTest`, `AiConciergeIntegrationTest`, `SecurityIntegrationTest` |
+| notification-job | 36 | `MailRendererTest`, `JobConfigTest` | `NotificationJobIntegrationTest` |
+| system-tests | 5 | – | `CooperationTest`: booking- og payment-service som de byggede images (se nedenfor) |
+
+Hvad hver testklasse viser, står i test-afsnittet i den enkelte service-README. På tværs af services dækker testene
+bl.a. sikkerhed (rolle pr. operation, udløbne/fremmede tokens), outbox-garantierne (rollback, retry til broker-
+bekræftelse), idempotent eventforbrug, alle rækkefølger af events (`EventOrderIntegrationTest`), sagaens
+kompensationer, samtidige kald (idempotency key, betaling) og trace-id gennem outbox og RabbitMQ.
+`scripts/e2e-smoke.sh` kører desuden Flow A–D gennem hele den kørende stak (compose i CI, kind lokalt).
 
 ### System-test (booking ↔ payment)
 
@@ -344,13 +362,15 @@ Se [system-tests/README.md](system-tests/README.md).
 ### CI og statisk analyse
 
 GitHub Actions ([.github/workflows/ci.yml](.github/workflows/ci.yml)) kører ved hvert push og på pull requests
-mod `main`; et nyt push til samme branch afbryder den kørsel, der stadig er i gang. Fem uafhængige jobs:
+mod `main`; et nyt push til samme branch afbryder den kørsel, der stadig er i gang. Seks uafhængige jobs (seneste
+kørsel på `dev_max`, 17-09-2026: alle grønne på 4,8 min):
 
 | Job         | Hvad                                                                                                          |
 |-------------|---------------------------------------------------------------------------------------------------------------|
 | `backend`   | Én matrix-kørsel pr. Java-modul (fem services + `notification-job`): `mvn -Pci verify` = unit + Testcontainers-tests, Checkstyle og SpotBugs/find-sec-bugs. Surefire-, Checkstyle- og SpotBugs-rapporter uploades som artifacts. |
 | `frontend`  | `npm ci && npx eslint js/` i `frontend/` (ESLint *recommended* + browser-globals; frontenden har intet build-step) |
 | `manifests` | `kubectl kustomize` + `kubeconform -strict` mod Kubernetes-API-skemaerne for hver kustomization under `k8s/`   |
+| `contracts` | `docs/asyncapi.yaml` valideres af AsyncAPI CLI (også governance-warnings fejler), og `scripts/check-asyncapi.sh` tjekker, at hvert eventnavn og hver kø i koden findes i kontrakten |
 | `security`  | **gitleaks** over hele git-historikken (`fetch-depth: 0`), **Trivy** over repoet (hemmeligheder, fejlkonfiguration i Dockerfiles og Kubernetes-manifests, npm-afhængigheder) og over alle syv byggede images (Alpine-pakker + hver jar i imaget). HIGH/CRITICAL-fund med en rettelse gør jobbet rødt |
 | `system`    | Hele systemet som en bruger kører det: `docker compose build` + `up --wait`, `scripts/e2e-smoke.sh` (Flow A–D), `docker compose down -v` og derefter `system-tests/` mod de byggede images. Fejler noget, uploades `docker compose logs` som artifact |
 
@@ -374,6 +394,7 @@ Maven-profilen `ci` findes i alle fem poms og bruger `config/checkstyle.xml` (Go
 cd flight-service && mvn -Pci verify          # som pipelinen: tests + Checkstyle + SpotBugs
 cd frontend && npm ci && npx eslint js/
 kubectl kustomize k8s/ | kubeconform -strict -summary
+npx --yes @asyncapi/cli@6.1.0 validate --fail-severity=warn docs/asyncapi.yaml && ./scripts/check-asyncapi.sh
 gitleaks git --config .gitleaks.toml --redact .
 trivy fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --ignore-unfixed \
   --ignorefile .trivyignore.yaml --skip-files '**/pom.xml' --exit-code 1 .
@@ -386,12 +407,16 @@ Manifests ligger i `k8s/` (Kustomize): namespace `airport`, Deployment (1 replic
 [Ressourcer på en laptop](k8s/README.md#ressourcer-på-en-laptop)) + Service + ConfigMap + Secret pr. backend-service, StatefulSet + PVC + Service pr. database, RabbitMQ StatefulSet, frontend og én Ingress.
 Selve systemet ligger i `k8s/base/` (`kubectl apply -k k8s/`); pgAdmin som dev/demo-værktøj på `/pgadmin` ligger i
 `k8s/tools/` og deployes kun med overlayet `kubectl apply -k k8s/overlays/dev-tools/` – det er ikke en del af selve systemet.
-Overlayet `kubectl apply -k k8s/overlays/demo/` lægger den lokale AI-model (Ollama) og notification-job som KEDA
-`ScaledJob` oven på systemet, og shop-service har en HorizontalPodAutoscaler (1–3 pods), der kræver metrics-server –
-se [Demo-overlay](k8s/README.md#demo-overlay-ai-og-serverless-keda) og [Autoscaling](k8s/README.md#autoscaling-hpa).
+Overlayet `kubectl apply -k k8s/overlays/demo/` lægger den lokale AI-model (Ollama), notification-job som KEDA
+`ScaledJob` og observability (Prometheus, Loki, Alloy, Grafana på `/grafana`) oven på systemet, og shop-service har en
+HorizontalPodAutoscaler (1–3 pods), der kræver metrics-server – se
+[Demo-overlay](k8s/README.md#demo-overlay-ai-og-serverless-keda),
+[Observability](k8s/README.md#observability-prometheus-loki-alloy-og-grafana) og
+[Autoscaling](k8s/README.md#autoscaling-hpa). Et deploymentdiagram og en oversigt over base, components og overlays står i
+[docs/architecture.md](docs/architecture.md#deployment-i-kubernetes).
 
-Manifests er verificeret på et **kind**-cluster (demo-overlayet: 14/14 pods Ready efter 131 s på et nyt cluster inkl. image-pulls, 0 restarts, alle flows grønne gennem Ingress, 16-09-2026). Kort version for
-minikube – se
+Manifests er verificeret på et **kind**-cluster (demo-overlayet med observability 17-09-2026: 18/18 pods Ready efter
+148 s på et nyt cluster inkl. image-pulls, alle flows grønne gennem Ingress). Kort version for minikube – se
 [k8s/README.md](k8s/README.md) for detaljer og kind-alternativet:
 
 ```bash
@@ -419,6 +444,9 @@ Ingress-routing:
 | `/api/payments`         | payment-service  | `/api/payments/graphql` |
 | `/api/baggage`          | baggage-service  | `/api/baggage/graphql`  |
 | `/api/shops`            | shop-service     | `/api/shops/graphql`    |
+| `/v3/api-docs`, `/swagger-ui`, `/swagger-ui.html` | baggage-service | OpenAPI (JSON) og Swagger UI |
+| `/auth`                 | keycloak         | login, `/auth/realms/airport`, admin console `/auth/admin/` |
+| `/grafana`              | grafana          | kun med observability-komponenten (overlayet `demo`) |
 | `/pgadmin`              | pgadmin          | kun med overlayet `dev-tools`: pgAdmin UI, åbner uden login |
 
 I Kubernetes erstattes `frontend/js/config.js` af en ConfigMap med relative paths (`/api/.../graphql`),
@@ -432,8 +460,8 @@ Realm'et importeres fra `k8s/keycloak/realm-airport.json` ved hver opstart – s
 
 | Bruger  | Kode   | Rolle        | Må                                                                          |
 |---------|--------|--------------|-----------------------------------------------------------------------------|
-| –       | –      | (ingen)      | læse: afgange, sæder, butikker, ruter, booking/bagage/betaling pr. reference/id |
-| `anna`  | `anna` | `PASSENGER`  | booke, betale, checke ind, annullere, registrere bagage, se egne bookinger (`bookingsByPassenger` kun med egen e-mail) |
+| –       | –      | (ingen)      | læse: afgange, sæder, butikker, ruter og *Spørg om vej*, en booking pr. reference/id, en betaling pr. id, en bagage pr. tag |
+| `anna`  | `anna` | `PASSENGER`  | booke, betale, checke ind, annullere, registrere bagage, se *Min booking* (`bookingOverview`, `myBookings`), betalinger og bagage pr. booking, egne bookinger (`bookingsByPassenger` kun med egen e-mail) |
 | `ops`   | `ops`  | `OPERATIONS` | alt ovenstående for alle + ændre flystatus/gate, opdatere bagagestatus, refundere, vedligeholde butikker |
 
 Fejlkoder: `UNAUTHORIZED` (operationen kræver login), `FORBIDDEN` (forkert rolle); et udløbet eller forkert token
@@ -480,20 +508,23 @@ Alle services konfigureres via environment variables. Defaults i `application.ym
 ```
 /
   README.md                docker-compose.yml
-  .github/workflows/       ci.yml – GitHub Actions: backend (matrix), frontend (eslint), manifests (kubeconform)
+  .github/workflows/       ci.yml – GitHub Actions: backend (matrix), frontend, manifests, contracts, security, system
   config/                  checkstyle.xml, spotbugs-exclude.xml – regler for Maven-profilen `ci`
-  docs/                    architecture.md, events.md
+  docs/                    architecture.md, events.md, asyncapi.yaml, openapi/baggage-v1.yaml, requirements-matrix.md,
+                           service-readme-template.md
   frontend/                Dockerfile, nginx.conf, index.html, css/, js/ (config.js, api.js, app.js, pages/), eslint.config.js + package.json (kun lint)
-  flight-service/          pom.xml, Dockerfile, src/main/java/dk/airport/flight/{domain,repository,service,graphql,messaging,config}
+  flight-service/          README.md, pom.xml, Dockerfile, src/main/java/dk/airport/flight/{domain,repository,service,graphql,messaging,config}
   booking-service/         ... dk/airport/booking/...
   payment-service/         ... dk/airport/payment/...
   baggage-service/         ... dk/airport/baggage/...
   shop-service/            ... dk/airport/shop/...
-    (hver: src/main/resources/graphql/schema.graphqls, db/migration/V1__init.sql (+V2__seed.sql), src/test/java)
+    (hver: README.md, src/main/resources/graphql/schema.graphqls, db/migration/V1__init.sql …, src/test/java;
+     booking-service også query/ (read model), baggage-service rest/ (REST v1), shop-service ai/ (Spørg om vej))
   notification-job/        pom.xml, Dockerfile, README.md, src/main/java/dk/airport/notification/ (ren Java, ingen Spring)
   ollama/                  Dockerfile – Ollama med modellen qwen2.5:1.5b bagt ind
   k8s/                     base/ (namespace, rabbitmq/, databases/, services/ inkl. shop-service-hpa.yaml, frontend/, ingress.yaml), keycloak/ (realm-airport.json), tools/ (pgAdmin), components/ (ollama/, notification-job/, observability/ inkl. config/ som compose også bruger), overlays/ (dev-tools/, demo/)
-  scripts/e2e-smoke.sh     end-to-end smoke-test af Flow A-D mod en kørende compose-stak
+  scripts/e2e-smoke.sh     end-to-end smoke-test af Flow A-D mod en kørende compose-stak (eller kind)
+  scripts/check-asyncapi.sh  tjekker, at alle events og køer i koden står i docs/asyncapi.yaml (CI-job contracts)
   scripts/demo-keda.sh     KEDA-demo på kind: 5 bookinger -> notification-jobs starter og forsvinder igen
   scripts/demo-saga.sh     saga-demo: ubetalt booking aflyses efter PAYMENT_TIMEOUT, for sen betaling refunderes
   scripts/load-shops.sh    belastning af shop-service, så HPA'en skalerer op og ned

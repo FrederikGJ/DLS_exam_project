@@ -99,7 +99,8 @@ Bean Validation-fejl (`ConstraintViolationException`) mappes til `VALIDATION_ERR
   usendte rækker (`ORDER BY id ... FOR UPDATE`), sender batchen med publisher confirms
   (`RabbitTemplate.invoke` + `waitForConfirmsOrDie`) og sætter først `published_at` når brokeren har
   bekræftet. Fejler sendingen (broker nede, nack, timeout) tælles `attempts` op, `last_error` gemmes, og
-  rækkerne bliver liggende til næste poll. Backloggen ses som gauge `outbox.pending` (`/actuator/metrics`).
+  rækkerne bliver liggende til næste poll. Backloggen ses som gauge `outbox_pending` på `/actuator/prometheus` (åben)
+  og som `/actuator/metrics/outbox.pending` (kræver OPERATIONS).
 * Hver række bærer trace-konteksten fra den request eller det event, der publicerede den (`traceparent`), og relayet
   sender den som AMQP-header, så consumeren fortsætter samme trace – se *Observability*.
 * Garanti: at-least-once fra producent + idempotent consumer (`processed_event`) = effektivt exactly-once.
@@ -277,8 +278,8 @@ Læsning (afgange, butikker, opslag af booking) kræver stadig ikke login.
   cookies); `oauth2ResourceServer().jwt()` validerer tokenet, og `KeycloakRoleConverter` oversætter
   `realm_access.roles` til `ROLE_<navn>` (client-roller i `resource_access` ignoreres – realm'et bruger kun
   realm-roller). `Authentication.getName()` er `preferred_username`. På HTTP-niveau er GraphQL-endpointet,
-  `/actuator/health/**`, `/actuator/info` og `/graphiql` (kun dev-profil) åbne; alle andre URL'er (fx
-  `/actuator/metrics`) kræver OPERATIONS. Selve autorisationen ligger pr. operation som `@PreAuthorize` på
+  `/actuator/health/**`, `/actuator/info`, `/actuator/prometheus` og `/graphiql` (slået fra i `prod`-profilen) åbne;
+  alle andre URL'er (fx `/actuator/metrics`) kræver OPERATIONS. Selve autorisationen ligger pr. operation som `@PreAuthorize` på
   controller-metoderne (`@EnableMethodSecurity`). CORS ligger i samme filterkæde (`CORS_ALLOWED_ORIGINS`), og fordi
   `CorsFilter` kører før autentificering, kræver preflight-requests aldrig et token.
 
@@ -291,7 +292,7 @@ sequenceDiagram
   participant S as service (resource server)
 
   B->>KC: GET /protocol/openid-connect/auth (client_id=airport-frontend, code_challenge S256)
-  KC-->>B: login-side; brugeren logger ind (anna/anna)
+  KC-->>B: login-side – brugeren logger ind (anna/anna)
   KC-->>B: redirect tilbage til frontenden med ?code=...
   B->>KC: POST /protocol/openid-connect/token (code + code_verifier)
   KC-->>B: access token (JWT: iss, exp, preferred_username, email, realm_access.roles)
@@ -338,13 +339,13 @@ beskyttede operationer giver `UNAUTHORIZED`.
 | baggage-service | `baggageByBooking`                                                               | query    | PASSENGER / OPERATIONS                           |
 | baggage-service | `registerBaggage`                                                                | mutation | PASSENGER / OPERATIONS                           |
 | baggage-service | `updateBaggageStatus`                                                            | mutation | OPERATIONS                                       |
-| shop-service    | `shops`, `shop`, `searchShops`, `navNodes`, `navEdges`, `route`                  | query    | Alle                                             |
+| shop-service    | `shops`, `shop`, `searchShops`, `navNodes`, `navEdges`, `route`, `askRoute`      | query    | Alle                                             |
 | shop-service    | `createShop`, `updateShop`, `deleteShop`                                         | mutation | OPERATIONS                                       |
 
 Særregel: `bookingsByPassenger` beholder sit `email`-argument (det er en del af API'et), men tokenet afgør, hvad
 det må være – en PASSENGER må kun angive sin egen e-mail (`email`-claim, case-insensitivt), ellers `FORBIDDEN`;
 OPERATIONS må slå alle op. Uden for GraphQL: `/actuator/health`, `/actuator/health/**`, `/actuator/info`,
-`/actuator/prometheus` (scrapes af Prometheus, se *Observability*) og GraphiQL (`/graphiql`, kun dev-profil) er
+`/actuator/prometheus` (scrapes af Prometheus, se *Observability*) og GraphiQL (`/graphiql`, slået fra i `prod`) er
 offentlige; øvrige actuator-endpoints (`/actuator/metrics`) kræver OPERATIONS.
 
 ### Konfiguration: issuer og JWKS
@@ -574,7 +575,10 @@ timeouten. Derfor beder `OllamaWarmUp` Ollama om at indlæse modellen (`POST /ap
 snart shop-service er startet – på en virtual thread, så readiness ikke forsinkes, og op til 6 forsøg med 10 s
 imellem, fordi Ollama kan starte efter shop-service (compose har bevidst ingen `depends_on`). Målt i compose: indlæst
 3,4 s efter opstart i første forsøg. Modellen bliver i hukommelsen i `OLLAMA_KEEP_ALIVE=5m` efter sidste kald;
-derefter koster næste spørgsmål igen 5–9 s. Slås fra med `AI_WARM_UP=false` (integrationstestene gør det).
+derefter koster næste spørgsmål igen 5–9 s i compose – og på kind, hvor CPU'en deles med resten af stakken, er der målt
+16,5 s (17-09-2026), hvilket overskrider timeouten, så det spørgsmål besvares af nøgleordssøgningen
+(`fallbackReason` "…not reachable…"), mens modellen indlæses til det næste. Slås fra med `AI_WARM_UP=false`
+(integrationstestene gør det).
 
 ### Model-skift
 
@@ -674,6 +678,100 @@ ikke får hvert job til at fejle.
 **Verificeret på kind 16-09-2026** med `scripts/demo-keda.sh` (5 bookinger + betalinger = 10 events): KEDA startede 2
 jobs efter 3 s, køen var tom efter 6 s, jobbene var færdige efter 11 s og slettet igen efter 41 s. Uden events kører
 der ingen pods. Se tidslinjen i [k8s/README.md](../k8s/README.md#demo-overlay-ai-og-serverless-keda).
+
+## Deployment i Kubernetes
+
+Produktion simuleres på et lokalt kind-cluster (minikube virker også). Alt er Kustomize: en **base** med selve systemet,
+valgfrie **components** og **overlays**, der kombinerer dem. Diagrammet viser `k8s/overlays/demo` – base plus alle tre
+components; stiplede kasser er components, der ikke er med i base.
+
+```mermaid
+flowchart TB
+  user([Browser<br/>http://localhost:8090])
+  subgraph node["kind-node airport-control-plane (port 80 → host 8090)"]
+    ing["ingress-nginx<br/>Ingress airport + grafana"]
+    subgraph ns["namespace airport"]
+      fe["frontend<br/>Deployment · nginx"]
+      kc["keycloak<br/>Deployment · realm fra ConfigMap"]
+      subgraph svc["5 services · Deployment 1 replica · ConfigMap + Secret · initContainer wait-for-db"]
+        fs[flight-service]
+        bs[booking-service]
+        ps[payment-service]
+        bg[baggage-service]
+        ss[shop-service]
+      end
+      hpa["HPA shop-service<br/>1–3 pods @ 70 % CPU"]
+      subgraph data["StatefulSets med PVC"]
+        dbs[("flight-db · booking-db · payment-db<br/>baggage-db · shop-db (PostgreSQL 16)")]
+        mq[("rabbitmq<br/>5672 · 15672 · 15692")]
+      end
+      ol["ollama<br/>component ollama"]:::opt
+      nj["notification-job<br/>KEDA ScaledJob 0–3 Jobs"]:::opt
+      subgraph obs["component observability"]
+        prom[prometheus]:::opt
+        loki[("loki · PVC 2 Gi")]:::opt
+        alloy["alloy · DaemonSet"]:::opt
+        graf[grafana]:::opt
+      end
+    end
+    keda["KEDA-operator<br/>namespace keda"]
+    ms["metrics-server<br/>kube-system"]
+  end
+
+  user --> ing
+  ing -- "/" --> fe
+  ing -- "/auth" --> kc
+  ing -- "/api/flights · /api/bookings · /api/payments · /api/baggage (+ /v3/api-docs, /swagger-ui) · /api/shops" --> svc
+  ing -- "/grafana" --> graf
+  svc --> dbs
+  svc <--> mq
+  bs -- "GraphQL: pris + sæde" --> fs
+  ss -. "/api/chat" .-> ol
+  hpa -. skalerer .-> ss
+  ms -. CPU .-> hpa
+  keda -. "kølængde notifications" .-> mq
+  keda -. starter Jobs .-> nj
+  nj --> mq
+  prom -. "scrape pod-annotationer" .-> svc
+  prom -. "scrape :15692" .-> mq
+  alloy -. "pods/log" .-> svc
+  alloy --> loki
+  graf --> prom
+  graf --> loki
+
+  classDef opt stroke-dasharray: 5 5
+```
+
+### Base, components og overlays
+
+| Mappe | Type | Indhold | Deployes med |
+|-------|------|---------|--------------|
+| `k8s/base/` | base | Namespace, RabbitMQ, 5 × PostgreSQL, 5 services (+ HPA på shop-service), frontend, Ingress `airport`, Keycloak (`k8s/keycloak/`) | `kubectl apply -k k8s/` (tynd henvisning) eller `-k k8s/base/` |
+| `k8s/keycloak/` | kustomization | Keycloak + `configMapGenerator` for `realm-airport.json`, som compose mounter direkte | Via base |
+| `k8s/tools/` | kustomization | pgAdmin med egen Ingress `/pgadmin` (dev-værktøj, ikke en del af systemet) | Via `overlays/dev-tools` |
+| `k8s/components/ollama/` | component | Ollama med modellen bagt ind + patch, der slår AI til i shop-service | Via `overlays/demo` |
+| `k8s/components/notification-job/` | component | KEDA `ScaledJob` + `TriggerAuthentication` + Secret (kræver KEDA i clusteret) | Via `overlays/demo` |
+| `k8s/components/observability/` | component | Prometheus, Loki, Alloy, Grafana, namespaced RBAC, Ingress `/grafana`; konfiguration i `config/` (deles med compose) | Via `overlays/demo` |
+| `k8s/overlays/dev-tools/` | overlay | base + tools | `kubectl apply -k k8s/overlays/dev-tools/` |
+| `k8s/overlays/demo/` | overlay | base + alle tre components | `kubectl apply -k k8s/overlays/demo/` |
+
+Alle kombinationer renderes og valideres med kubeconform i CI (`manifests`), og Trivy scanner manifesterne for
+fejlkonfiguration (`security`). Kommandoer, porte og målinger: [k8s/README.md](../k8s/README.md).
+
+### Designvalg for deployment
+
+| Valg | Begrundelse | Fravalgt |
+|------|-------------|----------|
+| Kustomize med base, components og overlays | Ingen templating: manifesterne er almindelig YAML, der kan læses og valideres, som de er; en component kan lægges på flere overlays uden kopi | Helm: templates og values er et ekstra lag, som et system med ét miljø ikke har brug for |
+| Base som søstermappe til overlays (`k8s/base/`) | Kustomize afviser et overlay, hvis base er en forælder-mappe ("cycle detected") | Base direkte i `k8s/` |
+| Valgfrie dele som components (AI, serverless, observability) | `kubectl apply -k k8s/` er selve systemet og kan køre på en laptop; demoen tænder resten | Alt i base: for tungt, og KEDA-CRD'er ville være et krav |
+| Én Ingress-host, sti-routing og GraphQL på `/api/<x>/graphql` i selve servicen | Frontend og API deler origin (ingen CORS i Kubernetes), og der er ingen rewrite-regler | Et subdomæne pr. service |
+| Databaser og RabbitMQ som StatefulSets med PVC; Keycloak med H2 i `emptyDir` | Data overlever en pod-genstart; Keycloaks realm importeres ved hver start, så den behøver ingen database | Managed databaser (findes ikke lokalt) |
+| 1 replica pr. service, `requests` 150m/256Mi, `limits` 500m/640Mi, HPA kun på shop-service | Hele stakken skal kunne køre på én laptop; services er bygget til flere replicas (advisory lock, idempotens) | Faste 2 replicas overalt (målt: kind på 100 % CPU) |
+| initContainer `wait-for-db` med `pg_isready` | Ingen genstarter under koldstart, fordi Flyway ikke møder en database, der ikke er klar | Lade Kubernetes genstarte podden |
+| Hærdede pods: uid 100, read-only rodfilsystem, ingen capabilities, `seccompProfile: RuntimeDefault` | Kontrolleret af Trivy i CI; undtagelser for tredjeparts-images er begrundet i `.trivyignore.yaml` | – |
+| Lokalt byggede images lægges på noden med `kind load`; tredjeparts-images hentes af noden | Intet registry at vedligeholde; `kind load` fejler for multi-platform-images fra Docker Hub | Lokalt registry |
+| `configMapGenerator` med hash-suffiks | En ændret konfigurationsfil ruller de pods, der bruger den, ved næste apply | Håndskrevne ConfigMaps og `rollout restart` |
 
 ## Skalerbarhed
 
@@ -892,10 +990,10 @@ nøgle, en tilstandsregel eller en eksplicit idempotency key:
 | shop-service | `deleteShop` | Tombstone | Andet kald → `NOT_FOUND`; butikken er slettet én gang |
 | booking-service | `createBooking` | Naturlig nøgle: partielt unikt indeks `ux_booking_active_seat (flight_id, seat_number) WHERE status <> 'CANCELLED'` | `SEAT_TAKEN` – sædet er allerede booket (af første kald) |
 | booking-service | `cancelBooking`, `checkIn` | Tilstandsmaskine | `INVALID_STATE` (allerede aflyst / ikke `CONFIRMED`); intet nyt event |
-| payment-service | `pay` | Tilstand: findes en `COMPLETED` betaling for referencen | `ALREADY_PAID` – kortet trækkes ikke to gange |
+| payment-service | `pay` | Tilstand: findes en `COMPLETED` betaling for referencen; ved samtidige kald det partielle unikke indeks `ux_payment_one_completed` (`V4__payment_one_completed.sql`) | `ALREADY_PAID` – kortet trækkes ikke to gange, heller ikke af to samtidige kald (testet med 8) |
 | payment-service | `refund` | Tilstand: kun `COMPLETED` kan refunderes | `INVALID_STATE`; ingen dobbelt refundering |
 | flight-service | `createAirline`, `createAircraft`, `createFlight` | Naturlige nøgler: `iata_code`, `registration`, `(flight_number, scheduled_departure)` er `UNIQUE` | `CONFLICT` |
-| flight-service | `updateFlightStatus`, `updateGate` | Tilstand: samme status/gate er en no-op | Intet nyt event (en aflyst flight kan ikke ændres: `INVALID_STATE`) |
+| flight-service | `updateFlightStatus`, `updateGate` | Tilstand: samme status/gate er en no-op | Intet nyt event (status på en aflyst flight kan ikke ændres: `INVALID_STATE`; gaten kan) |
 | alle consumers | indgående events | `processed_event` med `eventId` som primærnøgle i samme transaktion som ændringen | Duplikatet logges som "skipping" og ignoreres (se *Messaging*) |
 
 **Idempotency key – hvordan og hvorfor.** Nøglen identificerer *én tilsigtet skrivning*, ikke en ressource.

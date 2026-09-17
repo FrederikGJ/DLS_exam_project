@@ -42,7 +42,9 @@ public class PaymentService {
 
     /**
      * Runs the simulated gateway and records the outcome. A declined card results in a FAILED payment
-     * row (returned to the caller, not an error) and a payment.failed event.
+     * row (returned to the caller, not an error) and a payment.failed event. The ALREADY_PAID check below covers
+     * calls one after another; for simultaneous calls the partial unique index ux_payment_one_completed rejects the
+     * second COMPLETED row, the transaction rolls back (no event) and the caller gets ALREADY_PAID as well.
      */
     @Transactional
     public Payment pay(PayInput in) {
