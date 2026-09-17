@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end smoke test of Flow A-D against a running "docker compose up" stack (or kind, see k8s/README.md).
+# End-to-end smoke test of Flow A-D (+ the "Min booking" read model) against a running "docker compose up" stack (or kind, see k8s/README.md).
 # Requires: curl, jq. Usage: ./scripts/e2e-smoke.sh
 #
 # Login: mutations need a Keycloak token (dev plan DP-02/DP-05). The script fetches one for the test users
@@ -30,6 +30,10 @@ gql() { # gql <url> <query> [variables-json] [token]
 }
 expect() { # expect <description> <actual> <expected>
   if [[ "$2" == "$3" ]]; then echo "  ok   $1 = $2"; else echo "  FAIL $1: expected '$3' got '$2'"; exit 1; fi
+}
+overview() { # overview <reference> <jq filter> -> value from booking-service's read model bookingOverview (as anna)
+  gql "$BOOKING" 'query($r:String!){ bookingOverview(reference:$r){ status payments { status cardLast4 } baggage { tagNumber status lastLocation } } }' \
+      "{\"r\":\"$1\"}" "$TOKEN_ANNA" | jq -r ".data.bookingOverview | $2"
 }
 wait_for() { # wait_for <description> <cmd producing value> <expected> [seconds]
   local desc=$1 cmd=$2 expected=$3 secs=${4:-20} val=""
@@ -101,12 +105,18 @@ TOOHEAVY=$(gql "$BAGGAGE" 'mutation($r:String!){ registerBaggage(bookingReferenc
 expect "33 kg -> code" "$(echo "$TOOHEAVY" | jq -r '.errors[0].extensions.code')" "VALIDATION_ERROR"
 expect "baggageByBooking count" "$(gql "$BAGGAGE" 'query($r:String!){ baggageByBooking(reference:$r){ tagNumber } }' "{\"r\":\"$REF\"}" "$TOKEN_ANNA" | jq -r '.data.baggageByBooking | length')" "1"
 
+echo "== Min booking: read model bookingOverview i booking-service (CQRS) =="
+expect "bookingOverview uden token -> code" "$(gql "$BOOKING" 'query($r:String!){ bookingOverview(reference:$r){ status } }' "{\"r\":\"$REF\"}" | jq -r '.errors[0].extensions.code')" "UNAUTHORIZED"
+wait_for "overview status/betaling/bagage/lokation" "overview $REF '[.status, .payments[0].status, .payments[0].cardLast4, .baggage[0].status, .baggage[0].lastLocation] | join(\"/\")'" "CONFIRMED/COMPLETED/4242/LOADED/Belt 4" 5
+expect "overview bagage-tag" "$(overview "$REF" '.baggage[0].tagNumber')" "$TAG"
+
 echo "== Flow C: aflysning (ops) =="
 CANCEL=$(gql "$FLIGHT" 'mutation($id:ID!){ updateFlightStatus(flightId:$id, status:CANCELLED){ status } }' "{\"id\":\"$FLIGHT_ID\"}" "$TOKEN_OPS")
 expect "flight CANCELLED" "$(echo "$CANCEL" | jq -r '.data.updateFlightStatus.status')" "CANCELLED"
 wait_for "booking CANCELLED" "gql '$BOOKING' 'query(\$r:String!){ bookingByReference(reference:\$r){ status flightStatus } }' '{\"r\":\"$REF\"}' | jq -r '.data.bookingByReference.status'" "CANCELLED"
 wait_for "payment REFUNDED" "gql '$PAYMENT' 'query(\$r:String!){ paymentsByBooking(reference:\$r){ status } }' '{\"r\":\"$REF\"}' '$TOKEN_ANNA' | jq -r '.data.paymentsByBooking[0].status'" "REFUNDED"
 wait_for "baggage at RETURN_DESK" "gql '$BAGGAGE' 'query(\$t:String!){ baggage(tagNumber:\$t){ status lastLocation } }' '{\"t\":\"$TAG\"}' | jq -r '.data.baggage.lastLocation'" "RETURN_DESK"
+wait_for "overview efter aflysning" "overview $REF '[.status, .payments[0].status, .baggage[0].lastLocation] | join(\"/\")'" "CANCELLED/REFUNDED/RETURN_DESK" 5
 wait_for "seat released" "gql '$FLIGHT' 'query(\$id:ID!,\$s:String!){ flight(id:\$id){ seat(seatNumber:\$s){ isAvailable } } }' '{\"id\":\"$FLIGHT_ID\",\"s\":\"$SEAT\"}' | jq -r '.data.flight.seat.isAvailable'" "true"
 
 echo "== Flow D: navigation =="

@@ -7,6 +7,15 @@ type Query {
   bookingByReference(reference: String!): Booking
   bookingsByPassenger(email: String!): [Booking!]!
   passenger(id: ID!): Passenger
+
+  """
+  Read model (CQRS): everything "Min booking" shows - booking, passenger, payments and baggage - in one lookup.
+  Booking and passenger are current as soon as a mutation returns; payments and baggage come from payment-service
+  and baggage-service events and lag them by up to about a second. Requires login (PASSENGER or OPERATIONS).
+  """
+  bookingOverview(reference: String!): BookingOverview
+  "The logged-in user's bookings (matched on the e-mail in the token), newest first, from the same read model"
+  myBookings: [BookingOverview!]!
 }
 
 type Mutation {
@@ -43,6 +52,10 @@ type Booking {
   price: BigDecimal!
   currency: String!
   status: BookingStatus!
+  "Why the booking was cancelled, e.g. \"Payment not received within 15 minutes\" (null unless CANCELLED)"
+  cancellationReason: String
+  "While PENDING_PAYMENT: when the booking is cancelled if it has not been paid (payment timeout). Otherwise null."
+  paymentDueAt: DateTime
   createdAt: DateTime!
   updatedAt: DateTime!
 }
@@ -53,4 +66,62 @@ input PassengerInput {
   email: String!
   passportNumber: String!
   dateOfBirth: Date
+}
+
+"Read model of one booking, see Query.bookingOverview"
+type BookingOverview {
+  bookingId: ID!
+  bookingReference: String!
+  status: BookingStatus!
+  cancellationReason: String
+  passenger: OverviewPassenger!
+  flightId: ID!
+  flightNumber: String!
+  departureTime: DateTime!
+  gate: String
+  flightStatus: String
+  seatNumber: String!
+  price: BigDecimal!
+  currency: String!
+  "Payments for the booking in the order they were made (from payment.* events)"
+  payments: [OverviewPayment!]!
+  "Bags on the booking in the order they were registered (from baggage.* events)"
+  baggage: [OverviewBaggage!]!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  "When the read model row last changed - for any reason, including other services' events"
+  projectedAt: DateTime!
+}
+
+type OverviewPassenger {
+  firstName: String!
+  lastName: String!
+  email: String!
+  passportNumber: String!
+  dateOfBirth: Date
+}
+
+"A payment as booking-service last heard of it. status is payment-service's status (COMPLETED, FAILED, REFUNDED)."
+type OverviewPayment {
+  paymentId: ID!
+  status: String!
+  amount: BigDecimal
+  currency: String
+  cardLast4: String
+  failureReason: String
+  createdAt: DateTime
+  "occurredAt of the newest payment event applied"
+  updatedAt: DateTime!
+}
+
+"A bag as booking-service last heard of it. status is baggage-service's status (REGISTERED, LOADED, ...)."
+type OverviewBaggage {
+  tagNumber: String!
+  type: String
+  weightKg: BigDecimal
+  status: String!
+  lastLocation: String
+  registeredAt: DateTime
+  "occurredAt of the newest baggage event applied"
+  updatedAt: DateTime!
 }

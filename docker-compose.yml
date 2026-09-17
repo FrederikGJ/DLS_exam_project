@@ -168,6 +168,9 @@ services:
       DB_USERNAME: booking
       DB_PASSWORD: booking
       FLIGHT_SERVICE_URL: http://flight-service:8080/api/flights/graphql
+      # saga compensation: unpaid bookings are cancelled after this long; shorten for a demo, e.g.
+      # PAYMENT_TIMEOUT=30s docker compose up -d booking-service
+      PAYMENT_TIMEOUT: ${PAYMENT_TIMEOUT:-15m}
     ports: ["8082:8080"]
     depends_on:
       booking-db: { condition: service_healthy }

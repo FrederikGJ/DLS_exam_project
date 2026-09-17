@@ -41,7 +41,7 @@ public class FlightEventHandler {
             String flightNumber = p.path("flightNumber").asText();
             Long flightId = p.hasNonNull("flightId") ? p.get("flightId").asLong() : null;
             baggageService.returnBaggageForCancelledFlight(flightNumber);
-            int cancelled = snapshots.cancelForFlight(flightId, flightNumber);
+            int cancelled = snapshots.cancelForFlight(flightId, flightNumber, envelope.occurredAt());
             log.info("Flight {} cancelled: {} booking snapshot(s) marked CANCELLED", flightNumber, cancelled);
         } else {
             log.debug("Ignoring event type {}", envelope.eventType());

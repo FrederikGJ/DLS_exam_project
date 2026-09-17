@@ -194,6 +194,7 @@ class BaggageServiceIntegrationTest {
         assertThat(registered.payload().path("bookingReference").asText()).isEqualTo(REF);
         assertThat(registered.payload().path("type").asText()).isEqualTo("CHECKED");
         assertThat(registered.payload().path("status").asText()).isEqualTo("REGISTERED");
+        assertThat(registered.payload().path("lastLocation").asText()).isEqualTo("CHECK_IN");
     }
 
     @Test

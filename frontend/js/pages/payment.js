@@ -1,6 +1,6 @@
 // Betaling: look up a PENDING_PAYMENT booking and pay with simulated card data.
 import { bookingApi, paymentApi } from '../api.js';
-import { esc, formatDateTime, formatMoney, badge, toast, showError, busy, state, sleep, qs } from '../app.js';
+import { esc, formatDateTime, formatTime, formatMoney, badge, toast, showError, busy, state, sleep, qs, cancellationText } from '../app.js';
 
 export async function render(container, params) {
   const initialRef = (params.ref || state.bookingRef || '').toUpperCase();
@@ -56,6 +56,7 @@ export async function render(container, params) {
         <dt>Sæde</dt><dd>${esc(b.seatNumber)}</dd>
         <dt>Pris</dt><dd><strong>${esc(formatMoney(b.price, b.currency))}</strong></dd>
         <dt>Status</dt><dd>${badge(b.status)}</dd>
+        ${b.cancellationReason ? `<dt>Årsag</dt><dd>${esc(cancellationText(b.cancellationReason))}</dd>` : ''}
       </dl>`;
   }
 
@@ -80,6 +81,7 @@ export async function render(container, params) {
               <div class="field"><label for="expiry">Udløb (MM/YY)</label><input id="expiry" placeholder="12/29" required pattern="^(0[1-9]|1[0-2])\\/\\d{2}$" value="12/29"></div>
               <div class="field"><label for="cvv">CVV</label><input id="cvv" inputmode="numeric" placeholder="123" required pattern="^\\d{3,4}$" maxlength="4" value="123"></div>
             </div>
+            ${booking.paymentDueAt ? `<div class="alert warn small">Betal senest kl. <strong>${esc(formatTime(booking.paymentDueAt))}</strong> – ellers annulleres bookingen automatisk, og sædet frigives.</div>` : ''}
             <div class="alert info small">Kort der slutter på <strong>0000</strong> afvises (Insufficient funds). Udløbet kort afvises (Card expired). Alle andre kort godkendes. Kortnummeret gemmes ikke – kun de sidste 4 cifre.</div>
             <div style="margin-top:12px">
               <button class="btn" type="submit" id="pay-btn">Betal ${esc(formatMoney(booking.price, booking.currency))}</button>
@@ -137,6 +139,10 @@ export async function render(container, params) {
           <a class="btn sm" style="margin-top:8px" href="#/my-booking${qs({ ref: updated.bookingReference })}">Gå til Min booking</a>
           <a class="btn sm secondary" style="margin-top:8px" href="#/baggage${qs({ ref: updated.bookingReference })}">Registrér bagage</a>
         </div>`;
+      } else if (payment.status === 'COMPLETED') {
+        // the booking was cancelled before the payment reached booking-service (e.g. the payment timeout):
+        // booking-service answers with booking.payment.rejected and payment-service refunds the payment
+        resultEl.innerHTML = `<div class="alert error">Bookingen er ${badge(updated.status)}${updated.cancellationReason ? ` (${esc(cancellationText(updated.cancellationReason))})` : ''}, før betalingen nåede frem. Betalingen refunderes automatisk.</div>`;
       } else {
         resultEl.innerHTML = `<div class="alert error">Bookingen er nu ${badge(updated.status)}. ${payment.failureReason ? 'Årsag: ' + esc(payment.failureReason) : ''}</div>`;
       }

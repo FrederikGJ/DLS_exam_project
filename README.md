@@ -160,7 +160,7 @@ I Kubernetes tændes modellen med overlayet `k8s/overlays/demo` (se [k8s/README.
 
 ### Prøv flows fra frontenden
 
-Læsning (afgange, butikker, opslag af booking) kræver ikke login. *Book*, *Betaling* og *Bagage* sender dig til
+Afgange og butikker kræver ikke login. *Book*, *Betaling*, *Min booking* og *Bagage* sender dig til
 Keycloaks login-side (brug `anna`/`anna`) og tilbage igen; *Log ind*/*Log ud* står øverst til højre sammen med
 brugernavn og rolle. Operations-panelet under *Afgange* vises kun for brugere med rollen OPERATIONS (`ops`/`ops`).
 
@@ -169,6 +169,11 @@ brugernavn og rolle. Operations-panelet under *Afgange* vises kun for brugere me
   Kort der slutter på `0000` giver `Insufficient funds`; udløbet dato giver `Card expired` (bookingen annulleres).
 - **Flow B – bagage:** *Bagage* → indtast bookingreference, vægt 23, type CHECKED → tag genereres →
   opdatér status til `LOADED` / "Belt 4" → se det under *Min booking*.
+- **Min booking (CQRS):** uden reference viser siden dine bookinger (`myBookings`); med en reference hentes booking,
+  passager, betalinger og bagage i **ét** kald til booking-service (`bookingOverview`), som svarer fra sin read model
+  `booking_overview` – browserens netværksfane viser ingen kald til payment- eller baggage-service. Betalinger og
+  bagage når read-modellen via events typisk inden for et halvt sekund. Hvorfor og hvordan:
+  [docs/architecture.md](docs/architecture.md#cqrs-booking_overview-til-min-booking).
 - **Flow C – aflysning:** log ind som `ops` → *Afgange* → slå *Vis operations-panel* til → sæt status `CANCELLED` på flyet →
   bookinger annulleres, betalinger refunderes, bagage sendes til `RETURN_DESK`, sæder frigives.
 - **Flow D – navigation:** *Butikker* → vælg "Security T2" → "Gate B12" → *Find rute* → trin-for-trin rute,
@@ -211,9 +216,30 @@ Scriptet henter først tokens fra Keycloak for `anna` (PASSENGER) og `ops` (OPER
 tjekker at en mutation uden token giver `UNAUTHORIZED` og at anna får `FORBIDDEN` på en OPERATIONS-mutation,
 og kører så flows: anna booker et sæde, betaler og registrerer bagage, ops sætter bagagestatus og aflyser flyet,
 og scriptet verificerer at bookingen bliver `CANCELLED`, betalingen `REFUNDED`, bagagen står ved `RETURN_DESK` og
-sædet er frigivet – og slutter med en rute fra Security T2 til Gate B12. Mod kind sættes `KEYCLOAK_URL` og
+sædet er frigivet, og at booking-services read model `bookingOverview` (*Min booking*) har fået betaling, bagage og
+aflysning med – og slutter med en rute fra Security T2 til Gate B12. Mod kind sættes `KEYCLOAK_URL` og
 service-URL'erne som vist i [k8s/README.md](k8s/README.md#alternativ-kind). Bemærk at Flow C aflyser et fly fra
 seed-data; `docker compose down -v` nulstiller.
+
+### Saga-demo: betalingstimeout og for sen betaling
+
+En booking, der ikke betales inden `PAYMENT_TIMEOUT` (15 min.), aflyses, og en betaling, der kommer bagefter,
+refunderes automatisk. Med en kort timeout kan begge kompensationer ses i løbet af et minut:
+
+```bash
+PAYMENT_TIMEOUT=30s docker compose up -d --wait booking-service
+./scripts/demo-saga.sh
+# == 1. Booking 3XR63W ... is PENDING_PAYMENT, pay before 2026-09-17T06:09:09Z
+#    after 47 s: CANCELLED - Payment not received within 30 seconds
+# == 2. The passenger pays anyway
+#    payment 37: COMPLETED
+#    payment-service: REFUNDED (booking-service published booking.payment.rejected)
+#    Min booking: CANCELLED | Payment not received within 30 seconds | payments ["REFUNDED"]
+docker compose up -d --wait booking-service      # tilbage til 15 minutter
+```
+
+I frontenden viser *Betaling* fristen ("Betal senest kl. …"), og *Min booking* viser årsagen. Hvorfor og hvordan:
+[docs/architecture.md](docs/architecture.md#saga-bookingen-som-en-kæde-af-lokale-transaktioner).
 
 ### Test af retry + dead-letter queue
 
@@ -418,6 +444,8 @@ Alle services konfigureres via environment variables. Defaults i `application.ym
 | `JWK_SET_URI`          | Hvor servicen henter Keycloaks signeringsnøgler (intern adresse) | `http://keycloak:8080/realms/airport/protocol/openid-connect/certs` |
 | `SPRING_PROFILES_ACTIVE` | `dev` (læsbare logs, GraphiQL) / `prod` (JSON-logs) | `dev`                             |
 | `FLIGHT_SERVICE_URL`   | Kun booking-service: flight-service GraphQL | `http://flight-service:8080/api/flights/graphql` |
+| `PAYMENT_TIMEOUT`      | Kun booking-service: en ubetalt booking aflyses efter (saga-kompensation) | `15m` (default) |
+| `PAYMENT_TIMEOUT_CHECK_INTERVAL_MS` | Kun booking-service: hvor ofte der ledes efter ubetalte bookinger | `30000` (default) |
 
 ## Repository-struktur
 
@@ -439,6 +467,7 @@ Alle services konfigureres via environment variables. Defaults i `application.ym
   k8s/                     base/ (namespace, rabbitmq/, databases/, services/ inkl. shop-service-hpa.yaml, frontend/, ingress.yaml), keycloak/ (realm-airport.json), tools/ (pgAdmin), components/ (ollama/, notification-job/), overlays/ (dev-tools/, demo/)
   scripts/e2e-smoke.sh     end-to-end smoke-test af Flow A-D mod en kørende compose-stak
   scripts/demo-keda.sh     KEDA-demo på kind: 5 bookinger -> notification-jobs starter og forsvinder igen
+  scripts/demo-saga.sh     saga-demo: ubetalt booking aflyses efter PAYMENT_TIMEOUT, for sen betaling refunderes
   scripts/load-shops.sh    belastning af shop-service, så HPA'en skalerer op og ned
   system-tests/            system-test af booking ↔ payment med de byggede images (Testcontainers + WireMock)
 ```

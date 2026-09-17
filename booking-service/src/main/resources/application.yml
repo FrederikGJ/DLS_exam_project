@@ -72,6 +72,7 @@ app:
     queues:
       payment-events: booking-service.payment-events
       flight-events: booking-service.flight-events
+      baggage-events: booking-service.baggage-events   # only feeds the read model booking_overview (CQRS)
       dead-letter: booking-service.dlq
       # notification-job's work queue (booking.#) and its DLQ - declared here too, see config/RabbitConfig
       notifications: notifications
@@ -83,6 +84,10 @@ app:
     confirm-timeout-ms: 5000
     retention: 7d                       # published rows older than this are deleted
     cleanup-interval-ms: 3600000
+  booking:
+    # saga compensation (see service/PaymentTimeoutJob): an unpaid booking is cancelled after this long
+    payment-timeout: ${PAYMENT_TIMEOUT:15m}
+    payment-timeout-check-interval-ms: ${PAYMENT_TIMEOUT_CHECK_INTERVAL_MS:30000}
   flight-service:
     url: ${FLIGHT_SERVICE_URL:http://localhost:8081/api/flights/graphql}
     timeout: ${FLIGHT_SERVICE_TIMEOUT:5s}

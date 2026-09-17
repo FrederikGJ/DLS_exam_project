@@ -8,6 +8,7 @@ import jakarta.validation.ConstraintViolationException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
@@ -62,6 +63,13 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
     @ExceptionHandler(DataIntegrityViolationException.class)
     public ProblemDetail dataIntegrity(DataIntegrityViolationException ex, HttpServletRequest request) {
         return problem(HttpStatus.CONFLICT, ErrorCode.CONFLICT, "The operation conflicts with existing data", request);
+    }
+
+    /** {@code @Version} on Baggage: the bag was changed at the same moment (e.g. by flight.cancelled). */
+    @ExceptionHandler(OptimisticLockingFailureException.class)
+    public ProblemDetail concurrentChange(OptimisticLockingFailureException ex, HttpServletRequest request) {
+        return problem(HttpStatus.CONFLICT, ErrorCode.CONFLICT,
+                "The baggage was changed at the same moment - please try again", request);
     }
 
     @ExceptionHandler(Exception.class)

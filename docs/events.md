@@ -29,6 +29,7 @@ Hver service har én durable kø pr. interesse og én DLQ:
 | flight-service  | `flight-service.booking-events`    | `booking.#`     | `flight-service.dlq`   |
 | booking-service | `booking-service.payment-events`   | `payment.#`     | `booking-service.dlq`  |
 | booking-service | `booking-service.flight-events`    | `flight.#`      | `booking-service.dlq`  |
+| booking-service | `booking-service.baggage-events`   | `baggage.#`     | `booking-service.dlq`  |
 | payment-service | `payment-service.booking-events`   | `booking.#`     | `payment-service.dlq`  |
 | baggage-service | `baggage-service.booking-events`   | `booking.#`     | `baggage-service.dlq`  |
 | baggage-service | `baggage-service.flight-events`    | `flight.#`      | `baggage-service.dlq`  |
@@ -36,6 +37,10 @@ Hver service har én durable kø pr. interesse og én DLQ:
 | notification-job | `notifications`                   | `booking.#`     | `notification-job.dlq` |
 
 > Vi bruger `#` (0..n ord) og ikke `*` (præcis 1 ord), fordi fx `flight.status.changed` har tre segmenter.
+
+`booking-service.baggage-events` fodrer udelukkende read-modellen `booking_overview` (CQRS, se
+[architecture.md](architecture.md#cqrs-booking_overview-til-min-booking)); booking-service ændrer aldrig en booking
+på grund af et bagage-event.
 
 `notifications` ejes af notification-job (en run-to-completion-proces, ikke en service – se afsnittet nederst), men
 booking-service erklærer den også ved opstart med præcis samme argumenter, så booking-events gemmes, fra
@@ -63,6 +68,45 @@ den tilstandsændring eventet medfører. Et event med kendt `eventId` ignoreres 
   overhaler `booking.created` fra samme service. Rækkefølge *på tværs* af producenter garanteres ikke.
 * **Observerbarhed.** Ubekræftede events kan ses i `outbox_event` (`published_at IS NULL`, `attempts`,
   `last_error`) og som gauge `outbox.pending` på `/actuator/metrics/outbox.pending`.
+
+## Rækkefølge og kommutativitet
+
+Rækkefølgen pr. producent bevares, men det er ikke nok: events fra *to* producenter (fx `booking.checkedin` fra
+booking-service og `flight.cancelled` fra flight-service) kan komme i vilkårlig orden, og en genlevering (retry efter en
+fejl, en besked flyttet tilbage fra en DLQ, en ny pod der overtager en kø) kan komme *efter* nyere events. Derfor er
+hver handler skrevet, så slutresultatet ikke afhænger af rækkefølgen (**kommutativ**) – ligesom det ikke afhænger af,
+hvor mange gange et event leveres (**idempotent**, `processed_event`). Handlerne bruger fire teknikker:
+
+| Teknik | Hvor | Regel | Hvorfor netop her |
+|--------|------|-------|-------------------|
+| **Tilstand, der kun går fremad** | baggage-service: `booking_snapshot.status` (`BookingSnapshot.apply`) | `PENDING_PAYMENT` < `CONFIRMED` < `CHECKED_IN` < `CANCELLED`; den status, der er længst fremme, vinder | En booking går aldrig tilbage i sin livscyklus. Reglen kræver derfor intet ur, så events fra booking-service og flight-service kan blandes frit |
+| **Last-writer-wins på `occurredAt`** | flight-service: `seat.is_available` (`availability_changed_at`). booking-service: `booking.flight_status` og `booking.gate` (`flight_status_changed_at`, `gate_changed_at`) og betalings-/bagagelinjerne i read-modellen `booking_overview` | Et event, der er ældre end det, som sidst satte værdien, ignoreres. Uafgjort afgøres ens i begge rækkefølger: sæde optaget vinder over frit, ellers den alfabetisk største værdi | Værdien kan gå frem og tilbage (et sæde bliver optaget, frit og optaget af en ny booking; en gate skifter A → B → A), så kun tidspunktet kan afgøre det. Alle events om samme værdi kommer fra én producent, så tidsstemplerne er fra samme ur. Status og gate har hver sit tidsstempel, fordi `flight.gate.changed` kun bærer gaten: en ældre statusændring med den gamle gate må ikke rulle en nyere gateændring tilbage |
+| **Absorberende sluttilstand** | booking-service: `flight_status = CANCELLED`. baggage-service: `booking_snapshot.status = CANCELLED` | Når `CANCELLED` er nået, ændrer intet senere event værdien – uanset tidsstempel | flight-service ændrer aldrig et aflyst fly igen, og en aflyst booking genopstår aldrig. Det gør reglen robust over for skæve ure mellem producenter (`flight.cancelled` sammenlignes aldrig med `booking.*`-tider) |
+| **Tilstandsmaskine** | booking-service: `payment.completed` / `payment.failed` | Virker kun på en booking i `PENDING_PAYMENT`; ellers logges eventet og ignoreres | Fandtes før DP-31 |
+
+**Detaljer, der gør reglerne rigtige i praksis.**
+
+* *Præcision:* tidsstempler sammenlignes med mikrosekunder – det, PostgreSQL gemmer i `TIMESTAMPTZ` – så en række, der
+  er læst op igen, sammenligner præcis som den, der blev skrevet.
+* *Manglende `occurredAt`* (et brud på kontrakten) tolkes som "ældst muligt": eventet må udfylde en ukendt værdi, men
+  aldrig overskrive en kendt.
+* *Et forældet event er ikke en fejl:* det registreres i `processed_event`, logges på INFO ("Ignoring stale event …",
+  "Ignoring late …") og kvitteres – det må ikke ende i en DLQ.
+* *Kommutativ er ikke det samme som trådsikker.* booking-service og baggage-service lytter på flere køer, og med flere
+  pods behandles to events om samme række samtidig. Handlerne låser derfor rækken, før de fletter (`SELECT … FOR
+  UPDATE` på `seat`, `booking_snapshot` og `booking_overview`), og `booking` og `baggage` har optimistisk låsning
+  (`@Version`), fordi både events og brugernes mutationer skriver i dem: en transaktion, der har læst en gammel version,
+  fejler og prøves igen (listener-retry) eller giver `CONFLICT` (GraphQL/REST), i stedet for at overskrive den anden.
+* *`flight.cancelled` før bookingen er kendt:* ankommer `flight.cancelled` til baggage-service, før der findes et
+  snapshot af en booking på flyet, påvirker det ikke det senere snapshot. Konvergensen sikres af `booking.cancelled`,
+  som booking-service altid udsender for hver booking på et aflyst fly.
+
+**Test.** `EventOrderIntegrationTest` i flight-service, baggage-service og booking-service kalder handleren med de samme
+events i *alle* rækkefølger mod en rigtig PostgreSQL og tjekker, at slutresultatet er ens: sædet (6 + 2 rækkefølger),
+booking-snapshottet (24 + 6 + 120 rækkefølger, den sidste med `flight.cancelled` midt i et check-in) og bookingens
+flystatus og gate inkl. read-modellen (6 + 24 rækkefølger, hvor en aflysning udsender præcis ét `booking.cancelled`).
+Samme testklasse i booking-service og baggage-service viser, at `@Version` får den transaktion, der har en gammel kopi af
+rækken, til at fejle, mens den ændring, der blev committet først, står tilbage. Reglerne er desuden unit-testet i `SeatTest`, `BookingSnapshotTest`, `BookingStateTest` og `OverviewLinesTest`.
 
 ---
 
@@ -136,14 +180,29 @@ Lyttere: flight-service (sæde `is_available=false`), baggage-service (opretter/
 notification-job (mail "Din booking … er bekræftet").
 
 ### `booking.cancelled`
-Samme payload med `"status": "CANCELLED"` og et ekstra felt `"reason"`, fx `"Flight cancelled"`
-eller `"Cancelled by passenger"` eller `"Payment failed"`.
+Samme payload med `"status": "CANCELLED"` og et ekstra felt `"reason"`, fx `"Flight cancelled"`,
+`"Cancelled by passenger"`, `"Payment failed: Insufficient funds"` eller `"Payment not received within 15 minutes"`
+(betalingstimeout, se *Saga* i architecture.md). Årsagen gemmes også på bookingen (`cancellationReason`).
 Lyttere: flight-service (sæde frigives), payment-service (automatisk refund hvis COMPLETED payment findes),
 baggage-service (snapshot → CANCELLED), notification-job (mail om aflysningen med `reason`).
 
 ### `booking.checkedin`
 Samme payload med `"status": "CHECKED_IN"`.
 Lyttere: baggage-service (snapshot → CHECKED_IN), notification-job (mail om check-in).
+
+### `booking.payment.rejected`
+Saga-kompensation: `payment.completed` kom til en booking, der allerede var aflyst (betalingstimeout, passagerens
+aflysning eller aflyst fly). Bookingen forbliver `CANCELLED`, og betalingen skal tilbage.
+```json
+{
+  "bookingId": 1, "bookingReference": "K7Q2ZP", "status": "CANCELLED",
+  "paymentId": 42, "amount": 899.00, "currency": "DKK",
+  "reason": "Payment arrived after the booking was cancelled (Payment not received within 15 minutes)"
+}
+```
+Lyttere: payment-service (refunderer betalingen `paymentId`, hvis den stadig er `COMPLETED` → `payment.refunded`).
+notification-job springer det over (ukendt booking-event). Det er bevidst ikke et nyt `booking.cancelled`, som ville få
+flight-service til at frigive et sæde, en anden passager måske allerede har booket – se *Saga* i architecture.md.
 
 ---
 
@@ -156,7 +215,9 @@ Lyttere: baggage-service (snapshot → CHECKED_IN), notification-job (mail om ch
   "amount": 899.00, "currency": "DKK", "cardLast4": "4242"
 }
 ```
-Lyttere: booking-service (booking → CONFIRMED, publicerer `booking.confirmed`).
+Lyttere: booking-service (booking → CONFIRMED, publicerer `booking.confirmed`; er bookingen allerede aflyst, forbliver
+den `CANCELLED`, og `booking.payment.rejected` publiceres i stedet; betalingen skrives i read-modellen
+`booking_overview`).
 
 ### `payment.failed`
 ```json
@@ -166,7 +227,8 @@ Lyttere: booking-service (booking → CONFIRMED, publicerer `booking.confirmed`)
   "failureReason": "Insufficient funds"
 }
 ```
-Lyttere: booking-service (booking → CANCELLED, publicerer `booking.cancelled`).
+Lyttere: booking-service (booking → CANCELLED, publicerer `booking.cancelled`; betalingen med `failureReason` skrives i
+`booking_overview`).
 
 ### `payment.refunded`
 ```json
@@ -175,7 +237,7 @@ Lyttere: booking-service (booking → CANCELLED, publicerer `booking.cancelled`)
   "amount": 899.00, "currency": "DKK"
 }
 ```
-Lyttere: ingen (informativt; kan vises under "Min booking" via `paymentsByBooking`).
+Lyttere: booking-service (samme betalingslinje i `booking_overview` → `REFUNDED`, så *Min booking* viser refunderingen).
 
 ---
 
@@ -186,9 +248,13 @@ Lyttere: ingen (informativt; kan vises under "Min booking" via `paymentsByBookin
 {
   "tagNumber": "BAG-7F3K9Q2M", "bookingReference": "K7Q2ZP",
   "passengerName": "Anna Jensen", "flightNumber": "SK1501",
-  "weightKg": 23.0, "type": "CHECKED", "status": "REGISTERED"
+  "weightKg": 23.0, "type": "CHECKED", "status": "REGISTERED", "lastLocation": "CHECK_IN"
 }
 ```
+`lastLocation` blev tilføjet i september 2026, så read-modellen i booking-service kan vise lokationen fra starten. Et nyt
+felt er bagudkompatibelt (consumerne læser felt for felt), så eventet beholder sit navn – se *API-versionering* i
+architecture.md.
+Lyttere: booking-service (ny bagagelinje i `booking_overview`).
 
 ### `baggage.status.changed`
 ```json
@@ -197,7 +263,7 @@ Lyttere: ingen (informativt; kan vises under "Min booking" via `paymentsByBookin
   "oldStatus": "REGISTERED", "newStatus": "LOADED", "location": "Belt 4"
 }
 ```
-Lyttere: ingen krævede.
+Lyttere: booking-service (status og lokation på bagagelinjen i `booking_overview`).
 
 ---
 

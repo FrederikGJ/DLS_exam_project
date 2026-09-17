@@ -191,12 +191,23 @@ public class FlightService {
         return flight;
     }
 
-    /** Called from booking events: mark a seat taken/free. Idempotent by nature (sets a flag). */
+    /**
+     * Called from booking events: mark a seat taken/free as of {@code occurredAt}. Commutative (dev plan DP-31): an
+     * event older than the one that last changed the seat is ignored, see {@link Seat#applyAvailability}.
+     *
+     * @return false if the event was stale and changed nothing
+     */
     @Transactional
-    public void setSeatAvailability(Long flightId, String seatNumber, boolean available) {
-        Seat seat = seats.findByFlightIdAndSeatNumberIgnoreCase(flightId, seatNumber)
+    public boolean setSeatAvailability(Long flightId, String seatNumber, boolean available, OffsetDateTime occurredAt) {
+        Seat seat = seats.lockByFlightIdAndSeatNumber(flightId, seatNumber)
                 .orElseThrow(() -> ApiException.notFound("Seat", flightId + "/" + seatNumber));
-        seat.setAvailable(available);
+        if (!seat.applyAvailability(available, occurredAt)) {
+            log.info("Ignoring stale event for seat {} on flight {}: it says {} as of {}, but it is {} as of {}",
+                    seatNumber, flightId, available ? "available" : "taken", occurredAt,
+                    seat.isAvailable() ? "available" : "taken", seat.getAvailabilityChangedAt());
+            return false;
+        }
         log.info("Seat {} on flight {} is now {}", seatNumber, flightId, available ? "available" : "taken");
+        return true;
     }
 }

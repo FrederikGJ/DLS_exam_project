@@ -12,6 +12,10 @@ public class Baggage {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    /** Optimistic locking: flight.cancelled (listener) and operators (GraphQL/REST) change the same bag. */
+    @Version
+    private long version;
+
     @Column(name = "tag_number", nullable = false, unique = true, length = 12)
     private String tagNumber;
 

@@ -2,6 +2,7 @@ package dk.airport.booking.graphql;
 
 import dk.airport.booking.domain.ApiException;
 import dk.airport.booking.domain.Booking;
+import dk.airport.booking.domain.BookingStatus;
 import dk.airport.booking.domain.ErrorCode;
 import dk.airport.booking.domain.Passenger;
 import dk.airport.booking.graphql.input.PassengerInput;
@@ -10,6 +11,7 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.graphql.data.method.annotation.Argument;
 import org.springframework.graphql.data.method.annotation.MutationMapping;
 import org.springframework.graphql.data.method.annotation.QueryMapping;
@@ -20,6 +22,8 @@ import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.stereotype.Controller;
 import org.springframework.validation.annotation.Validated;
 
+import java.time.Duration;
+import java.time.OffsetDateTime;
 import java.util.List;
 
 @Controller
@@ -27,9 +31,12 @@ import java.util.List;
 public class BookingController {
 
     private final BookingService bookingService;
+    private final Duration paymentTimeout;
 
-    public BookingController(BookingService bookingService) {
+    public BookingController(BookingService bookingService,
+                             @Value("${app.booking.payment-timeout}") Duration paymentTimeout) {
         this.bookingService = bookingService;
+        this.paymentTimeout = paymentTimeout;
     }
 
     // ---------------------------------------------------------- queries
@@ -68,6 +75,14 @@ public class BookingController {
     @SchemaMapping(typeName = "Passenger")
     public List<Booking> bookings(Passenger passenger) {
         return bookingService.bookingsByPassengerId(passenger.getId());
+    }
+
+    /** When PaymentTimeoutJob cancels the booking if it is still unpaid (at most one check interval later). */
+    @SchemaMapping(typeName = "Booking")
+    public OffsetDateTime paymentDueAt(Booking booking) {
+        return booking.getStatus() == BookingStatus.PENDING_PAYMENT
+                ? booking.getCreatedAt().plus(paymentTimeout)
+                : null;
     }
 
     // ---------------------------------------------------------- mutations

@@ -17,6 +17,8 @@ public class BookingEventHandler {
     private static final Logger log = LoggerFactory.getLogger(BookingEventHandler.class);
 
     public static final String BOOKING_CANCELLED = "booking.cancelled";
+    /** booking-service got a payment for a booking that was already cancelled (saga compensation, DP-32). */
+    public static final String BOOKING_PAYMENT_REJECTED = "booking.payment.rejected";
 
     private final PaymentService paymentService;
     private final ProcessedEventRepository processedEvents;
@@ -33,12 +35,19 @@ public class BookingEventHandler {
             return;
         }
         JsonNode p = envelope.payload();
-        if (BOOKING_CANCELLED.equals(envelope.eventType())) {
-            String reference = p.path("bookingReference").asText();
-            int refunded = paymentService.refundBooking(reference);
-            log.info("Booking {} cancelled -> {} payment(s) refunded", reference, refunded);
-        } else {
-            log.debug("Ignoring event type {}", envelope.eventType());
+        switch (envelope.eventType()) {
+            case BOOKING_CANCELLED -> {
+                String reference = p.path("bookingReference").asText();
+                int refunded = paymentService.refundBooking(reference);
+                log.info("Booking {} cancelled -> {} payment(s) refunded", reference, refunded);
+            }
+            case BOOKING_PAYMENT_REJECTED -> {
+                String reference = p.path("bookingReference").asText();
+                boolean refunded = paymentService.refundRejectedPayment(p.path("paymentId").asLong(), reference);
+                log.info("Payment {} rejected by booking {} -> refunded: {}", p.path("paymentId").asLong(),
+                        reference, refunded);
+            }
+            default -> log.debug("Ignoring event type {}", envelope.eventType());
         }
         processedEvents.save(new ProcessedEvent(envelope.eventId(), envelope.eventType()));
     }

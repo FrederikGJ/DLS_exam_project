@@ -1,7 +1,9 @@
 package dk.airport.flight.repository;
 
 import dk.airport.flight.domain.Seat;
+import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 
 import java.util.List;
@@ -16,6 +18,11 @@ public interface SeatRepository extends JpaRepository<Seat, Long> {
     List<Seat> findAvailableByFlightIdOrdered(Long flightId);
 
     Optional<Seat> findByFlightIdAndSeatNumberIgnoreCase(Long flightId, String seatNumber);
+
+    /** Row lock for the booking-event handler: with several pods two events for one seat can arrive at once. */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select s from Seat s where s.flight.id = :flightId and upper(s.seatNumber) = upper(:seatNumber)")
+    Optional<Seat> lockByFlightIdAndSeatNumber(Long flightId, String seatNumber);
 
     long countByFlightIdAndAvailableTrue(Long flightId);
 }

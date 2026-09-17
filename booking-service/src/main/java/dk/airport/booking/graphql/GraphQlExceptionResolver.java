@@ -10,6 +10,7 @@ import jakarta.validation.ConstraintViolationException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.graphql.execution.DataFetcherExceptionResolverAdapter;
 import org.springframework.graphql.execution.ErrorType;
 import org.springframework.security.access.AccessDeniedException;
@@ -70,6 +71,10 @@ public class GraphQlExceptionResolver extends DataFetcherExceptionResolverAdapte
         }
         if (ex instanceof DataIntegrityViolationException) {
             return error(env, ErrorCode.CONFLICT, "The operation conflicts with existing data");
+        }
+        // @Version on Booking: an event changed the booking while this mutation was running - retrying is safe
+        if (ex instanceof OptimisticLockingFailureException) {
+            return error(env, ErrorCode.CONFLICT, "The booking was changed at the same moment - please try again");
         }
         log.error("Unhandled error in data fetcher {}", env.getExecutionStepInfo().getPath(), ex);
         return error(env, ErrorCode.INTERNAL_ERROR, "Unexpected error");

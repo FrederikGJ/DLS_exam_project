@@ -277,8 +277,59 @@ class PaymentServiceIntegrationTest {
         awaitEvents(e -> e.eventType().equals("payment.refunded") && e.payload().path("paymentId").asLong() == id, 1);
     }
 
+    /**
+     * Saga compensation (dev plan DP-32): a payment that reaches booking-service after the booking was cancelled is
+     * refunded via booking.payment.rejected. Whatever combination of booking.cancelled (also repeated) and
+     * booking.payment.rejected arrives, the payment is refunded exactly once.
+     */
     @Test
     @Order(8)
+    void lateAndRepeatedCancellationEventsRefundAPaymentExactlyOnce() throws Exception {
+        Long late = payFor("LATE01");
+        publish(UUID.randomUUID().toString(), "booking.payment.rejected", Map.of("bookingReference", "LATE01",
+                "paymentId", late, "status", "CANCELLED", "reason", "Payment arrived after the booking was cancelled"));
+        awaitEvents(e -> e.eventType().equals("payment.refunded") && e.payload().path("paymentId").asLong() == late, 1);
+        publish(UUID.randomUUID().toString(), "booking.payment.rejected", Map.of("bookingReference", "LATE01",
+                "paymentId", late, "status", "CANCELLED"));
+        publish(UUID.randomUUID().toString(), "booking.cancelled", Map.of("bookingReference", "LATE01",
+                "status", "CANCELLED", "reason", "Payment not received in time"));
+
+        // the other order: booking.cancelled refunds first, the rejection arrives afterwards (twice)
+        Long early = payFor("LATE02");
+        publish(UUID.randomUUID().toString(), "booking.cancelled", Map.of("bookingReference", "LATE02",
+                "status", "CANCELLED", "reason", "Payment not received in time"));
+        awaitEvents(e -> e.eventType().equals("payment.refunded") && e.payload().path("paymentId").asLong() == early,
+                1);
+        publish(UUID.randomUUID().toString(), "booking.cancelled", Map.of("bookingReference", "LATE02",
+                "status", "CANCELLED"));
+        publish(UUID.randomUUID().toString(), "booking.payment.rejected", Map.of("bookingReference", "LATE02",
+                "paymentId", early, "status", "CANCELLED"));
+        // a rejection whose payment belongs to another booking refunds nothing
+        Long other = payFor("LATE03");
+        publish(UUID.randomUUID().toString(), "booking.payment.rejected", Map.of("bookingReference", "OTHER1",
+                "paymentId", other, "status", "CANCELLED"));
+
+        Thread.sleep(2000);   // let the repeated events be consumed, then count
+        assertThat(paymentRepository.findById(other).orElseThrow().getStatus().name()).isEqualTo("COMPLETED");
+        for (Long id : List.of(late, early)) {
+            assertThat(RECEIVED.stream().filter(e -> e.eventType().equals("payment.refunded")
+                    && e.payload().path("paymentId").asLong() == id).count()).as("refunds of payment %d", id)
+                    .isEqualTo(1);
+            assertThat(paymentRepository.findById(id).orElseThrow().getStatus().name()).isEqualTo("REFUNDED");
+        }
+    }
+
+    private Long payFor(String reference) {
+        return asPassenger.document(PAY)
+                .variable("ref", reference).variable("amount", 499.00)
+                .variable("card", "4242424242424242").variable("expiry", "12/30").variable("cvv", "123")
+                .execute()
+                .path("pay.status").entity(String.class).isEqualTo("COMPLETED")
+                .path("pay.id").entity(Long.class).get();
+    }
+
+    @Test
+    @Order(9)
     void invalidInputIsValidationError() {
         asPassenger.document(PAY)
                 .variable("ref", "ABC123").variable("amount", 10.00)

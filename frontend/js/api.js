@@ -145,8 +145,16 @@ export const flightApi = {
 // ---------------------------------------------------------------- booking-service
 const BOOKING_FIELDS = `
   id bookingReference flightId flightNumber departureTime gate flightStatus seatNumber
-  price currency status createdAt updatedAt
+  price currency status cancellationReason paymentDueAt createdAt updatedAt
   passenger { id firstName lastName email passportNumber dateOfBirth }
+`;
+
+const OVERVIEW_FIELDS = `
+  bookingId bookingReference flightId flightNumber departureTime gate flightStatus seatNumber
+  price currency status cancellationReason createdAt updatedAt projectedAt
+  passenger { firstName lastName email passportNumber dateOfBirth }
+  payments { paymentId status amount currency cardLast4 failureReason createdAt updatedAt }
+  baggage { tagNumber type weightKg status lastLocation registeredAt updatedAt }
 `;
 
 export const bookingApi = {
@@ -170,6 +178,17 @@ export const bookingApi = {
   checkIn: (reference) => gql(cfg.BOOKING_URL, `
     mutation($reference: String!) { checkIn(reference: $reference) { ${BOOKING_FIELDS} } }`,
     { reference }, 'booking-service').then(d => d.checkIn),
+
+  // Read model (CQRS): booking + passenger + payments + baggage from booking-service's booking_overview in one call,
+  // instead of one call each to booking-, payment- and baggage-service. Payments and baggage are projected from those
+  // services' events and can lag them by about a second. Requires login.
+  bookingOverview: (reference) => gql(cfg.BOOKING_URL, `
+    query($reference: String!) { bookingOverview(reference: $reference) { ${OVERVIEW_FIELDS} } }`,
+    { reference }, 'booking-service').then(d => d.bookingOverview),
+
+  myBookings: () => gql(cfg.BOOKING_URL, `
+    query { myBookings { bookingReference status flightNumber departureTime seatNumber } }`,
+    {}, 'booking-service').then(d => d.myBookings),
 };
 
 // ---------------------------------------------------------------- payment-service

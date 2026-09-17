@@ -7,9 +7,14 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+
 /**
  * Applies booking events to the local booking_snapshot table. Idempotent: every eventId is recorded
- * in processed_event inside the same transaction as the state change.
+ * in processed_event inside the same transaction as the state change. Commutative (dev plan DP-31): a late event
+ * is recorded as processed but cannot move the snapshot back (see BookingSnapshot#apply).
  */
 @Component
 public class BookingEventHandler {
@@ -20,6 +25,8 @@ public class BookingEventHandler {
     public static final String BOOKING_CONFIRMED = "booking.confirmed";
     public static final String BOOKING_CANCELLED = "booking.cancelled";
     public static final String BOOKING_CHECKED_IN = "booking.checkedin";
+    /** Used for an envelope without occurredAt: such an event may fill in an unknown state but never override one. */
+    static final OffsetDateTime UNKNOWN_TIME = OffsetDateTime.ofInstant(Instant.EPOCH, ZoneOffset.UTC);
 
     private final BookingSnapshotService snapshots;
     private final ProcessedEventRepository processedEvents;
@@ -46,7 +53,8 @@ public class BookingEventHandler {
                         passengerName(p.path("passenger")),
                         p.path("flightNumber").asText(),
                         p.hasNonNull("flightId") ? p.get("flightId").asLong() : null,
-                        status);
+                        status,
+                        envelope.occurredAt() != null ? envelope.occurredAt() : UNKNOWN_TIME);
             }
             default -> log.debug("Ignoring event type {}", envelope.eventType());
         }

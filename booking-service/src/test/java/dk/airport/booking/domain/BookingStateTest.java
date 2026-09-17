@@ -49,39 +49,89 @@ class BookingStateTest {
                 .extracting(e -> ((ApiException) e).getCode()).isEqualTo(ErrorCode.INVALID_STATE);
 
         Booking cancelled = newBooking();
-        cancelled.cancel();
+        cancelled.cancel("Cancelled by passenger");
         assertThatThrownBy(cancelled::checkIn).isInstanceOf(ApiException.class);
     }
 
     @Test
     void anyActiveStatusCanBeCancelledButNotTwice() {
         Booking pending = newBooking();
-        pending.cancel();
+        pending.cancel("Payment failed");
         assertThat(pending.getStatus()).isEqualTo(BookingStatus.CANCELLED);
+        assertThat(pending.getCancellationReason()).isEqualTo("Payment failed");
 
         Booking confirmed = newBooking();
         confirmed.confirm();
-        confirmed.cancel();
+        confirmed.cancel("Flight cancelled");
         assertThat(confirmed.isCancelled()).isTrue();
 
         Booking checkedIn = newBooking();
         checkedIn.confirm();
         checkedIn.checkIn();
-        checkedIn.cancel();
+        checkedIn.cancel("Cancelled by passenger");
         assertThat(checkedIn.isCancelled()).isTrue();
 
-        assertThatThrownBy(pending::cancel).isInstanceOf(ApiException.class)
+        assertThatThrownBy(() -> pending.cancel("again")).isInstanceOf(ApiException.class)
                 .extracting(e -> ((ApiException) e).getCode()).isEqualTo(ErrorCode.INVALID_STATE);
     }
 
     @Test
     void snapshotUpdateOnlyTouchesChangedFields() {
         Booking b = newBooking();
-        b.updateFlightSnapshot(null, "B7");
+        assertThat(b.applyFlightSnapshot(null, "B7", T1)).isTrue();
         assertThat(b.getGate()).isEqualTo("B7");
         assertThat(b.getFlightStatus()).isEqualTo("SCHEDULED");
-        b.updateFlightSnapshot("DELAYED", null);
+        assertThat(b.applyFlightSnapshot("DELAYED", null, T2)).isTrue();
         assertThat(b.getFlightStatus()).isEqualTo("DELAYED");
         assertThat(b.getGate()).isEqualTo("B7");
+    }
+
+    // ------------------------------------------------------------ event order (dev plan DP-31)
+
+    static final OffsetDateTime T1 = OffsetDateTime.parse("2026-09-17T10:00:00Z");
+    static final OffsetDateTime T2 = T1.plusMinutes(1);
+    static final OffsetDateTime T3 = T1.plusMinutes(2);
+
+    @Test
+    void olderGateFromALateStatusEventDoesNotUndoANewerGateChange() {
+        Booking b = newBooking();
+        b.applyFlightSnapshot(null, "B17", T2);                         // flight.gate.changed at T2
+        assertThat(b.applyFlightSnapshot("DELAYED", "B15", T1)).isTrue();   // flight.status.changed at T1, old gate
+
+        assertThat(b.getFlightStatus()).isEqualTo("DELAYED");            // status was news
+        assertThat(b.getGate()).isEqualTo("B17");                        // gate was not
+        assertThat(b.getGateChangedAt()).isEqualTo(T2);
+    }
+
+    @Test
+    void lateStatusEventIsIgnored() {
+        Booking b = newBooking();
+        b.applyFlightSnapshot("BOARDING", null, T3);
+
+        assertThat(b.applyFlightSnapshot("DELAYED", null, T2)).isFalse();
+        assertThat(b.getFlightStatus()).isEqualTo("BOARDING");
+    }
+
+    @Test
+    void cancelledFlightStaysCancelledWhateverArrivesAfterIt() {
+        Booking b = newBooking();
+        b.applyFlightSnapshot("DELAYED", null, T3);
+        assertThat(b.applyFlightSnapshot("CANCELLED", null, T2)).isTrue();   // older, but CANCELLED is final
+        assertThat(b.applyFlightSnapshot("BOARDING", null, T3.plusMinutes(5))).isFalse();
+
+        assertThat(b.getFlightStatus()).isEqualTo("CANCELLED");
+        assertThat(b.getFlightStatusChangedAt()).isEqualTo(T3.plusMinutes(5));
+    }
+
+    @Test
+    void equalTimestampsGiveTheSameResultInBothOrders() {
+        Booking first = newBooking();
+        first.applyFlightSnapshot(null, "A1", T1);
+        first.applyFlightSnapshot(null, "C3", T1);
+        Booking second = newBooking();
+        second.applyFlightSnapshot(null, "C3", T1);
+        second.applyFlightSnapshot(null, "A1", T1);
+
+        assertThat(first.getGate()).isEqualTo(second.getGate()).isEqualTo("C3");
     }
 }

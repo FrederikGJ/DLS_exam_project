@@ -16,8 +16,11 @@ const routes = {
   'shops': shops,
 };
 const DEFAULT_ROUTE = 'departures';
-/** Pages that need a logged-in user (their mutations require PASSENGER or OPERATIONS). Reads stay public. */
-const LOGIN_REQUIRED = new Set(['book', 'payment', 'baggage']);
+/**
+ * Pages that need a logged-in user: their mutations require PASSENGER or OPERATIONS, and "Min booking" reads the
+ * booking overview, which contains payment and baggage data. Departures and shops stay public.
+ */
+const LOGIN_REQUIRED = new Set(['book', 'payment', 'baggage', 'my-booking']);
 
 // ------------------------------------------------------------------ helpers
 export function esc(v) {
@@ -68,6 +71,21 @@ const STATUS = {
   SERVICE: ['Service', 'gray'], LOUNGE: ['Lounge', 'teal'],
 };
 export function statusLabel(code) { return (STATUS[code] || [code])[0]; }
+
+/** booking-service's cancellation reasons (English, part of the event contract) in Danish for the pages. */
+export function cancellationText(reason) {
+  if (!reason) return '';
+  const timeout = /^Payment not received within (\d+) (minute|second)s?$/.exec(reason);
+  if (timeout) {
+    const one = timeout[1] === '1';
+    const unit = timeout[2] === 'minute' ? (one ? 'minut' : 'minutter') : (one ? 'sekund' : 'sekunder');
+    return `Ikke betalt inden for ${timeout[1]} ${unit}`;
+  }
+  if (reason === 'Cancelled by passenger') return 'Annulleret af passageren';
+  if (reason === 'Flight cancelled') return 'Flyet er aflyst';
+  if (reason.startsWith('Payment failed')) return 'Betalingen blev afvist' + reason.slice('Payment failed'.length);
+  return reason;
+}
 export function badge(code) {
   const [label, color] = STATUS[code] || [code, 'gray'];
   return `<span class="badge ${color}" title="${esc(code)}">${esc(label)}</span>`;

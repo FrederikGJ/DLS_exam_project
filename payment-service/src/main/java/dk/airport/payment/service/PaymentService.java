@@ -87,6 +87,32 @@ public class PaymentService {
         return completed.size();
     }
 
+    /**
+     * Called from booking.payment.rejected (saga compensation, dev plan DP-32): booking-service received
+     * payment.completed for a booking that was already cancelled, so this one payment is refunded. Only a COMPLETED
+     * payment is refunded, so the event can arrive after booking.cancelled already refunded it (or twice) without a
+     * second refund.
+     *
+     * @return true if the payment was refunded now
+     */
+    @Transactional
+    public boolean refundRejectedPayment(Long paymentId, String bookingReference) {
+        Optional<Payment> found = payments.findById(paymentId);
+        if (found.isEmpty() || !found.get().getBookingReference().equalsIgnoreCase(bookingReference)) {
+            log.warn("booking.payment.rejected for unknown payment {} on booking {} - nothing to refund",
+                    paymentId, bookingReference);
+            return false;
+        }
+        Payment payment = found.get();
+        if (payment.getStatus() != PaymentStatus.COMPLETED) {
+            log.info("Payment {} for booking {} is already {} - no refund needed", paymentId, bookingReference,
+                    payment.getStatus());
+            return false;
+        }
+        doRefund(payment);
+        return true;
+    }
+
     private void doRefund(Payment payment) {
         payment.setStatus(PaymentStatus.REFUNDED);
         events.publish(PaymentEvents.REFUNDED, PaymentEvents.refunded(payment));

@@ -10,6 +10,7 @@ import org.springframework.context.annotation.Configuration;
  * <pre>
  *  airport.events (topic)  --payment.#-->  booking-service.payment-events
  *                          --flight.#-->   booking-service.flight-events
+ *                          --baggage.#-->  booking-service.baggage-events   (read model booking_overview, DP-28)
  *                                            | (rejected after 3 attempts)
  *                                            v
  *  airport.events.dlx (direct) --booking-service--> booking-service.dlq
@@ -39,6 +40,8 @@ public class RabbitConfig {
     private String paymentEventsQueue;
     @Value("${app.messaging.queues.flight-events}")
     private String flightEventsQueue;
+    @Value("${app.messaging.queues.baggage-events}")
+    private String baggageEventsQueue;
     @Value("${app.messaging.queues.dead-letter}")
     private String deadLetterQueue;
     @Value("${app.messaging.queues.notifications}")
@@ -92,6 +95,19 @@ public class RabbitConfig {
     @Bean
     public Binding flightEventsBinding() {
         return BindingBuilder.bind(flightEventsQueue()).to(airportEventsExchange()).with("flight.#");
+    }
+
+    @Bean
+    public Queue baggageEventsQueue() {
+        return QueueBuilder.durable(baggageEventsQueue)
+                .deadLetterExchange(deadLetterExchangeName)
+                .deadLetterRoutingKey(serviceName)
+                .build();
+    }
+
+    @Bean
+    public Binding baggageEventsBinding() {
+        return BindingBuilder.bind(baggageEventsQueue()).to(airportEventsExchange()).with("baggage.#");
     }
 
     // ---- notification-job's queue (dev plan DP-20), see the class comment

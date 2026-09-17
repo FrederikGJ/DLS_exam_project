@@ -7,10 +7,16 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.util.LinkedHashSet;
-import java.util.Set;
+import java.time.OffsetDateTime;
+import java.util.List;
+import java.util.Locale;
+import java.util.Optional;
 
-/** Maintains the local booking read-model from booking.* / flight.* events. */
+/**
+ * Maintains the local booking read-model from booking.* / flight.* events. Commutative (dev plan DP-31): the status
+ * follows the booking lifecycle, not the arrival order (see {@link BookingSnapshot#apply}), and every change locks the
+ * row first.
+ */
 @Service
 public class BookingSnapshotService {
 
@@ -24,26 +30,28 @@ public class BookingSnapshotService {
 
     @Transactional
     public BookingSnapshot upsert(String reference, String passengerName, String flightNumber, Long flightId,
-                                  String status) {
-        String ref = reference.trim().toUpperCase();
-        BookingSnapshot snapshot = snapshots.findById(ref)
-                .map(existing -> {
-                    existing.update(passengerName, flightNumber, flightId, status);
-                    return existing;
-                })
-                .orElseGet(() -> new BookingSnapshot(ref, passengerName, flightNumber, flightId, status));
-        log.info("Booking snapshot {} -> {}", ref, status);
-        return snapshots.save(snapshot);
+                                  String status, OffsetDateTime occurredAt) {
+        String ref = reference.trim().toUpperCase(Locale.ROOT);
+        Optional<BookingSnapshot> existing = snapshots.lockByBookingReference(ref);
+        if (existing.isEmpty()) {
+            log.info("Booking snapshot {} -> {}", ref, status);
+            return snapshots.save(new BookingSnapshot(ref, passengerName, flightNumber, flightId, status, occurredAt));
+        }
+        BookingSnapshot snapshot = existing.get();
+        if (snapshot.apply(passengerName, flightNumber, flightId, status, occurredAt)) {
+            log.info("Booking snapshot {} -> {}", ref, status);
+        } else {
+            log.info("Ignoring late {} for booking snapshot {}: it is already {} (event occurredAt {})",
+                    status, ref, snapshot.getStatus(), occurredAt);
+        }
+        return snapshot;
     }
 
     @Transactional
-    public int cancelForFlight(Long flightId, String flightNumber) {
-        Set<BookingSnapshot> affected = new LinkedHashSet<>();
-        if (flightId != null) affected.addAll(snapshots.findByFlightId(flightId));
-        if (flightNumber != null && !flightNumber.isBlank()) {
-            affected.addAll(snapshots.findByFlightNumberIgnoreCase(flightNumber));
-        }
-        affected.forEach(s -> s.setStatus("CANCELLED"));
+    public int cancelForFlight(Long flightId, String flightNumber, OffsetDateTime occurredAt) {
+        List<BookingSnapshot> affected = snapshots.lockByFlight(flightId,
+                flightNumber == null || flightNumber.isBlank() ? null : flightNumber);
+        affected.forEach(s -> s.cancel(occurredAt));
         return affected.size();
     }
 }

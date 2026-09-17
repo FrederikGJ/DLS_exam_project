@@ -14,15 +14,16 @@ public final class BaggageEvents {
 
     private BaggageEvents() {}
 
+    /** {@code lastLocation} was added in September 2026 for booking-service's read model: additive, no new version. */
     public record Registered(String tagNumber, String bookingReference, String passengerName, String flightNumber,
-                             BigDecimal weightKg, BaggageType type, BaggageStatus status) {}
+                             BigDecimal weightKg, BaggageType type, BaggageStatus status, String lastLocation) {}
 
     public record StatusChanged(String tagNumber, String bookingReference, String flightNumber,
                                 BaggageStatus oldStatus, BaggageStatus newStatus, String location) {}
 
     public static Registered registered(Baggage b) {
         return new Registered(b.getTagNumber(), b.getBookingReference(), b.getPassengerName(), b.getFlightNumber(),
-                b.getWeightKg(), b.getType(), b.getStatus());
+                b.getWeightKg(), b.getType(), b.getStatus(), b.getLastLocation());
     }
 
     public static StatusChanged statusChanged(Baggage b, BaggageStatus old, String location) {

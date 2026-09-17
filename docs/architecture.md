@@ -65,6 +65,7 @@ kopier af strukturen):
 | service     | `.service`   | Forretningslogik, transaktioner, ren domænelogik (pris, regler, Dijkstra) |
 | graphql     | `.graphql`   | `@Controller` med `@QueryMapping`/`@MutationMapping`/`@SchemaMapping`, input-records med Bean Validation, `GraphQlExceptionResolver` |
 | messaging   | `.messaging` | `EventEnvelope`, `EventPublisher` + `OutboxEvent`/`OutboxRelay` (transactional outbox), consumers + transaktionelle handlers, `ProcessedEvent` (idempotens) |
+| query       | `.query`     | Kun booking-service: read-modellen `booking_overview` (entity, projektor, `BookingQueryService`) – se *CQRS* |
 | config      | `.config`    | RabbitMQ-topologi (exchange, køer, DLQ), GraphQL-scalars                |
 
 Skema og seed-data styres af Flyway (`V1__init.sql`, `V2__seed.sql`, `V{n}__outbox.sql`); Hibernate kører med
@@ -202,7 +203,8 @@ sequenceDiagram
 1. `registerBaggage(reference, 23, CHECKED)` → baggage-service tjekker `booking_snapshot.status ∈ {CONFIRMED, CHECKED_IN}`,
    max 3 CHECKED pr. booking og max 32 kg → tag `BAG-XXXXXXXX`, event `baggage.registered`.
 2. `updateBaggageStatus(tag, LOADED, "Belt 4")` → event `baggage.status.changed`.
-3. Frontend viser bagage under "Min booking" (`baggageByBooking`).
+3. Frontend viser bagage under "Min booking" – via booking-services read model `bookingOverview`, som får
+   `baggage.registered`/`baggage.status.changed` på køen `booking-service.baggage-events` (se *CQRS*).
 
 ### Flow C – Aflysning
 
@@ -324,6 +326,7 @@ beskyttede operationer giver `UNAUTHORIZED`.
 | flight-service  | `createAirline`, `createAircraft`, `createFlight`, `updateFlightStatus`, `updateGate` | mutation | OPERATIONS                                  |
 | booking-service | `booking`, `bookingByReference`, `passenger`                                     | query    | Alle                                             |
 | booking-service | `bookingsByPassenger(email)`                                                     | query    | PASSENGER (kun egen e-mail) / OPERATIONS (alle)  |
+| booking-service | `bookingOverview`, `myBookings` (read model, se *CQRS*)                          | query    | PASSENGER / OPERATIONS (`myBookings`: tokenets e-mail) |
 | booking-service | `createBooking`, `cancelBooking`, `checkIn`                                      | mutation | PASSENGER / OPERATIONS                           |
 | payment-service | `payment`                                                                        | query    | Alle                                             |
 | payment-service | `paymentsByBooking`                                                              | query    | PASSENGER / OPERATIONS                           |
@@ -779,6 +782,197 @@ begge kun én bagage. Uden nøgle opfører API'et sig som før, så eksisterende
 Fravalgt: at lade serveren udlede "samme request" af indholdet (fx booking + vægt + type inden for et minut) – to
 ens kufferter på samme booking er en helt legitim situation, som kun klienten kan skelne fra et dobbeltklik.
 
+### CQRS: `booking_overview` til *Min booking*
+
+**Problemet.** *Min booking* viser en booking (booking-service), dens betalinger (payment-service) og dens bagage
+(baggage-service). Før DP-28 lavede browseren tre kald til tre services for at tegne siden, og hvert kald kunne fejle
+for sig. Siden læses langt oftere, end den ændres, og dens form – "alt om én booking" – passer ikke til nogen af de tre
+services' skrivemodeller.
+
+**Løsningen: booking-service er delt i en kommando- og en forespørgselsside.**
+
+| Side | Klasser | Data | Bruges af |
+|------|---------|------|-----------|
+| Kommando (write model) | `BookingService`, `BookingController` (mutations + `booking`, `bookingByReference`, `bookingsByPassenger`) | `booking` + `passenger`: normaliseret, med reglerne som constraints (unik reference, ét aktivt sæde) | Bookingflowet: opret, betal (frontenden poller `bookingByReference` på `CONFIRMED`), check-in, aflys |
+| Forespørgsel (read model) | `BookingQueryService`, `BookingOverviewController` (`bookingOverview(reference)`, `myBookings`) | `booking_overview` (`V3__booking_overview.sql`): én række pr. booking med en kopi af booking og passager og JSON-arrays `payments` og `baggage` | *Min booking* – **ét** kald og ét opslag på primær-/unik nøgle, ingen joins |
+| Bindeled | `BookingOverviewProjector` | Skriver som den eneste i `booking_overview`; skrivemodellen læser den aldrig | – |
+
+```mermaid
+flowchart LR
+  FE1[Frontend: book, betal, check-in, aflys] -- mutations --> CMD[BookingService]
+  CMD --> WM[(booking + passenger)]
+  CMD -- samme transaktion --> PRJ[BookingOverviewProjector]
+  MQ[(RabbitMQ airport.events)] -- "payment.* / flight.* / baggage.*" --> H[IncomingEventHandler]
+  H -- "payment.completed/failed, flight.*" --> CMD
+  H -- "payment.*, baggage.*" --> PRJ
+  PRJ --> RM[(booking_overview)]
+  FE2[Frontend: Min booking] -- "bookingOverview / myBookings" --> Q[BookingQueryService]
+  Q --> RM
+```
+
+**Hvordan read-modellen holdes opdateret.**
+
+| Kilde | Vej ind | Konsistens |
+|-------|---------|------------|
+| Bookingens egne ændringer: `createBooking`, `cancelBooking`, `checkIn`, `CONFIRMED`/`CANCELLED` efter betaling, flystatus/gate/aflyst fly | `BookingService` kalder `onBookingChanged` i kommandoens transaktion (også passagerens nye navn/pas på tidligere bookinger: `onPassengerChanged`) | Straks: når mutationen har svaret, viser `bookingOverview` den nye tilstand (read-your-writes). Rulles kommandoen tilbage, rulles kopien med |
+| `payment.completed`, `payment.failed`, `payment.refunded` | Køen `booking-service.payment-events` → `IncomingEventHandler` → `onPayment` | Eventually consistent: payment-services outbox-relay (hvert 500 ms) + levering. Målt i compose 17-09-2026 over 20 bookinger, fra `pay` svarer, til `bookingOverview` viser betalingen og `CONFIRMED`: median 289 ms, max 411 ms |
+| `baggage.registered`, `baggage.status.changed` | Ny kø `booking-service.baggage-events` (`baggage.#`) → samme handler → `onBaggage` | Som ovenfor. Samme måling fra `registerBaggage` svarer, til kufferten står i `bookingOverview`: median 157 ms, max 501 ms |
+
+**Vagter.** Projektionen skal tåle alt det, at-least-once-levering kan finde på:
+
+* *Dubletter:* eventet er allerede registreret i `processed_event` og når aldrig projektoren (samme mekanisme som alle
+  andre handlers).
+* *Ukendt booking:* payment-service tager imod betaling for en hvilken som helst reference, så et event kan handle om
+  en booking, booking-service ikke kender. Det logges og kvitteres – det må ikke ende i DLQ'en.
+* *Forkert rækkefølge:* hver betaling og kuffert er én linje (nøgle `paymentId`/`tagNumber`), og et nyt event *merges*
+  ind i linjen i stedet for at overskrive den (`OverviewPayment.merge`, `OverviewBaggage.merge`). Eventets `occurredAt`
+  afgør, hvis status der er nyest; felter, som kun det ældre event har (kortets sidste fire cifre findes ikke i
+  `payment.refunded`, vægt og type kun i `baggage.registered`), bevares. Merge er kommutativ og idempotent, så et
+  `payment.completed`, der overhales af `payment.refunded`, ikke genåbner refunderingen. Det sker ikke i dag – events
+  fra samme producent kommer i rækkefølge (se [events.md](events.md#leveringsgarantier)) – men read-modellen er dermed
+  ikke afhængig af den garanti. `OverviewLinesTest` tjekker alle seks rækkefølger af tre bagage-events.
+* *Samtidighed:* betalings-, bagage- og flyevents behandles på hver sin tråd (og i flere pods), og hver af dem skriver
+  hele rækken. Projektoren låser derfor rækken (`SELECT … FOR NO KEY UPDATE`), før den ændrer den; ellers kunne to
+  samtidige transaktioner læse samme version, og den sidste commit ville slette den andens ændring (lost update).
+  Alle transaktioner låser overview-rækken *før* booking-rækken, så de to låse aldrig tages i modsat rækkefølge
+  (ingen deadlock).
+
+**Hvorfor JSON-kolonner til betalinger og bagage?** Read-siden filtrerer aldrig på en enkelt betaling eller kuffert –
+den viser dem. Én række er dermed hele skærmen, og JSON'en ligner GraphQL-svaret (`JpaJsonConfig` lader Hibernate
+bruge Springs `ObjectMapper`, så tidsstempler står som ISO-8601-tekst og kan læses i psql). Skal en ny skærm søge i
+dem ("alle bookinger med tabt bagage"), er det en ny read model bygget til den forespørgsel, ikke et indeks i denne.
+
+**Hvorfor CQRS netop her.**
+
+1. *Læsning og skrivning har forskellig form.* Skrivemodellen er normaliseret, fordi reglerne (ét aktivt sæde pr.
+   fly, unik reference) håndhæves som constraints. Skærmen vil have booking, passager, betalinger og bagage i ét
+   dokument. Med CQRS får hver side sin egen model i stedet for et kompromis.
+2. *Ét kald i stedet for tre, og færre afhængigheder ved læsning.* Siden svarer, selvom payment-service eller
+   baggage-service er nede – den viser den seneste kendte tilstand.
+3. *Uafhængig skalering.* Læsningen er et opslag på en nøgle i én tabel uden fremmednøgler til skrivemodellen, så
+   tabellen kan flyttes til en read-replica eller en anden database uden kodeændringer i kommandosiden.
+4. *Data fra andre services uden synkrone kald.* Det er den samme idé som snapshots (se ovenfor), bare samlet til den
+   visning, der skal bruge dem.
+
+**Prisen.**
+
+* *Eventual consistency* for betalinger og bagage: siden skriver det, har en "Opdatér"-knap og henter selv igen, til
+  refunderingen er kommet, når passageren aflyser en betalt booking.
+* *Data findes to steder.* Passagerens navn og pas er kopieret ind i hver række og skal følge med, når passageren
+  bruger sin e-mail igen med nye oplysninger (`onPassengerChanged`, testet).
+* *Genopbygning.* Events gemmes ikke permanent (outboxen ryddes efter 7 dage), så en ny read model kan ikke bygges fra
+  historikken. Migrationen fylder booking-delen fra skrivemodellen, men betalinger og bagage for bookinger fra før
+  migrationen dukker først op ved næste event for bookingen. Et event store eller et replay-endpoint hos payment- og
+  baggage-service ville være næste skridt.
+* *Mere kode:* én kø, én consumer, én tabel, projektor og query-service mere i booking-service.
+
+**Fravalgt.**
+
+| Alternativ | Hvorfor ikke |
+|------------|--------------|
+| CQRS i alle fem services | flight-service og shop-service læser med filtre og ruteberegning direkte på deres egne tabeller, og ingen af deres visninger samler data fra andre services. En read model der ville kun være en kopi af skrivemodellen |
+| En separat `booking-view-service` med egen database | Renere adskillelse, men én JVM mere på en laptop, der allerede er presset (se [k8s/README.md](../k8s/README.md#ressourcer-på-en-laptop)). Da tabellen ikke har fremmednøgler og kun skrives af projektoren, kan den flyttes ud senere |
+| Projicere bookingens egne ændringer asynkront (lytte på egne `booking.*`-events) | Passageren ville se sin egen handling forsinket (check-in → siden viser stadig `CONFIRMED`). Synkron projektion koster én ekstra `UPDATE` i transaktionen |
+| API-komposition (frontenden eller en gateway kalder de tre services) | Stadig tre kald bag kulisserne, og siden fejler, når én af dem er nede. Sådan var det før |
+| Materialized view i Postgres | Betalinger og bagage findes ikke i `booking_db` – de ejes af andre services |
+
+**Sikkerhed.** `bookingOverview` og `myBookings` kræver PASSENGER eller OPERATIONS, fordi rækken indeholder betalings- og
+bagagedata, som payment-service og baggage-service kun giver til de roller. Som ved `bookingByReference` er
+bookingreferencen det, man skal kende for at slå en booking op (man kan booke for et familiemedlem), mens `myBookings`
+bruger e-mailen i tokenet. *Min booking* kræver derfor login i frontenden.
+
+**Test.** `BookingOverviewIntegrationTest` (7 tests mod rigtig Postgres + RabbitMQ): egne ændringer ses uden ventetid;
+betalings- og bagage-events projiceres (inkl. dublet og refundering, der beholder kortcifrene); events i omvendt
+rækkefølge giver samme resultat; events for ukendte bookinger kvitteres; flyevents når read-modellen via
+skrivemodellen; `myBookings` følger tokenets e-mail og passagerens seneste oplysninger; forespørgselssiden kræver
+login. `OverviewLinesTest` (7 unit tests) tester merge-reglerne. `scripts/e2e-smoke.sh` tjekker read-modellen efter
+Flow B og efter aflysningen i Flow C. Verificeret i browseren (Playwright mod compose, 17-09-2026): *Min booking*
+sender ét GraphQL-kald (`bookingOverview`) og intet til payment- eller baggage-service, siden sender en ulogget bruger
+til login, og når en betalt booking aflyses, skifter betalingen til *Refunderet* uden manuel genindlæsning.
+
+### Saga: bookingen som en kæde af lokale transaktioner
+
+En booking berører fire services, og der findes ingen transaktion på tværs af deres databaser (og skal ikke gøre det:
+2PC ville binde services' tilgængelighed sammen). Flow A og Flow C er derfor **choreograferede sagaer**: hver service
+udfører sit trin som én lokal transaktion, der publicerer et event via outboxen, og næste service reagerer på eventet.
+Går et trin galt, eller kommer virkeligheden i vejen, rulles der ikke tilbage – der udføres en **kompensation**, der
+semantisk ophæver det, der allerede er sket. Ingen central orkestrator kender hele forløbet; det står i tabellerne her.
+
+**Booking-sagaen (Flow A).**
+
+| # | Trin | Ejer | Lokal transaktion | Event ud | Kompensation, hvis sagaen ikke gennemføres |
+|---|------|------|-------------------|----------|---------------------------------------------|
+| 1 | Reservér sæde | booking-service | `booking` i `PENDING_PAYMENT`; sædet holdes af det partielle unikke indeks | `booking.created` | Aflys bookingen (`booking.cancelled`) – ved afvist betaling, passagerens aflysning eller **betalingstimeout** |
+| 2 | Betal | payment-service | `payment` `COMPLETED` eller `FAILED` | `payment.completed` / `payment.failed` | Refundér (`payment.refunded`) – når bookingen aflyses, eller når betalingen **kommer for sent** |
+| 3 | Bekræft | booking-service | `booking` → `CONFIRMED` (kun fra `PENDING_PAYMENT`) | `booking.confirmed` | Aflys (`booking.cancelled`) – ved passagerens aflysning eller aflyst fly |
+| 4 | Optag sæde / gør bagage mulig | flight-service, baggage-service | `seat.is_available = false`; `booking_snapshot` `CONFIRMED` | – | Frigiv sæde; snapshot `CANCELLED` (på `booking.cancelled`) |
+
+**Aflysnings-sagaen (Flow C)** er kompensationskæden for alle bookinger på et fly: `flight.cancelled` → booking-service
+aflyser hver booking (`booking.cancelled`, årsag "Flight cancelled") → payment-service refunderer, flight-service
+frigiver sædet, baggage-service sender bagagen til `RETURN_DESK` og aflyser snapshottet.
+
+**To kompensationer, der manglede før DP-32.**
+
+| Situation | Uden kompensation | Kompensation | Hvor |
+|-----------|-------------------|--------------|------|
+| Betalingen kommer aldrig | Bookingen hang i `PENDING_PAYMENT` for altid og holdt sædet i booking_db, selvom flight-service viste det som ledigt | `PaymentTimeoutJob` (hvert 30. sekund) aflyser bookinger, der har været ubetalt længere end `PAYMENT_TIMEOUT` (15 min.), med årsagen "Payment not received within 15 minutes" og publicerer `booking.cancelled` – præcis som enhver anden aflysning. Frontendens betalingsside viser fristen (`Booking.paymentDueAt`) | booking-service |
+| Betalingen kommer, efter bookingen er aflyst (timeout, passager eller fly kom først) | `payment.completed` blev ignoreret: passageren havde betalt for en aflyst booking og fik ingen penge tilbage | booking-service beholder `CANCELLED` og publicerer `booking.payment.rejected` med `paymentId`; payment-service refunderer netop den betaling (`payment.refunded`) | booking-service → payment-service |
+
+```mermaid
+sequenceDiagram
+  participant FE as Frontend
+  participant BS as booking-service
+  participant PS as payment-service
+  participant MQ as RabbitMQ
+  participant FS as flight-service
+
+  FE->>BS: createBooking
+  BS-->>MQ: booking.created (PENDING_PAYMENT, paymentDueAt = +15 min)
+  Note over BS: 15 minutter uden betaling
+  BS->>BS: PaymentTimeoutJob: CANCELLED "Payment not received within 15 minutes"
+  BS-->>MQ: booking.cancelled
+  MQ-->>FS: sæde frigives
+  MQ-->>PS: refundBooking – intet at refundere
+  FE->>PS: pay (siden var åben i 20 min)
+  PS-->>MQ: payment.completed
+  MQ-->>BS: payment.completed for CANCELLED booking
+  BS-->>MQ: booking.payment.rejected (paymentId)
+  MQ-->>PS: refundér betalingen
+  PS-->>MQ: payment.refunded
+  MQ-->>BS: read model: betalingen vises som refunderet under Min booking
+```
+
+**Hvorfor et nyt event og ikke bare `booking.cancelled` igen?** Et gentaget `booking.cancelled` ville også blive læst af
+flight-service og notification-job: passageren ville få en ekstra aflysningsmail, og – værre – flight-service ville
+frigive sædet med et *nyere* tidsstempel, selvom en anden passager måske allerede har booket og betalt for det (sædet
+er ledigt i booking-service, så snart den første booking er aflyst). `booking.payment.rejected` beskriver det, der
+faktisk skete, og kun payment-service reagerer på det. Det refunderer én bestemt betaling, så det er uskadeligt, hvis
+`booking.cancelled` allerede har refunderet den, eller hvis eventet kommer to gange: kun en `COMPLETED` betaling
+refunderes (testet i `PaymentServiceIntegrationTest`: uanset rækkefølge og gentagelser refunderes en betaling præcis
+én gang).
+
+**Samtidighed.** Timeout og betaling kan ramme samme booking i samme øjeblik. Jobbet aflyser hver booking i sin egen
+transaktion og tjekker status igen inde i den, og `@Version` på `booking` lader kun den første af de to committe. Vinder
+betalingen, er bookingen `CONFIRMED`, og jobbet lader den være ved næste kørsel; vinder jobbet, prøves
+`payment.completed` igen af listeneren, ser `CANCELLED` og udløser refunderingen. Med flere pods kører jobbet i hver
+pod, og samme mekanisme sikrer, at kun én af dem aflyser (og publicerer) – den anden transaktion rulles tilbage med sin
+outbox-række.
+
+**Test.** `SagaCompensationIntegrationTest` (booking-service, timeout sat til 3 s): en ubetalt booking aflyses med
+årsag og `booking.cancelled`, en betalt booking lades i fred, sædet kan bookes igen; en betaling for en aflyst booking
+giver præcis ét `booking.payment.rejected` (også når `payment.completed` leveres to gange), og bookingen forbliver
+`CANCELLED`. `PaymentServiceIntegrationTest` tester refunderingssiden.
+
+### Kommutative handlers
+
+Events fra forskellige producenter kan komme i vilkårlig orden, og en genlevering kan komme efter nyere events. Hver
+handler, der ændrer en kopi af andres data, er derfor skrevet, så slutresultatet er det samme uanset rækkefølge:
+booking-snapshottet i baggage-service går kun fremad i bookingens livscyklus, sæder og bookingens flystatus/gate er
+last-writer-wins på eventets `occurredAt` med `CANCELLED` som endelig tilstand, og read-modellens betalings- og
+bagagelinjer flettes på samme måde. Rækkelåse og `@Version` (på `booking` og `baggage`) sørger for, at to tråde ikke
+overskriver hinanden. Regler, begrundelser og test (alle permutationer af eventrækkefølgen) står i
+[events.md](events.md#rækkefølge-og-kommutativitet).
+
 ## Designvalg (hvor spec'en gav frihed)
 
 | Emne | Valg | Begrundelse |
@@ -807,7 +1001,8 @@ ens kufferter på samme booking er en helt legitim situation, som kun klienten k
 | Postgres | 5 separate containere / StatefulSets | Afspejler Kubernetes-opsætningen og "én database pr. service" |
 | pgAdmin i Kubernetes | Dev/demo-værktøj i `k8s/tools/` bag Ingress på `/pgadmin`, uden login (desktop mode); de fem databaser forudregistreret (ConfigMap) med kodeord fra en pgpass-fil (Secret) | Viser "én database pr. service" og eventflowet live i en demo; ikke en del af systemet og fjernes med én linje i `kustomization.yaml` |
 | Strukturerede logs | Spring Boots indbyggede `logging.structured.format.console=logstash` i `prod`-profil | Ingen ekstra dependency |
-| Ubetalte bookinger | Forbliver `PENDING_PAYMENT` (ingen timeout) | Ikke krævet; kendt begrænsning – sædet er reserveret i booking_db men vises ledigt i flight-service indtil betaling |
+| CQRS | Read model `booking_overview` i booking-service til *Min booking*; egne ændringer projiceres i samme transaktion, betalinger og bagage fra events | Se *Designmønstre → CQRS* |
+| Ubetalte bookinger | Aflyses efter `PAYMENT_TIMEOUT` (15 min.) af `PaymentTimeoutJob`; en betaling, der kommer bagefter, refunderes via `booking.payment.rejected` | Se *Designmønstre → Saga*. 15 minutter er nok til at betale og kort nok til, at et opgivet sæde hurtigt kan bookes af andre |
 | Login | Keycloak 26 med realm-import (`realm-airport.json`) og faste testbrugere `anna`/`ops` | Se *Sikkerhed (login og roller)*, designvalg 1 |
 | Autorisation | Læse-queries offentlige; `@PreAuthorize` pr. operation på controller-metoderne (én GraphQL-endpoint) | Se *Sikkerhed (login og roller)*, designvalg 2 |
 | Token-validering | `iss` låst med `KC_HOSTNAME`, nøgler fra intern `JWK_SET_URI`, ingen discovery | Se *Sikkerhed (login og roller)*, designvalg 3 |

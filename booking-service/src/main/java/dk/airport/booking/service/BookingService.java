@@ -4,6 +4,7 @@ import dk.airport.booking.domain.*;
 import dk.airport.booking.graphql.input.PassengerInput;
 import dk.airport.booking.messaging.BookingEvents;
 import dk.airport.booking.messaging.EventPublisher;
+import dk.airport.booking.query.BookingOverviewProjector;
 import dk.airport.booking.repository.BookingRepository;
 import dk.airport.booking.repository.PassengerRepository;
 import org.slf4j.Logger;
@@ -12,9 +13,17 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
 
+/**
+ * Command side of booking-service: every change to a booking or passenger happens here, publishes its event through
+ * the outbox and updates the read model {@code booking_overview} through {@link BookingOverviewProjector} in the same
+ * transaction (CQRS, dev plan DP-28). The queries below read the write model and serve the booking flow itself
+ * (e.g. polling for CONFIRMED after payment); "Min booking" reads the overview via BookingQueryService.
+ */
 @Service
 @Transactional(readOnly = true)
 public class BookingService {
@@ -26,14 +35,16 @@ public class BookingService {
     private final PassengerRepository passengers;
     private final FlightClient flightClient;
     private final EventPublisher events;
+    private final BookingOverviewProjector overview;
     private final BookingReferenceGenerator references = new BookingReferenceGenerator();
 
     public BookingService(BookingRepository bookings, PassengerRepository passengers,
-                          FlightClient flightClient, EventPublisher events) {
+                          FlightClient flightClient, EventPublisher events, BookingOverviewProjector overview) {
         this.bookings = bookings;
         this.passengers = passengers;
         this.flightClient = flightClient;
         this.events = events;
+        this.overview = overview;
     }
 
     // ------------------------------------------------------------ queries
@@ -77,6 +88,7 @@ public class BookingService {
                 .map(p -> {
                     p.update(input.firstName().trim(), input.lastName().trim(),
                             input.passportNumber().trim().toUpperCase(), input.dateOfBirth());
+                    overview.onPassengerChanged(p);
                     return p;
                 })
                 .orElseGet(() -> passengers.save(new Passenger(input.firstName().trim(), input.lastName().trim(),
@@ -111,6 +123,7 @@ public class BookingService {
         }
 
         events.publish(BookingEvents.CREATED, BookingEvents.payload(booking, null));
+        overview.onBookingChanged(booking);
         log.info("Created booking {} for flight {} seat {} ({} {})", booking.getBookingReference(),
                 booking.getFlightNumber(), booking.getSeatNumber(), booking.getPrice(), booking.getCurrency());
         return booking;
@@ -119,8 +132,9 @@ public class BookingService {
     @Transactional
     public Booking cancelBooking(String reference) {
         Booking booking = requireBooking(reference);
-        booking.cancel();
-        events.publish(BookingEvents.CANCELLED, BookingEvents.payload(booking, "Cancelled by passenger"));
+        booking.cancel("Cancelled by passenger");
+        events.publish(BookingEvents.CANCELLED, BookingEvents.payload(booking, booking.getCancellationReason()));
+        overview.onBookingChanged(booking);
         log.info("Booking {} cancelled by passenger", booking.getBookingReference());
         return booking;
     }
@@ -130,15 +144,20 @@ public class BookingService {
         Booking booking = requireBooking(reference);
         booking.checkIn();
         events.publish(BookingEvents.CHECKED_IN, BookingEvents.payload(booking, null));
+        overview.onBookingChanged(booking);
         log.info("Booking {} checked in", booking.getBookingReference());
         return booking;
     }
 
     // ------------------------------------------------------------ event driven transitions
 
-    /** payment.completed */
+    /**
+     * payment.completed. Normally confirms the booking. If the booking was cancelled before the payment arrived (the
+     * payment timeout, the passenger or a cancelled flight got there first), the money must go back: the booking stays
+     * CANCELLED and booking.payment.rejected asks payment-service to refund this payment (saga compensation, DP-32).
+     */
     @Transactional
-    public void onPaymentCompleted(String reference) {
+    public void onPaymentCompleted(String reference, Long paymentId, BigDecimal amount, String currency) {
         Optional<Booking> found = bookings.findByBookingReference(normalizeReference(reference));
         if (found.isEmpty()) {
             log.warn("payment.completed for unknown booking {}", reference);
@@ -149,12 +168,18 @@ public class BookingService {
             case PENDING_PAYMENT -> {
                 booking.confirm();
                 events.publish(BookingEvents.CONFIRMED, BookingEvents.payload(booking, null));
+                overview.onBookingChanged(booking);
                 log.info("Booking {} confirmed after payment", booking.getBookingReference());
             }
             case CONFIRMED, CHECKED_IN -> log.info("Booking {} already {} - ignoring payment.completed",
                     booking.getBookingReference(), booking.getStatus());
-            case CANCELLED -> log.warn("payment.completed received for CANCELLED booking {} - no state change",
-                    booking.getBookingReference());
+            case CANCELLED -> {
+                events.publish(BookingEvents.PAYMENT_REJECTED,
+                        BookingEvents.paymentRejected(booking, paymentId, amount, currency));
+                log.warn("Payment {} arrived for CANCELLED booking {} ({}) - published {} so it is refunded",
+                        paymentId, booking.getBookingReference(), booking.getCancellationReason(),
+                        BookingEvents.PAYMENT_REJECTED);
+            }
             default -> log.warn("payment.completed for booking {} in unhandled status {} - ignoring",
                     booking.getBookingReference(), booking.getStatus());
         }
@@ -170,10 +195,11 @@ public class BookingService {
         }
         Booking booking = found.get();
         if (booking.getStatus() == BookingStatus.PENDING_PAYMENT) {
-            booking.cancel();
             String reason = "Payment failed"
                     + (failureReason == null || failureReason.isBlank() ? "" : ": " + failureReason);
+            booking.cancel(reason);
             events.publish(BookingEvents.CANCELLED, BookingEvents.payload(booking, reason));
+            overview.onBookingChanged(booking);
             log.info("Booking {} cancelled: {}", booking.getBookingReference(), reason);
         } else {
             log.info("payment.failed for booking {} in status {} - ignoring",
@@ -181,28 +207,63 @@ public class BookingService {
         }
     }
 
-    /** flight.cancelled */
+    /**
+     * Payment timeout (saga compensation, DP-32): cancels a booking that is still unpaid and was created before
+     * {@code cutoff}, which frees its seat for others. Called by PaymentTimeoutJob, one booking per transaction.
+     * Checked again inside the transaction, and {@code @Version} on Booking stops a payment.completed that commits at
+     * the same moment from being overwritten; the loser is retried and then sees the other's result.
+     *
+     * @return true if the booking was cancelled now
+     */
     @Transactional
-    public int onFlightCancelled(Long flightId) {
-        List<Booking> affected = bookings.findByFlightIdAndStatusNot(flightId, BookingStatus.CANCELLED);
-        for (Booking booking : affected) {
-            booking.cancel();
-            booking.updateFlightSnapshot("CANCELLED", null);
-            events.publish(BookingEvents.CANCELLED, BookingEvents.payload(booking, "Flight cancelled"));
+    public boolean expireUnpaidBooking(Long bookingId, OffsetDateTime cutoff, String reason) {
+        Optional<Booking> found = bookings.findById(bookingId);
+        if (found.isEmpty() || found.get().getStatus() != BookingStatus.PENDING_PAYMENT
+                || !found.get().getCreatedAt().isBefore(cutoff)) {
+            return false;
         }
-        // bookings already cancelled still get the snapshot updated
-        bookings.findByFlightId(flightId).forEach(b -> b.updateFlightSnapshot("CANCELLED", null));
-        log.info("Flight {} cancelled -> {} booking(s) cancelled", flightId, affected.size());
-        return affected.size();
+        Booking booking = found.get();
+        booking.cancel(reason);
+        events.publish(BookingEvents.CANCELLED, BookingEvents.payload(booking, reason));
+        overview.onBookingChanged(booking);
+        log.info("Booking {} cancelled: {}", booking.getBookingReference(), reason);
+        return true;
     }
 
-    /** flight.status.changed / flight.gate.changed */
+    /** flight.cancelled */
     @Transactional
-    public void onFlightSnapshotChanged(Long flightId, String flightStatus, String gate) {
-        List<Booking> affected = bookings.findByFlightId(flightId);
-        affected.forEach(b -> b.updateFlightSnapshot(flightStatus, gate));
-        log.info("Flight {} snapshot updated on {} booking(s): status={}, gate={}",
-                flightId, affected.size(), flightStatus, gate);
+    public int onFlightCancelled(Long flightId, OffsetDateTime occurredAt) {
+        int cancelled = 0;
+        // one pass over all bookings on the flight: bookings already cancelled still get the snapshot updated
+        for (Booking booking : bookings.findByFlightIdOrderById(flightId)) {
+            booking.applyFlightSnapshot("CANCELLED", null, occurredAt);
+            if (!booking.isCancelled()) {
+                booking.cancel("Flight cancelled");
+                events.publish(BookingEvents.CANCELLED, BookingEvents.payload(booking, "Flight cancelled"));
+                cancelled++;
+            }
+            overview.onBookingChanged(booking);
+        }
+        log.info("Flight {} cancelled -> {} booking(s) cancelled", flightId, cancelled);
+        return cancelled;
+    }
+
+    /**
+     * flight.status.changed / flight.gate.changed. An event older than what a booking already knows changes nothing
+     * (see {@link Booking#applyFlightSnapshot}), so flight events may arrive in any order.
+     */
+    @Transactional
+    public void onFlightSnapshotChanged(Long flightId, String flightStatus, String gate, OffsetDateTime occurredAt) {
+        List<Booking> affected = bookings.findByFlightIdOrderById(flightId);
+        int changed = 0;
+        for (Booking b : affected) {
+            if (b.applyFlightSnapshot(flightStatus, gate, occurredAt)) {
+                changed++;
+                overview.onBookingChanged(b);
+            }
+        }
+        log.info("Flight {} event (status={}, gate={}, occurredAt {}) changed {} of {} booking(s)",
+                flightId, flightStatus, gate, occurredAt, changed, affected.size());
     }
 
     private static String normalizeReference(String reference) {
