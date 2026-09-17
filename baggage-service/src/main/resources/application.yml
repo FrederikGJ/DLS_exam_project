@@ -22,6 +22,8 @@ spring:
     publisher-confirm-type: simple      # OutboxRelay waits for broker confirms before marking rows as sent
     listener:
       simple:
+        # a consumed message continues the trace of its `traceparent` header (traceId in the handler's log lines)
+        observation-enabled: true
         acknowledge-mode: auto
         default-requeue-rejected: false     # after retries -> reject -> dead-letter queue
         retry:
@@ -69,7 +71,17 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics   # metrics: outbox.pending (unpublished events)
+        # metrics: outbox.pending (unpublished events); prometheus: everything for Prometheus (dev plan DP-33)
+        include: health,info,metrics,prometheus
+  metrics:
+    tags:
+      application: ${spring.application.name}   # on every metric, so dashboards can group by service
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true  # histogram buckets, so Grafana can show the 95th percentile per service
+  tracing:
+    sampling:
+      probability: 1.0            # every request/message gets a sampled trace id (nothing is exported)
   endpoint:
     health:
       probes:

@@ -1,7 +1,7 @@
 # Demo stack = the base airport system + optional components that are not part of the system itself:
 #   - k8s/components/ollama            the local LLM behind shop-service's askRoute (DP-16)
 #   - k8s/components/notification-job  notification-job as a KEDA ScaledJob (DP-21) - needs KEDA installed first
-# Further components (e.g. observability) are added to the `components` list.
+#   - k8s/components/observability     Prometheus, Loki, Alloy and Grafana (DP-34) -> http://localhost:8090/grafana/
 #
 #     docker compose --profile ai build ollama                        # builds airport/ollama:local (model baked in)
 #     kind load docker-image airport/ollama:local --name airport      # put the image on the kind node
@@ -21,3 +21,4 @@ resources:
 components:
   - ../../components/ollama
   - ../../components/notification-job
+  - ../../components/observability

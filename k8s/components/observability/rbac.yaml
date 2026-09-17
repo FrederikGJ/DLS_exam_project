@@ -1,0 +1,75 @@
+# Read-only access for service discovery (dev plan DP-34). Namespaced Roles, not ClusterRoles: Prometheus and Alloy
+# only look at pods in the namespace airport, so they cannot read anything else in the cluster.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: airport
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: prometheus-discovery
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: airport
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: prometheus-discovery
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: airport
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: prometheus-discovery
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: airport
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alloy
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/part-of: airport
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: alloy-logs
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/part-of: airport
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: alloy-logs
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/part-of: airport
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: alloy-logs
+subjects:
+  - kind: ServiceAccount
+    name: alloy
+    namespace: airport

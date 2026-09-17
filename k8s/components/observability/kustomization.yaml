@@ -1,0 +1,43 @@
+# Kustomize Component (dev plans DP-34/DP-35): observability for the airport system - metrics, logs and alarms.
+#
+#   Prometheus  scrapes every pod with the annotation prometheus.io/scrape=true (the five services) and RabbitMQ's
+#               queue metrics, and evaluates the alert rules in config/alerts.yml
+#   Loki        stores the logs (PVC 2 Gi, 3 days)
+#   Alloy       DaemonSet that reads the logs of all pods in the namespace airport through the Kubernetes API
+#   Grafana     at http://localhost:8090/grafana/ - data sources, the dashboard "Airport - services og events" and
+#               a link from a trace id in a log line to all log lines of that trace
+#
+# Not part of the base: `kubectl apply -k k8s/` runs no observability pods. Overlays opt in with
+# `components: [../../components/observability]` (see k8s/overlays/demo). docker compose uses the same config files
+# with `--profile observability` (docker-compose.yml). How it fits together: docs/architecture.md "Observability".
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - rbac.yaml
+  - prometheus.yaml
+  - loki.yaml
+  - alloy.yaml
+  - grafana.yaml
+  - grafana-ingress.yaml
+
+# The hash suffix Kustomize adds to generated ConfigMaps changes with their content, so a changed config file rolls
+# the pods that mount it on the next apply.
+configMapGenerator:
+  - name: prometheus-config
+    files:
+      - config/prometheus.yml
+      - config/alerts.yml
+  - name: loki-config
+    files:
+      - config/loki.yaml
+  - name: alloy-config
+    files:
+      - config.alloy=config/k8s.alloy
+  - name: grafana-provisioning
+    files:
+      - datasources.yaml=config/grafana-datasources.yaml
+      - dashboards.yaml=config/grafana-dashboards.yaml
+  - name: grafana-dashboards
+    files:
+      - config/airport-dashboard.json

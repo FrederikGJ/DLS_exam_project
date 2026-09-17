@@ -34,6 +34,11 @@ import java.util.List;
  * relay dies between confirm and commit the row is sent again with the same {@code eventId}, and the
  * consumer's {@code processed_event} table drops the duplicate. Order per producer is preserved because
  * there is one active relay, rows go out by {@code id}, and a failed batch is retried as a whole.
+ * <p>
+ * Tracing (dev plan DP-33): each message gets the {@code traceparent} header stored with its row, i.e. the trace of
+ * the request or event that published it - not the relay's own poll. That is also why RabbitTemplate observation
+ * stays off ({@code spring.rabbitmq.template.observation-enabled} defaults to false): it would overwrite the header
+ * with the relay's context. Confirmed events are counted as {@code events.published}.
  */
 @Component
 public class OutboxRelay {
@@ -42,21 +47,25 @@ public class OutboxRelay {
 
     /** Arbitrary constant. Each service owns its database, so one lock key per service is enough. */
     static final long LOCK_KEY = 0x0A1B0B0AL;
+    /** W3C Trace Context header, read by the consumer's listener observation. */
+    static final String TRACEPARENT_HEADER = "traceparent";
 
     private final OutboxEventRepository outbox;
     private final RabbitTemplate rabbitTemplate;
     private final EntityManager entityManager;
     private final OutboxProperties props;
     private final String exchange;
+    private final EventMetrics metrics;
 
     public OutboxRelay(OutboxEventRepository outbox, RabbitTemplate rabbitTemplate, EntityManager entityManager,
                        OutboxProperties props, MeterRegistry meterRegistry,
-                       @Value("${app.messaging.exchange}") String exchange) {
+                       @Value("${app.messaging.exchange}") String exchange, EventMetrics metrics) {
         this.outbox = outbox;
         this.rabbitTemplate = rabbitTemplate;
         this.entityManager = entityManager;
         this.props = props;
         this.exchange = exchange;
+        this.metrics = metrics;
         Gauge.builder("outbox.pending", outbox, OutboxEventRepository::countByPublishedAtIsNull)
                 .description("Events written to the outbox but not yet confirmed by RabbitMQ")
                 .strongReference(true)
@@ -84,6 +93,7 @@ public class OutboxRelay {
             OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
             for (OutboxEvent event : batch) {
                 event.markPublished(now);
+                metrics.published(event.getEventType());
                 log.info("Published event {} eventId={}", event.getEventType(), event.getEventId());
             }
         } catch (AmqpException ex) {
@@ -130,6 +140,9 @@ public class OutboxRelay {
         properties.setMessageId(event.getEventId());
         properties.setType(event.getEventType());
         properties.setTimestamp(Date.from(event.getCreatedAt().toInstant()));
+        if (event.getTraceparent() != null) {
+            properties.setHeader(TRACEPARENT_HEADER, event.getTraceparent());
+        }
         return new Message(event.getPayload().getBytes(StandardCharsets.UTF_8), properties);
     }
 }

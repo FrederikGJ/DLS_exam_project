@@ -30,11 +30,12 @@ public class FlightEventHandler {
         this.processedEvents = processedEvents;
     }
 
+    /** Applies one event; returns false if it was a duplicate (eventId already in processed_event) and was skipped. */
     @Transactional
-    public void handle(EventEnvelope envelope) {
+    public boolean handle(EventEnvelope envelope) {
         if (processedEvents.existsById(envelope.eventId())) {
             log.info("Skipping already processed event {} eventId={}", envelope.eventType(), envelope.eventId());
-            return;
+            return false;
         }
         JsonNode p = envelope.payload();
         if (FLIGHT_CANCELLED.equals(envelope.eventType())) {
@@ -47,5 +48,6 @@ public class FlightEventHandler {
             log.debug("Ignoring event type {}", envelope.eventType());
         }
         processedEvents.save(new ProcessedEvent(envelope.eventId(), envelope.eventType()));
+        return true;
     }
 }

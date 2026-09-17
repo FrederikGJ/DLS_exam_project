@@ -1,0 +1,81 @@
+// Grafana Alloy in Kubernetes (dev plan DP-34): ships the logs of every pod on this node in the namespace airport to
+// Loki. It runs as a DaemonSet (one per node) and reads the logs through the Kubernetes API (pods/log), so it needs
+// no hostPath mounts and no root.
+
+discovery.kubernetes "pods" {
+  role = "pod"
+
+  namespaces {
+    names = ["airport"]
+  }
+
+  // only the pods on this node - the other nodes have their own Alloy
+  selectors {
+    role  = "pod"
+    field = "spec.nodeName=" + sys.env("NODE_NAME")
+  }
+}
+
+// Labels to query by: {app="booking-service"}, {pod=...}. Few and low-cardinality, as Loki wants its labels.
+discovery.relabel "pods" {
+  targets = discovery.kubernetes.pods.targets
+
+  rule {
+    source_labels = ["__meta_kubernetes_namespace"]
+    target_label  = "namespace"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+    target_label  = "app"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_name"]
+    target_label  = "pod"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_container_name"]
+    target_label  = "container"
+  }
+}
+
+loki.source.kubernetes "pods" {
+  targets    = discovery.relabel.pods.output
+  forward_to = [loki.process.spring.receiver]
+}
+
+// The services log JSON in the prod profile (logstash format). The level becomes a label; traceId and spanId become
+// structured metadata - searchable ({app=~".+-service"} | traceId="...") without creating one stream per trace.
+// Lines that are not JSON (Keycloak, PostgreSQL, nginx, RabbitMQ) pass through unchanged.
+loki.process "spring" {
+  stage.json {
+    expressions = {
+      level   = "level",
+      traceId = "traceId",
+      spanId  = "spanId",
+    }
+  }
+
+  stage.labels {
+    values = {
+      level = "",
+    }
+  }
+
+  stage.structured_metadata {
+    values = {
+      traceId = "",
+      spanId  = "",
+    }
+  }
+
+  forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

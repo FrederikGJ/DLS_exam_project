@@ -46,11 +46,12 @@ public class IncomingEventHandler {
         this.processedEvents = processedEvents;
     }
 
+    /** Applies one event; returns false if it was a duplicate (eventId already in processed_event) and was skipped. */
     @Transactional
-    public void handle(EventEnvelope envelope) {
+    public boolean handle(EventEnvelope envelope) {
         if (processedEvents.existsById(envelope.eventId())) {
             log.info("Skipping already processed event {} eventId={}", envelope.eventType(), envelope.eventId());
-            return;
+            return false;
         }
         JsonNode p = envelope.payload();
         // the producer's clock decides which of two events about the same thing is newer (dev plan DP-31); an event
@@ -83,6 +84,7 @@ public class IncomingEventHandler {
             default -> log.debug("Ignoring event type {}", envelope.eventType());
         }
         processedEvents.save(new ProcessedEvent(envelope.eventId(), envelope.eventType()));
+        return true;
     }
 
     /** The payment as this event describes it; {@code status} follows from the event type. */

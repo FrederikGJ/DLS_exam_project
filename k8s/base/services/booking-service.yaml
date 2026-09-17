@@ -71,6 +71,12 @@ spec:
       labels:
         app.kubernetes.io/name: booking-service
         app.kubernetes.io/part-of: airport
+      # Picked up by Prometheus' pod discovery when the observability component is deployed (dev plan DP-33/34);
+      # harmless without it. /actuator/prometheus is public (see SecurityConfig), the Ingress does not route it.
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /actuator/prometheus
     spec:
       # Hardening (dev plan DP-25, checked by Trivy in CI): the image already runs as the unprivileged user `app`
       # (uid 100, gid 101); here Kubernetes enforces it, and the containers get no capabilities, no privilege

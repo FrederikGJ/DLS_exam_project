@@ -1,0 +1,53 @@
+# Alert rules (dev plan DP-35), shared by Kubernetes and compose. Prometheus evaluates them every 15 s; firing alerts
+# are shown in Prometheus (/alerts) and in Grafana under Alerting -> Alert rules (data source-managed). There is no
+# Alertmanager in the demo, so nobody is paged - in production an Alertmanager would route them to a chat or pager.
+# Why these five and what to do when they fire: docs/architecture.md "Observability".
+groups:
+  - name: airport
+    rules:
+      - alert: ServiceDown
+        expr: up{job="airport-services"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.app }} answers no scrapes"
+          description: "Prometheus could not scrape /actuator/prometheus on {{ $labels.instance }} for 1 minute."
+
+      - alert: OutboxBacklog
+        expr: max by (application) (outbox_pending) > 20
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.application }}: {{ $value }} events are waiting in the outbox"
+          description: "Events are committed but not confirmed by RabbitMQ - is the broker down or blocked?"
+
+      - alert: MessagesDeadLettered
+        expr: sum by (queue) (rabbitmq_detailed_queue_messages{queue=~".*\\.dlq"}) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} message(s) in {{ $labels.queue }}"
+          description: "A consumer rejected a message three times. Look up the eventId in the logs, fix the cause, then move the message back."
+
+      - alert: EventHandlingFailing
+        expr: sum by (application, type) (rate(events_consumed_total{outcome="failed"}[5m])) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.application }} keeps failing on {{ $labels.type }}"
+          description: "Handler attempts fail (retries included); the messages will end in the dead-letter queue."
+
+      - alert: HighServerErrorRate
+        expr: >-
+          sum by (application) (rate(http_server_requests_seconds_count{status=~"5.."}[5m]))
+          / sum by (application) (rate(http_server_requests_seconds_count[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.application }}: more than 5 % of HTTP requests end with 5xx"
+          description: "GraphQL errors are HTTP 200 and not counted here; see the service's logs."

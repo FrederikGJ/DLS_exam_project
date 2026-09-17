@@ -1,0 +1,42 @@
+// Grafana Alloy in docker compose (`docker compose --profile observability up`, dev plan DP-34): ships the logs of
+// the containers of this compose project to Loki, read through the Docker socket (mounted read-only; dev only).
+// In the dev profile the services log plain text with [traceId-spanId] in every line, so no JSON parsing here -
+// search with a line filter: {app=~".+-service"} |= "<traceId>".
+
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "containers" {
+  targets = discovery.docker.containers.targets
+
+  // only containers started by docker compose, labelled with their compose service name
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    regex         = ".+"
+    action        = "keep"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "app"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+}
+
+loki.source.docker "containers" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.containers.output
+  forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

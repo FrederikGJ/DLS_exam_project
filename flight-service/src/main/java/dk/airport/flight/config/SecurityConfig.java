@@ -29,7 +29,7 @@ import java.util.List;
  * without a token is anonymous there and a guarded operation then fails with {@code UNAUTHORIZED}; a token with
  * the wrong role gives {@code FORBIDDEN} (mapped in GraphQlExceptionResolver). An invalid or expired token is
  * rejected with HTTP 401 before the request reaches GraphQL. Health probes and GraphiQL (dev only) are public;
- * the remaining actuator endpoints require OPERATIONS.
+ * the remaining actuator endpoints require OPERATIONS, except /actuator/prometheus (scraped by Prometheus).
  *
  * <p>CORS is handled here (Spring Security's CorsFilter runs before authentication, so preflight requests never
  * need a token) from the same {@code CORS_ALLOWED_ORIGINS} variable as before.
@@ -52,6 +52,9 @@ public class SecurityConfig {
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/info").permitAll()
+                        // scraped by Prometheus without a token; operational numbers only, and the Ingress does not
+                        // route /actuator at all (dev plan DP-33)
+                        .requestMatchers("/actuator/prometheus").permitAll()
                         .requestMatchers(graphqlPath).permitAll()       // per-operation checks via @PreAuthorize
                         .requestMatchers("/graphiql", "/graphiql/**").permitAll()
                         .anyRequest().hasRole("OPERATIONS"))

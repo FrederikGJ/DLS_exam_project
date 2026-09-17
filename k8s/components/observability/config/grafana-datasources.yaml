@@ -1,0 +1,35 @@
+# Grafana data sources (dev plan DP-34), provisioned at start-up - the same file for Kubernetes and compose, where
+# the services are called prometheus and loki as well.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      # list Prometheus' rules (alerts.yml) under Alerting -> Alert rules; Prometheus has no ruler API, so they stay
+      # read-only in Grafana and are only changed in the file
+      manageAlerts: true
+      prometheusType: Prometheus
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      manageAlerts: false          # no Loki alert rules
+      # A trace id in a log line (JSON field in Kubernetes, [traceId-spanId] in compose) becomes a link that shows
+      # every log line of that trace, from every service.
+      derivedFields:
+        - name: traceId
+          matcherType: regex
+          matcherRegex: '(?:"traceId":"|\[)([0-9a-f]{32})'
+          datasourceUid: loki
+          url: '{app=~".+-service"} |= "${__value.raw}"'
+          urlDisplayLabel: Alle logs for denne trace

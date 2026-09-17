@@ -1,0 +1,44 @@
+# Loki as a single process with its index and chunks on local disk (dev plan DP-34) - enough for one laptop, shared by
+# Kubernetes (PVC /loki) and compose (volume /loki). Logs are kept 3 days. Scaling out would mean object storage
+# (S3/MinIO) and the microservice deployment mode instead.
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  replication_factor: 1
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: "2026-01-01"
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  retention_period: 72h
+  allow_structured_metadata: true     # traceId/spanId are structured metadata, not labels (see k8s.alloy)
+  volume_enabled: true
+
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem
+
+analytics:
+  reporting_enabled: false

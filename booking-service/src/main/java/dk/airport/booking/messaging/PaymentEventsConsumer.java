@@ -22,10 +22,12 @@ public class PaymentEventsConsumer {
 
     private final ObjectMapper objectMapper;
     private final IncomingEventHandler handler;
+    private final EventMetrics metrics;
 
-    public PaymentEventsConsumer(ObjectMapper objectMapper, IncomingEventHandler handler) {
+    public PaymentEventsConsumer(ObjectMapper objectMapper, IncomingEventHandler handler, EventMetrics metrics) {
         this.objectMapper = objectMapper;
         this.handler = handler;
+        this.metrics = metrics;
     }
 
     @RabbitListener(queues = "${app.messaging.queues.payment-events}")
@@ -34,13 +36,18 @@ public class PaymentEventsConsumer {
         try {
             envelope = objectMapper.readValue(message.getBody(), EventEnvelope.class);
         } catch (IOException e) {
+            metrics.consumed(EventMetrics.UNREADABLE, EventMetrics.FAILED);
             throw new UncheckedIOException("Malformed event envelope", e);
         }
         MDC.put("eventId", envelope.eventId());
         MDC.put("eventType", envelope.eventType());
         try {
             log.info("Received event {} eventId={}", envelope.eventType(), envelope.eventId());
-            handler.handle(envelope);
+            boolean processed = handler.handle(envelope);
+            metrics.consumed(envelope.eventType(), processed ? EventMetrics.PROCESSED : EventMetrics.DUPLICATE);
+        } catch (RuntimeException e) {
+            metrics.consumed(envelope.eventType(), EventMetrics.FAILED);   // each attempt; the 3rd goes to the DLQ
+            throw e;
         } finally {
             MDC.remove("eventId");
             MDC.remove("eventType");

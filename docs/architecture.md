@@ -46,7 +46,7 @@ Regler der overholdes:
 * Synkront: frontend → service via GraphQL over HTTP (Spring for GraphQL) med Keycloak-JWT som Bearer-token på
   beskyttede operationer (se *Sikkerhed*). `baggage-service` udstiller derudover et versioneret REST-API
   (`/api/baggage/v1`) oven på den samme service-klasse (se *API-versionering*); øvrige REST-endpoints er
-  actuator (`/actuator/health`, `/actuator/info`, `/actuator/metrics`) og OpenAPI/Swagger UI.
+  actuator (`/actuator/health`, `/actuator/info`, `/actuator/metrics`, `/actuator/prometheus`) og OpenAPI/Swagger UI.
 * Asynkront: service → service via events på RabbitMQ (se [events.md](events.md)).
 * Services cacher snapshots fra events (fx booking gemmer flightnummer, afgangstid, gate og flystatus;
   baggage gemmer `booking_snapshot`). Kilden til sandhed er altid den ejende service.
@@ -100,6 +100,8 @@ Bean Validation-fejl (`ConstraintViolationException`) mappes til `VALIDATION_ERR
   (`RabbitTemplate.invoke` + `waitForConfirmsOrDie`) og sætter først `published_at` når brokeren har
   bekræftet. Fejler sendingen (broker nede, nack, timeout) tælles `attempts` op, `last_error` gemmes, og
   rækkerne bliver liggende til næste poll. Backloggen ses som gauge `outbox.pending` (`/actuator/metrics`).
+* Hver række bærer trace-konteksten fra den request eller det event, der publicerede den (`traceparent`), og relayet
+  sender den som AMQP-header, så consumeren fortsætter samme trace – se *Observability*.
 * Garanti: at-least-once fra producent + idempotent consumer (`processed_event`) = effektivt exactly-once.
   Dør relayet mellem bekræftelse og commit, sendes rækken igen med samme `eventId`, og modtageren
   ignorerer duplikatet. Rækkefølgen pr. producent bevares (ét aktivt relay, `ORDER BY id`, en fejlet batch
@@ -341,9 +343,9 @@ beskyttede operationer giver `UNAUTHORIZED`.
 
 Særregel: `bookingsByPassenger` beholder sit `email`-argument (det er en del af API'et), men tokenet afgør, hvad
 det må være – en PASSENGER må kun angive sin egen e-mail (`email`-claim, case-insensitivt), ellers `FORBIDDEN`;
-OPERATIONS må slå alle op. Uden for GraphQL: `/actuator/health`, `/actuator/health/**`, `/actuator/info` og
-GraphiQL (`/graphiql`, kun dev-profil) er offentlige; øvrige actuator-endpoints (`/actuator/metrics`) kræver
-OPERATIONS.
+OPERATIONS må slå alle op. Uden for GraphQL: `/actuator/health`, `/actuator/health/**`, `/actuator/info`,
+`/actuator/prometheus` (scrapes af Prometheus, se *Observability*) og GraphiQL (`/graphiql`, kun dev-profil) er
+offentlige; øvrige actuator-endpoints (`/actuator/metrics`) kræver OPERATIONS.
 
 ### Konfiguration: issuer og JWKS
 
@@ -705,6 +707,133 @@ reelle flaskehals ved meget høj læsebelastning; næste skridt ville være read
 en laptop. Opstartstiden, der afgør hvor hurtigt en ny pod hjælper, er næsten halveret med CDS-arkivet (se
 [k8s/README.md](../k8s/README.md#class-data-sharing-cds-hurtigere-boot-uden-flere-ressourcer)).
 
+## Observability: metrics, logs og alarmer
+
+Et bookingflow går gennem fire services, to databaser pr. skridt og RabbitMQ. Når noget går galt, skal man kunne
+svare på tre spørgsmål uden at logge ind på hver pod: *er noget unormalt* (metrics og alarmer), *hvad skete der* (logs)
+og *hvilke loglinjer i hvilke services hører til samme flow* (trace-id). Systemet svarer med fire værktøjer, der kun
+kører, når man beder om det – som Kustomize-komponenten `k8s/components/observability` (tændt i `overlays/demo`) og
+som compose-profilen `observability`, begge med de samme konfigurationsfiler:
+
+```mermaid
+flowchart LR
+  subgraph Services["5 services (Spring Boot)"]
+    S1["/actuator/prometheus<br/>metrics"]
+    S2["stdout-logs<br/>med traceId/spanId"]
+  end
+  RMQ["RabbitMQ<br/>:15692 kø-metrics"]
+  P[Prometheus<br/>+ alerts.yml]
+  A[Alloy<br/>DaemonSet]
+  L[(Loki<br/>PVC 2 Gi)]
+  G[Grafana<br/>/grafana]
+  P -- scrape 15 s --> S1
+  P -- scrape 15 s --> RMQ
+  A -- "pods/log (Kubernetes API)" --> S2
+  A -- push --> L
+  G --> P
+  G --> L
+```
+
+| Værktøj | Rolle | Hvorfor netop det |
+|---------|-------|-------------------|
+| Micrometer + `micrometer-registry-prometheus` | Hver service udstiller sine metrics på `/actuator/prometheus` | Spring Boots standard; HTTP, JVM, databasepulje og RabbitMQ måles uden egen kode |
+| Micrometer Tracing (`micrometer-tracing-bridge-otel`) | Giver hvert HTTP-kald og hver RabbitMQ-besked en W3C trace-id, som står i hver loglinje (MDC) og sendes videre | Samme standard (`traceparent`) som OpenTelemetry, så en trace-backend kan tilføjes uden kodeændring |
+| Prometheus | Henter metrics hvert 15. sekund og evaluerer alarmerne | Pull-modellen passer til Kubernetes: nye pods findes via pod-annotationer, uden at services skal kende Prometheus |
+| Grafana Alloy | Samler alle pods' logs og sender dem til Loki | Læser logs via Kubernetes-API'et, så den hverken skal have hostPath-volumes eller root |
+| Loki | Gemmer logs, indekseret på få labels (`app`, `pod`, `level`) | Indekserer ikke selve teksten og er derfor langt lettere end Elasticsearch – vigtigt på én laptop |
+| Grafana | Dashboard, logsøgning og visning af alarmer | Én UI til både metrics og logs; alt provisioneres fra filer |
+
+### Én trace-id gennem HTTP, outbox og RabbitMQ
+
+En trace-id er kun nyttig, hvis den følger flowet på tværs af services. Over HTTP klarer Spring det selv:
+`booking-service` kalder `flight-service` gennem den auto-konfigurerede `RestClient.Builder`, som sender headeren
+`traceparent`. Over RabbitMQ er outboxen i vejen: eventet sendes ikke i den request, der skabte det, men senere og fra
+relayets tråd. Derfor bærer eventet selv sin trace-kontekst:
+
+1. `EventPublisher` gemmer den aktuelle spans `traceparent` (fx `00-4bf9…4736-00f0…02b7-01`) i en ny kolonne
+   `outbox_event.traceparent` (`V3`–`V6__outbox_traceparent.sql` i de fem services).
+2. `OutboxRelay` sætter den som AMQP-header `traceparent`, når rækken sendes.
+3. Consumeren har listener-observation slået til (`spring.rabbitmq.listener.simple.observation-enabled`) og fortsætter
+   dermed samme trace: `traceId` står i handlerens loglinjer og gemmes med de events, den selv publicerer.
+
+`RabbitTemplate`s egen observation er bevidst *ikke* slået til: den ville overskrive headeren med relayets poll-trace.
+
+Resultatet i praksis – én `pay` i frontenden, fundet i Loki med én trace-id (compose, 17-09-2026):
+
+| Service | Loglinjer med samme trace-id |
+|---------|------------------------------|
+| payment-service | `Payment 38 for booking G262RH COMPLETED` · `Queued event payment.completed` · `Received event booking.confirmed` |
+| booking-service | `Received event payment.completed` · `Booking G262RH confirmed after payment` · `Queued event booking.confirmed` |
+| flight-service | `Received event booking.confirmed` · `Seat 25D on flight 10 is now taken` |
+| baggage-service | `Received event booking.confirmed` · `Booking snapshot G262RH -> CONFIRMED` |
+
+Der er ingen trace-backend (Jaeger/Tempo): med fem services er "alle loglinjer for en trace-id" det, man har brug for,
+og det koster ingenting ekstra. Et span-diagram med tider pr. hop ville kræve en OTLP-exporter og Tempo – næste skridt,
+uden kodeændringer i services.
+
+### Metrics
+
+Ud over Spring Boots egne (HTTP-svartider som histogram, JVM, databasepulje, RabbitMQ-forbindelser) har systemet tre
+metrics, der beskriver event-flowet, og som alle bærer tagget `application`:
+
+| Metric | Type | Betydning |
+|--------|------|-----------|
+| `outbox_pending` | gauge | Events, der er committet, men ikke bekræftet af RabbitMQ – stiger, når brokeren er nede |
+| `events_published_total{type}` | counter | Events bekræftet af RabbitMQ, pr. eventtype (`OutboxRelay`) |
+| `events_consumed_total{type, outcome}` | counter | Hver levering til en consumer: `processed`, `duplicate` (samme `eventId` igen – at-least-once i praksis) eller `failed` (hvert fejlet forsøg; tredje gang går beskeden i DLQ'en) |
+| `rabbitmq_detailed_queue_messages{queue}` | gauge | Beskeder i hver kø, dead-letter queues inklusive (RabbitMQs `rabbitmq_prometheus`-plugin) |
+
+`/actuator/prometheus` er åben uden token, fordi Prometheus scraper uden login. Endpointet viser kun driftstal (ingen
+persondata), og Ingress'en router slet ikke `/actuator`; de øvrige actuator-endpoints kræver stadig OPERATIONS. I
+Kubernetes finder Prometheus services via pod-annotationerne `prometheus.io/scrape|port|path` i base-manifesterne, så
+en ekstra replica eller en ny service scrapes uden ændringer i Prometheus. RBAC er namespaced (`Role`, ikke
+`ClusterRole`): Prometheus og Alloy kan kun læse pods i namespace `airport`.
+
+Dashboardet *Airport – services og events* (Grafanas forside) viser: services oppe, events i outbox, beskeder i
+dead-letter queues, aktive alarmer og fejlede event-forsøg øverst; derunder requests/s og 95 %-percentil pr. service,
+events publiceret og behandlet, outbox og kødybde, JVM heap og CPU – og nederst logs: WARN/ERROR fra alle services og
+et felt, hvor man skriver en trace-id og får alle loglinjer fra den trace.
+
+### Alarmer
+
+Reglerne står i `k8s/components/observability/config/alerts.yml` og evalueres af Prometheus. De vises i Prometheus
+(`/alerts`) og i Grafana under *Alerting → Alert rules*. Der er ingen Alertmanager i demoen, så ingen bliver kaldt op;
+i drift ville en Alertmanager sende dem til chat eller vagttelefon.
+
+| Alarm | Betingelse | Hvad den betyder | Hvad man gør |
+|-------|------------|------------------|--------------|
+| `ServiceDown` | `up == 0` i 1 min | En service svarer ikke (crash, OOM, hænger) | `kubectl -n airport describe pod`, se sidste loglinjer i Grafana (`{app="<service>"}`) |
+| `OutboxBacklog` | `outbox_pending > 20` i 2 min | Events hober sig op: RabbitMQ er nede eller blokeret. Intet er tabt – de sendes, når brokeren er tilbage | Tjek RabbitMQ-podden og `last_error` i `outbox_event` |
+| `MessagesDeadLettered` | Beskeder i en `*.dlq` i 1 min | En consumer har afvist en besked tre gange | Find `eventId` i RabbitMQ-UI'et, søg på den i Loki, ret årsagen og flyt beskeden tilbage (shovel) |
+| `EventHandlingFailing` | `events_consumed_total{outcome="failed"}` stiger i 2 min | En handler fejler lige nu – beskederne er på vej mod DLQ'en | Loglinjerne fra handleren (samme `eventType`) viser undtagelsen |
+| `HighServerErrorRate` | > 5 % HTTP 5xx i 5 min | API'et fejler for brugerne | Dashboardets fejl-logs; GraphQL-fejl er HTTP 200 og tælles ikke her, men står i loggen |
+
+**Sådan finder man en fejl på tværs af services.** Alarm (fx `MessagesDeadLettered` for `baggage-service.dlq`) →
+dashboardet viser hvornår og hvor mange → panelet *Advarsler og fejl* viser undtagelsen i baggage-service med dens
+`traceId` → trace-id'en i feltet øverst viser alle loglinjer fra den trace: hvilken betaling eller booking der startede
+flowet, og hvad de andre services gjorde med samme event.
+
+### Designvalg
+
+| Valg | Begrundelse | Fravalgt |
+|------|-------------|----------|
+| Komponent, ikke base | Fire ekstra pods er driftsværktøj, ikke systemet; `kubectl apply -k k8s/` er uændret, bortset fra ufarlige annotationer og RabbitMQs metrics-port | Altid tændt: for tungt på en laptop, der i forvejen kører 10 JVM'er |
+| Pod-annotationer + `kubernetes_sd_configs` | Ingen operator og ingen CRD'er | kube-prometheus-stack/Prometheus Operator: Helm, CRD'er og ca. ti pods mere |
+| Alloy via Kubernetes-API'et (`loki.source.kubernetes`) | Ingen hostPath, ingen root; kører med read-only rodfilsystem som alle andre pods | Promtail (udfaset til fordel for Alloy) eller fil-tailing fra `/var/log/pods`, der kræver hostPath |
+| `traceId` som *structured metadata* i Loki, ikke label | En label pr. trace-id ville give én log-stream pr. request og vælte Loki | – |
+| JSON-logs i Kubernetes (`prod`), tekst i compose (`dev`) | JSON kan parses til felter (`level`, `traceId`); tekst er læsbar i `docker compose logs` | – |
+| Grafana anonymt som *Viewer* | Demoen kan åbnes uden login; admin/admin kan redigere og bruge Explore | Login via Keycloak (generic OAuth) – rigtigt til drift, næste skridt |
+
+**Verificeret 17-09-2026.** I compose (`--profile observability`) og på kind (`overlays/demo`): alle fem services og
+RabbitMQ scrapes; én betaling fundet med sin trace-id i Loki med linjer fra payment-, booking-, flight- og
+baggage-service (tabellen ovenfor); en ulæselig besked gav tre `failed`-forsøg og alarmen `MessagesDeadLettered` efter
+85 s; på en kind-node med images klar havde Grafana metrics fra alle services og logs 59 s efter
+`kubectl apply -k k8s/overlays/demo/` (detaljer i [k8s/README.md](../k8s/README.md#observability-prometheus-loki-alloy-og-grafana)).
+I koden tester `ObservabilityIntegrationTest` (booking-service), at en besked med `traceparent` giver samme trace-id
+i handlerens loglinjer, i outbox-rækken og i headeren på det event, servicen sender videre, og at tællerne følger med
+(`processed`, `duplicate`, `failed`); `SecurityIntegrationTest` i alle fem services, at `/actuator/prometheus` er åben
+og `/actuator/metrics` ikke er.
+
 ## Designmønstre
 
 ### Tombstone og snapshot
@@ -998,6 +1127,7 @@ overskriver hinanden. Regler, begrundelser og test (alle permutationer af eventr
 | Ruteinstruktioner | Dansk: "Start ved …", "Gå N m til …", "Tag elevatoren/trappen til etage N", "Du er fremme ved …"; gangtid 80 m/min | Tekstbaseret rute som spec'en kræver |
 | Åbningstider | `HH:MM-HH:MM` (også over midnat) eller `24/7`, evalueret i `APP_TIMEZONE` (Europe/Copenhagen) | Enkelt format i seed-data |
 | Ekstra query | `navEdges(terminal)` i shop-service | Frontenden tegner gangnetværket (kanterne) på SVG-kortet; kanter med `accessible=false` stiples |
+| Observability | Prometheus + Loki + Alloy + Grafana som valgfri komponent/compose-profil; trace-id i logs, ingen trace-backend | Se *Observability* |
 | Postgres | 5 separate containere / StatefulSets | Afspejler Kubernetes-opsætningen og "én database pr. service" |
 | pgAdmin i Kubernetes | Dev/demo-værktøj i `k8s/tools/` bag Ingress på `/pgadmin`, uden login (desktop mode); de fem databaser forudregistreret (ConfigMap) med kodeord fra en pgpass-fil (Secret) | Viser "én database pr. service" og eventflowet live i en demo; ikke en del af systemet og fjernes med én linje i `kustomization.yaml` |
 | Strukturerede logs | Spring Boots indbyggede `logging.structured.format.console=logstash` i `prod`-profil | Ingen ekstra dependency |

@@ -1,0 +1,79 @@
+# Grafana Alloy as a DaemonSet (dev plan DP-34): one collector per node ships the logs of that node's pods in the
+# namespace airport to Loki (config/k8s.alloy). It reads them through the Kubernetes API (Role alloy-logs), so unlike
+# a file-tailing agent it needs neither hostPath volumes nor root.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: alloy
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/part-of: airport
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alloy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alloy
+        app.kubernetes.io/part-of: airport
+    spec:
+      serviceAccountName: alloy
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 473                        # the alloy user of the official image
+        runAsGroup: 473
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: alloy
+          image: grafana/alloy:v1.19.2
+          imagePullPolicy: IfNotPresent
+          args:
+            - run
+            - /etc/alloy/config.alloy
+            - --storage.path=/var/lib/alloy/data   # read positions, so a restart does not ship logs twice
+            - --server.http.listen-addr=0.0.0.0:12345
+            - --disable-reporting
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - name: http
+              containerPort: 12345
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/alloy
+            - name: data
+              mountPath: /var/lib/alloy/data
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+            periodSeconds: 10
+          # Measured on kind 17-09-2026 while tailing the ~20 containers of the demo overlay: ~60 MiB anonymous memory
+          # plus page cache that the kernel reclaims under pressure (it filled a 256Mi limit).
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: config
+          configMap:
+            name: alloy-config
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

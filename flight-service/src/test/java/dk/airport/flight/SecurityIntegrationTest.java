@@ -4,6 +4,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability;
 import org.springframework.boot.test.autoconfigure.graphql.tester.AutoConfigureHttpGraphQlTester;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
@@ -34,6 +35,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureHttpGraphQlTester
+@AutoConfigureObservability   // real Prometheus registry and tracing, as in production (off by default in tests)
 @Import(TestTokens.class)
 @Testcontainers
 class SecurityIntegrationTest {
@@ -107,6 +109,19 @@ class SecurityIntegrationTest {
         headers.set(HttpHeaders.AUTHORIZATION, TestTokens.operations());
         assertThat(rest.exchange("/actuator/metrics", HttpMethod.GET, new HttpEntity<>(headers), String.class)
                 .getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
+    /**
+     * Dev plan DP-33: Prometheus scrapes /actuator/prometheus without a token; the other actuator endpoints stay
+     * protected.
+     */
+    @Test
+    void prometheusEndpointIsPublicButMetricsNeedOperations() {
+        ResponseEntity<String> scrape = rest.getForEntity("/actuator/prometheus", String.class);
+        assertThat(scrape.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(scrape.getBody()).contains("outbox_pending{").contains("application=\"flight-service\"");
+        assertThat(rest.getForEntity("/actuator/metrics", String.class).getStatusCode())
+                .isEqualTo(HttpStatus.UNAUTHORIZED);
     }
 
     @Test

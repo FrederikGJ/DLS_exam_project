@@ -13,6 +13,7 @@ import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
 import java.math.BigDecimal;
+import java.net.http.HttpClient;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.Map;
@@ -21,6 +22,12 @@ import java.util.Map;
  * Synchronous service-to-service GraphQL call to flight-service.
  * Chosen over caching seat/price data from events, because it always gives the current price and
  * availability and keeps booking-service free of a copy of the whole seat map.
+ * <p>
+ * Built from Spring Boot's auto-configured {@link RestClient.Builder} (dev plan DP-33): the builder carries the
+ * observation registry, so every call is timed ({@code http_client_requests_seconds}) and sends the current trace
+ * as a {@code traceparent} header - flight-service's log lines for the call get the same trace id as the booking.
+ * The JDK HttpClient is pinned to HTTP/1.1: its default HTTP/2 attempt sends {@code Upgrade: h2c} with the request
+ * body, which some servers (e.g. WireMock/Jetty in system-tests) reject.
  */
 @Component
 public class FlightClient {
@@ -37,11 +44,16 @@ public class FlightClient {
 
     private final RestClient restClient;
 
-    public FlightClient(@Value("${app.flight-service.url}") String url,
+    public FlightClient(RestClient.Builder builder,
+                        @Value("${app.flight-service.url}") String url,
                         @Value("${app.flight-service.timeout:5s}") Duration timeout) {
-        JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory();
+        HttpClient httpClient = HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_1_1)
+                .connectTimeout(timeout)
+                .build();
+        JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(httpClient);
         requestFactory.setReadTimeout(timeout);
-        this.restClient = RestClient.builder()
+        this.restClient = builder
                 .baseUrl(url)
                 .requestFactory(requestFactory)
                 .build();

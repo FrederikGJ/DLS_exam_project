@@ -63,6 +63,18 @@
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-actuator</artifactId>
     </dependency>
+    <!-- Observability (dev plan DP-33): metrics in Prometheus format on /actuator/prometheus, and a trace id in every
+         log line that follows a request over HTTP and AMQP (see docs/architecture.md "Observability"). No trace
+         exporter: the trace id is used to find all log lines of one flow in Loki. -->
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-registry-prometheus</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-tracing-bridge-otel</artifactId>
+    </dependency>
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-security</artifactId>

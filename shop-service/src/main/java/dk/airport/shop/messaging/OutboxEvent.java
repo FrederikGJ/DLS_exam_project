@@ -48,13 +48,19 @@ public class OutboxEvent {
     @Column(name = "last_error")
     private String lastError;
 
+    /** W3C trace context of the publishing span, sent as the {@code traceparent} header (null: no span). */
+    @Column(name = "traceparent", length = 55)
+    private String traceparent;
+
     protected OutboxEvent() {}
 
-    public OutboxEvent(String eventId, String eventType, String payload, OffsetDateTime createdAt) {
+    public OutboxEvent(String eventId, String eventType, String payload, OffsetDateTime createdAt,
+                       String traceparent) {
         this.eventId = eventId;
         this.eventType = eventType;
         this.payload = payload;
         this.createdAt = createdAt;
+        this.traceparent = traceparent;
     }
 
     /**
@@ -79,4 +85,5 @@ public class OutboxEvent {
     public OffsetDateTime getPublishedAt() { return publishedAt; }
     public int getAttempts() { return attempts; }
     public String getLastError() { return lastError; }
+    public String getTraceparent() { return traceparent; }
 }

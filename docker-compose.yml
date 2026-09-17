@@ -12,6 +12,8 @@
 #   8180  Keycloak (login): admin console http://localhost:8180/admin/ (admin / admin),
 #         realm `airport` with test users anna/anna (PASSENGER) and ops/ops (OPERATIONS)
 #   11434 Ollama (local LLM behind shop-service askRoute) - only with `docker compose --profile ai up`
+#   3000  Grafana (dashboard + logs, admin / admin)      - only with `docker compose --profile observability up`
+#   9090  Prometheus (targets, alerts)                   - only with `docker compose --profile observability up`
 #   5433-5437 the five PostgreSQL instances (only for debugging with psql)
 #
 # Credentials below are DEV DEFAULTS ONLY. In Kubernetes they come from Secrets.
@@ -270,6 +272,68 @@ services:
     depends_on:
       rabbitmq: { condition: service_healthy }
 
+  # --------------------------------------------------------- observability
+  # Metrics, logs and alarms (dev plan DP-34): `docker compose --profile observability up -d`. The same config files as
+  # the Kubernetes component k8s/components/observability (single source), except that Prometheus has the compose
+  # service names as fixed targets and Alloy reads the container logs through the Docker socket.
+  prometheus:
+    image: prom/prometheus:v3.14.0
+    profiles: [observability]
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=24h
+    ports: ["9090:9090"]
+    volumes:
+      - ./k8s/components/observability/config/compose-prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./k8s/components/observability/config/alerts.yml:/etc/prometheus/alerts.yml:ro
+
+  loki:
+    image: grafana/loki:3.7.7
+    profiles: [observability]
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    volumes:
+      - ./k8s/components/observability/config/loki.yaml:/etc/loki/loki.yaml:ro
+      - loki-data:/loki
+
+  alloy:
+    image: grafana/alloy:v1.19.2
+    profiles: [observability]
+    restart: unless-stopped
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --storage.path=/var/lib/alloy/data
+      - --disable-reporting
+    volumes:
+      - ./k8s/components/observability/config/compose.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro   # dev only: read the logs of this machine's containers
+    depends_on:
+      - loki
+
+  grafana:
+    image: grafana/grafana:13.2.2
+    profiles: [observability]
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/airport-dashboard.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+    ports: ["3000:3000"]
+    volumes:
+      - ./k8s/components/observability/config/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro
+      - ./k8s/components/observability/config/grafana-dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml:ro
+      - ./k8s/components/observability/config/airport-dashboard.json:/var/lib/grafana/dashboards/airport-dashboard.json:ro
+    depends_on:
+      - prometheus
+      - loki
+
   # -------------------------------------------------------------- frontend
   frontend:
     build: ./frontend
@@ -284,6 +348,7 @@ services:
       - shop-service
 
 volumes:
+  loki-data:
   rabbitmq-data:
   flight-db-data:
   booking-db-data:

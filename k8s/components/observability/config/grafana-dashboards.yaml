@@ -1,0 +1,11 @@
+# Grafana dashboard provider (dev plan DP-34): loads the JSON dashboards mounted into /var/lib/grafana/dashboards.
+apiVersion: 1
+
+providers:
+  - name: airport
+    folder: Airport
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards

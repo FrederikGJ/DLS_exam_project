@@ -30,6 +30,7 @@ Dokumentation: [docs/architecture.md](docs/architecture.md) (diagram, flows, des
 | Orkestrering        | Kubernetes (Kustomize), verificeret på kind – minikube-kommandoer i k8s/README.md; HPA på shop-service |
 | Serverless          | `notification-job` (ren Java 21) som KEDA `ScaledJob` på RabbitMQ-kølængde – skalerer til 0 |
 | AI                  | Lokal sprogmodel (Ollama, `qwen2.5:1.5b`) bag `askRoute` i `shop-service` – valgfri |
+| Observability       | Micrometer (Prometheus-metrics + trace-id i logs over HTTP og RabbitMQ), Prometheus, Loki, Grafana Alloy, Grafana – valgfri (compose-profil / Kustomize-komponent) |
 | Tests               | JUnit 5, Testcontainers (Postgres + RabbitMQ), Spring GraphQL Tester, WireMock (system-test) |
 
 ## Komponenter
@@ -203,6 +204,33 @@ sekunder, og jobbene forsvinder igen). Installation af KEDA og målinger står i
 [k8s/README.md](k8s/README.md#demo-overlay-ai-og-serverless-keda), designet i
 [docs/architecture.md](docs/architecture.md#serverless-notification-job-som-keda-scaledjob) og selve jobbet i
 [notification-job/README.md](notification-job/README.md).
+
+### Observability: metrics, logs og alarmer
+
+Prometheus, Loki, Alloy og Grafana startes med compose-profilen `observability` (samme konfigurationsfiler som
+Kubernetes-komponenten `k8s/components/observability`):
+
+```bash
+docker compose --profile observability up -d
+./scripts/e2e-smoke.sh               # lidt trafik og events at se på
+```
+
+- **Grafana** <http://localhost:3000/> åbner dashboardet *Airport – services og events*: services oppe, events i
+  outbox og i dead-letter queues, aktive alarmer, requests/s og svartider, events publiceret og behandlet pr. service,
+  kødybder, JVM – og nederst logs. Anonyme besøgende kan se; `admin`/`admin` kan redigere og bruge *Explore*.
+- **Følg ét flow:** hver loglinje har `[traceId-spanId]`, og trace-id'en følger flowet gennem HTTP, outbox og RabbitMQ.
+  Kopiér trace-id'en fra en linje (fx `Booking G262RH confirmed after payment`) ind i feltet *Trace-id* øverst på
+  dashboardet: panelet nederst viser så linjerne fra payment-, booking-, flight- og baggage-service for netop den
+  betaling. I *Explore* (som admin): `{app=~".+-service"} |= "<trace-id>"`.
+- **Prometheus** <http://localhost:9090/> – `Status → Targets` (fem services + RabbitMQ) og `/alerts` (fem regler,
+  fx `MessagesDeadLettered`, som fyrer efter "Test af retry + dead-letter queue" nedenfor).
+- **Metrics direkte:** <http://localhost:8082/actuator/prometheus> (åben uden token; `events_published_total`,
+  `events_consumed_total`, `outbox_pending` …).
+
+I Kubernetes er det samme en del af `k8s/overlays/demo` med Grafana på <http://localhost:8090/grafana/> – se
+[k8s/README.md](k8s/README.md#observability-prometheus-loki-alloy-og-grafana). Hvorfor netop disse værktøjer, hvordan
+trace-id'en kommer gennem outboxen, og hvad hver alarm betyder:
+[docs/architecture.md](docs/architecture.md#observability-metrics-logs-og-alarmer).
 
 ### Automatisk smoke-test af Flow A–D
 
@@ -464,7 +492,7 @@ Alle services konfigureres via environment variables. Defaults i `application.ym
     (hver: src/main/resources/graphql/schema.graphqls, db/migration/V1__init.sql (+V2__seed.sql), src/test/java)
   notification-job/        pom.xml, Dockerfile, README.md, src/main/java/dk/airport/notification/ (ren Java, ingen Spring)
   ollama/                  Dockerfile – Ollama med modellen qwen2.5:1.5b bagt ind
-  k8s/                     base/ (namespace, rabbitmq/, databases/, services/ inkl. shop-service-hpa.yaml, frontend/, ingress.yaml), keycloak/ (realm-airport.json), tools/ (pgAdmin), components/ (ollama/, notification-job/), overlays/ (dev-tools/, demo/)
+  k8s/                     base/ (namespace, rabbitmq/, databases/, services/ inkl. shop-service-hpa.yaml, frontend/, ingress.yaml), keycloak/ (realm-airport.json), tools/ (pgAdmin), components/ (ollama/, notification-job/, observability/ inkl. config/ som compose også bruger), overlays/ (dev-tools/, demo/)
   scripts/e2e-smoke.sh     end-to-end smoke-test af Flow A-D mod en kørende compose-stak
   scripts/demo-keda.sh     KEDA-demo på kind: 5 bookinger -> notification-jobs starter og forsvinder igen
   scripts/demo-saga.sh     saga-demo: ubetalt booking aflyses efter PAYMENT_TIMEOUT, for sen betaling refunderes

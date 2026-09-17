@@ -1,0 +1,46 @@
+# Prometheus in Kubernetes (dev plan DP-34, component k8s/components/observability).
+# Finds the airport services by their pod annotations - the base Deployments carry
+#   prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: /actuator/prometheus
+# so a new service or an extra replica is scraped without touching this file. RabbitMQ is a fixed target.
+# Service discovery only needs to read pods in the namespace airport (Role in rbac.yaml).
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: airport-services
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [airport]
+    relabel_configs:
+      # only pods that ask for it
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        regex: "true"
+        action: keep
+      # path and port from the annotations
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        regex: (.+)
+        target_label: __metrics_path__
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: ${1}:${2}
+        target_label: __address__
+      # readable labels on every series: app (= the service), pod
+      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+        target_label: app
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+
+  # Queue depth per queue, dead-letter queues included (rabbitmq_prometheus plugin, enabled in the official image).
+  - job_name: rabbitmq
+    metrics_path: /metrics/detailed
+    params:
+      family: [queue_coarse_metrics]
+    static_configs:
+      - targets: ["rabbitmq:15692"]
+        labels:
+          app: rabbitmq

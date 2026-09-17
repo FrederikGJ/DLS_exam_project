@@ -5,7 +5,7 @@ Alle manifests ligger i denne mappe og deployes samlet med Kustomize:
 ```bash
 kubectl apply -k k8s/                      # selve systemet (= k8s/base/)
 kubectl apply -k k8s/overlays/dev-tools/   # systemet + pgAdmin (dev/demo-værktøj)
-kubectl apply -k k8s/overlays/demo/        # systemet + lokal AI-model (Ollama) + notification-job som KEDA ScaledJob
+kubectl apply -k k8s/overlays/demo/        # systemet + lokal AI-model (Ollama) + notification-job som KEDA ScaledJob + observability
 ```
 
 `k8s/kustomization.yaml` er kun en tynd henvisning til `base/`. Selve systemet ligger i `base/`, valgfrie dele som
@@ -15,7 +15,7 @@ at et overlay ligger inde i sin egen base-mappe. Indhold:
 | Mappe/fil                    | Indhold                                                                                   |
 |------------------------------|-------------------------------------------------------------------------------------------|
 | `base/namespace.yaml`        | Namespace `airport`                                                                       |
-| `base/rabbitmq/`             | StatefulSet + Service (5672/15672) + Secret                                               |
+| `base/rabbitmq/`             | StatefulSet + Service (5672/15672, 15692 = Prometheus-metrics) + Secret                   |
 | `base/databases/`            | 5 × PostgreSQL 16 StatefulSet (1 replica, PVC 1Gi) + Service + Secret, én pr. service     |
 | `base/services/`             | 5 × Deployment (1 replica, `requests` 150m/256Mi, `limits` 500m/640Mi – se *Ressourcer på en laptop*) + ClusterIP Service + ConfigMap + Secret, liveness/readiness, initContainer `wait-for-db` der venter på servicens Postgres med `pg_isready`. Hærdet: kører som uid 100 med read-only rodfilsystem (kun `/tmp` er et `emptyDir`), uden capabilities og uden privilege escalation (tjekket af Trivy i CI). Kan skaleres til flere replicas uden kodeændringer: en Postgres advisory lock sikrer, at kun én pod ad gangen kører outbox-relayet |
 | `base/services/shop-service-hpa.yaml` | HorizontalPodAutoscaler: shop-service 1–3 pods ved 70 % CPU – se *Autoscaling (HPA)* |
@@ -26,7 +26,8 @@ at et overlay ligger inde i sin egen base-mappe. Indhold:
 | `overlays/dev-tools/`        | `base` + `tools`: systemet med pgAdmin                                                    |
 | `components/ollama/`         | Lokal sprogmodel til `askRoute`: Ollama Deployment (`airport/ollama:local`, model bagt ind) + Service + patch der sætter `AI_ENABLED=true` for shop-service – se *Demo-overlay* |
 | `components/notification-job/` | notification-job som KEDA `ScaledJob` på køen `notifications` + `TriggerAuthentication` + Secret – kræver KEDA, se *Demo-overlay* |
-| `overlays/demo/`             | `base` + begge components: systemet med AI og serverless-jobbet                          |
+| `components/observability/` | Prometheus + Loki (PVC 2 Gi) + Alloy (DaemonSet) + Grafana med Ingress på `/grafana`, namespaced RBAC og alle konfigurationsfiler i `config/` (også brugt af compose-profilen `observability`) – se *Observability* |
+| `overlays/demo/`             | `base` + alle tre components: systemet med AI, serverless-jobbet og observability       |
 | `kind-config.yaml`           | kind-cluster med port-mapping 80/443 → 8090/8443                                          |
 
 Secrets indeholder **dev-værdier** (fx `flight/flight`). Skift dem før brug i et delt cluster.
@@ -322,6 +323,57 @@ RabbitMQ og Keycloak hentet undervejs):
 | `scripts/e2e-smoke.sh` gennem Ingress | alle flows grønne |
 
 Se mails fra et job, mens det findes: `kubectl -n airport logs -l app.kubernetes.io/name=notification-job --tail=20`.
+
+## Observability (Prometheus, Loki, Alloy og Grafana)
+
+Komponenten `components/observability/` er tændt i `overlays/demo/` og kan lægges på et hvilket som helst overlay med
+`components: [../../components/observability]`. Base-stakken (`kubectl apply -k k8s/`) kører ingen af podderne; den har
+kun pod-annotationerne `prometheus.io/scrape|port|path` på de fem services og RabbitMQs metrics-port 15692, som intet
+bruger uden komponenten. Alle images hentes fra Docker Hub af noden (ingen `kind load`).
+
+| Pod | Image | Hvad | Ressourcer (`requests` → `limits`) |
+|-----|-------|------|------------------------------------|
+| `prometheus` | `prom/prometheus:v3.14.0` | Finder services via pod-annotationer (`Role` på pods i `airport`), scraper RabbitMQ, evaluerer `config/alerts.yml`; data i `emptyDir`, 24 t | 50m/128Mi → 500m/512Mi |
+| `loki` | `grafana/loki:3.7.7` | Logs på PVC `loki-data` (2 Gi), 3 dages retention | 50m/128Mi → 500m/512Mi |
+| `alloy-*` (DaemonSet) | `grafana/alloy:v1.19.2` | Læser alle pods' logs i `airport` via Kubernetes-API'et (`Role` på `pods`, `pods/log`) og sender dem til Loki; `level` bliver label, `traceId`/`spanId` structured metadata | 50m/96Mi → 500m/512Mi |
+| `grafana` | `grafana/grafana:13.2.2` | Ingress `/grafana`, data sources og dashboard provisioneret fra ConfigMaps; anonym *Viewer*, `admin`/`admin` | 100m/256Mi → 1/1Gi |
+
+Alle fire kører som ikke-root med read-only rodfilsystem, uden capabilities og uden privilege escalation (Trivy i CI
+finder ingen HIGH/CRITICAL i manifesterne). Konfigurationen står i `components/observability/config/` og bruges også af
+compose-profilen `observability`.
+
+```bash
+kubectl apply -k k8s/overlays/demo/
+kubectl -n airport get pods -l 'app.kubernetes.io/name in (prometheus,loki,alloy,grafana)'
+```
+
+- **Grafana:** <http://localhost:8090/grafana/> – forsiden er dashboardet *Airport – services og events*. Skriv en
+  trace-id (fra en loglinje, fx `"traceId":"1423ced…"`) i feltet *Trace-id* for at se alle loglinjer fra den trace.
+  Som admin i *Explore*: `{app=~".+-service"} | traceId="<trace-id>"` eller `{app="booking-service", level="ERROR"}`.
+  Alarmerne står under *Alerting → Alert rules → Prometheus*.
+- **Prometheus:** `kubectl -n airport port-forward deploy/prometheus 9090` → <http://localhost:9090/targets> og
+  <http://localhost:9090/alerts>.
+- **Prøv en alarm:** send en besked, som booking-service ikke kan læse – den afvises tre gange og havner i
+  `booking-service.dlq`, og `MessagesDeadLettered` fyrer ca. halvanden minut senere:
+
+```bash
+kubectl -n airport port-forward svc/rabbitmq 15672:15672 &
+curl -u airport:airport -H 'content-type: application/json' \
+  -X POST http://localhost:15672/api/exchanges/%2F/airport.events/publish \
+  -d '{"properties":{},"routing_key":"payment.completed","payload":"not json","payload_encoding":"string"}'
+```
+
+**Verificeret på kind 17-09-2026** (`kubectl apply -k k8s/overlays/demo/`, KEDA installeret):
+
+| Måling | Resultat |
+|--------|----------|
+| Nyt cluster, images hentes undervejs | Grafana svarer efter 82 s, metrics fra alle fem services efter 143 s, logs i Loki efter 186 s (Loki ventede 1 min 40 s på sit image) |
+| Namespace slettet og anvendt igen (images på noden) | Grafana efter 32 s, metrics fra alle fem services og logs fra 18 apps efter 59 s |
+| `scripts/e2e-smoke.sh` gennem Ingress | alle flows grønne; én `pay` fundet i Loki med `| traceId="…"`: 10 linjer fra payment-, booking-, flight- og baggage-service |
+| Alarm | ulæselig besked → 3 fejlede forsøg (`events_consumed_total{outcome="failed"}` = 3) → `MessagesDeadLettered` *firing* for `booking-service.dlq` efter 85 s; vist i Grafana |
+| Hukommelse (anonym, uden page cache) | Prometheus 35 MiB, Alloy 49 MiB, Grafana 213 MiB (530 MiB mens dashboardet indlæses) |
+| Første udgave af manifesterne | Grafana ved 500m/384Mi blev CPU-throttlet, readiness-proben timede ud, og Ingress'en gav 503 – derfor 1 CPU/1 GiB og `timeoutSeconds: 5` |
+| Base uden komponent | `kubectl kustomize k8s/` før og efter: kun de fem pod-annotationer og RabbitMQ-porten 15692 er nye |
 
 ## Autoscaling (HPA)
 

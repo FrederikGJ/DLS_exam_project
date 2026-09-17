@@ -1,0 +1,32 @@
+# Prometheus in docker compose (`docker compose --profile observability up`, dev plan DP-34). Same jobs as
+# prometheus.yml for Kubernetes, but with the compose service names as fixed targets instead of pod discovery.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: airport-services
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["flight-service:8080"]
+        labels: { app: flight-service }
+      - targets: ["booking-service:8080"]
+        labels: { app: booking-service }
+      - targets: ["payment-service:8080"]
+        labels: { app: payment-service }
+      - targets: ["baggage-service:8080"]
+        labels: { app: baggage-service }
+      - targets: ["shop-service:8080"]
+        labels: { app: shop-service }
+
+  - job_name: rabbitmq
+    metrics_path: /metrics/detailed
+    params:
+      family: [queue_coarse_metrics]
+    static_configs:
+      - targets: ["rabbitmq:15692"]
+        labels:
+          app: rabbitmq

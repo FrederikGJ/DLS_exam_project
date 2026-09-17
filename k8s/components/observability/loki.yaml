@@ -1,0 +1,101 @@
+# Loki (dev plan DP-34): one process, index and chunks on a 2 Gi PersistentVolumeClaim, logs kept 3 days
+# (config/loki.yaml). The PVC survives a pod restart, so the logs from before a crash are still there to read.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: loki-data
+  labels:
+    app.kubernetes.io/name: loki
+    app.kubernetes.io/part-of: airport
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki
+  labels:
+    app.kubernetes.io/name: loki
+    app.kubernetes.io/part-of: airport
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: loki
+  ports:
+    - name: http
+      port: 3100
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loki
+  labels:
+    app.kubernetes.io/name: loki
+    app.kubernetes.io/part-of: airport
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate                            # the RWO volume can only be mounted by one pod at a time
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: loki
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: loki
+        app.kubernetes.io/part-of: airport
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001                      # the loki user of the official image
+        runAsGroup: 10001
+        fsGroup: 10001                        # makes the volume writable for that user
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: loki
+          image: grafana/loki:3.7.7
+          imagePullPolicy: IfNotPresent
+          args:
+            - -config.file=/etc/loki/loki.yaml
+          ports:
+            - name: http
+              containerPort: 3100
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/loki
+            - name: data
+              mountPath: /loki
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: config
+          configMap:
+            name: loki-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: loki-data
+        - name: tmp
+          emptyDir: {}

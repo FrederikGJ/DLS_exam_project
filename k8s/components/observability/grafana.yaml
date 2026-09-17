@@ -1,0 +1,136 @@
+# Grafana (dev plan DP-34) behind the Ingress at /grafana (grafana-ingress.yaml). Data sources and the dashboard are
+# provisioned from ConfigMaps (config/grafana-*.yaml, config/airport-dashboard.json), so nothing is clicked together
+# by hand and a fresh pod looks the same. Anonymous visitors may view (demo); admin/admin may edit.
+# DEV VALUES ONLY - replace before any shared cluster, and log in through Keycloak (generic OAuth) instead.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: grafana-secret
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: airport
+type: Opaque
+stringData:
+  GF_SECURITY_ADMIN_USER: admin
+  GF_SECURITY_ADMIN_PASSWORD: admin
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: airport
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: grafana
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: airport
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: grafana
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: grafana
+        app.kubernetes.io/part-of: airport
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 472                        # the grafana user of the official image
+        runAsGroup: 0
+        fsGroup: 472
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: grafana
+          image: grafana/grafana:13.2.2
+          imagePullPolicy: IfNotPresent
+          env:
+            # served under http://localhost:8090/grafana/ (kind maps the Ingress to host port 8090)
+            - name: GF_SERVER_ROOT_URL
+              value: http://localhost:8090/grafana/
+            - name: GF_SERVER_SERVE_FROM_SUB_PATH
+              value: "true"
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "true"
+            - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+              value: Viewer
+            - name: GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH
+              value: /var/lib/grafana/dashboards/airport-dashboard.json
+            - name: GF_ANALYTICS_REPORTING_ENABLED
+              value: "false"
+            - name: GF_ANALYTICS_CHECK_FOR_UPDATES
+              value: "false"
+            - name: GF_PLUGINS_PREINSTALL_DISABLED  # no plugin downloads at start-up
+              value: "true"
+          envFrom:
+            - secretRef:
+                name: grafana-secret
+          ports:
+            - name: http
+              containerPort: 3000
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: provisioning
+              mountPath: /etc/grafana/provisioning/datasources/datasources.yaml
+              subPath: datasources.yaml
+            - name: provisioning
+              mountPath: /etc/grafana/provisioning/dashboards/dashboards.yaml
+              subPath: dashboards.yaml
+            - name: dashboards
+              mountPath: /var/lib/grafana/dashboards
+            - name: data
+              mountPath: /var/lib/grafana
+            - name: logs
+              mountPath: /var/log/grafana
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5               # Grafana answers slowly while it builds its search index at start-up
+            failureThreshold: 6
+          # Measured on kind 17-09-2026: at 500m/384Mi Grafana 13 was CPU-throttled while the dashboard loaded and the
+          # readiness probe timed out (503 from the Ingress); with the dashboard open it uses ~530 MiB (anonymous
+          # memory, page cache excluded), hence 1 CPU / 1 GiB.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        - name: provisioning
+          configMap:
+            name: grafana-provisioning
+        - name: dashboards
+          configMap:
+            name: grafana-dashboards
+        - name: data
+          emptyDir: {}
+        - name: logs
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
