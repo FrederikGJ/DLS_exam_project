@@ -2,7 +2,7 @@
 
 Eksamensprojekt i *Development of Large Systems*, Softwareudvikling bachelor 2026 efterår.
 
-**Gruppe 7:** Mahdi Karimi · Lukas Rønberg · Frederik Johannessen
+**Gruppe 7:** Mahdi Karimi, Lukas Rønberg, Frederik Johannessen, Sophus Ingi Sophusson  
 
 Et lufthavnssystem bestående af én frontend og fem uafhængige backend-microservices, der kan:
 
