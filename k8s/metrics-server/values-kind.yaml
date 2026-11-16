@@ -1,0 +1,14 @@
+# Helm values for metrics-server on a local kind cluster (ticket 13). The HPAs in k8s/services/ read pod CPU from it.
+#
+#   helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/
+#   helm upgrade --install metrics-server metrics-server/metrics-server --version 3.14.0 \
+#     -n kube-system -f k8s/metrics-server/values-kind.yaml
+#
+# Not part of k8s/kustomization.yaml on purpose: metrics-server is cluster infrastructure in kube-system,
+# while the kustomization puts everything in the airport namespace.
+#
+# --kubelet-insecure-tls: kind's kubelets use self-signed serving certificates, so metrics-server cannot verify
+# them. Local kind only - do NOT use this file on a real cloud cluster (most managed clusters already ship
+# metrics-server, otherwise install the chart without this flag).
+args:
+  - --kubelet-insecure-tls
