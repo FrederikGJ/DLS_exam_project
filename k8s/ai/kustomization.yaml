@@ -1,0 +1,12 @@
+# Optional AI add-on: Ollama for shop-service's askRoute query. NOT part of k8s/kustomization.yaml,
+# so the default stack stays small. Deploy it on top of the normal stack with:
+#     kubectl apply -k k8s/ai
+# Without it, shop-service still answers askRoute with the keyword fallback (aiUsed=false).
+# shop-service finds it through OLLAMA_URL in shop-service-config (k8s/services/shop-service.yaml).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: airport
+
+resources:
+  - ollama.yaml
