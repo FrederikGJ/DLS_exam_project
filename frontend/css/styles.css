@@ -80,6 +80,8 @@ input[type="checkbox"] { width: auto; min-height: 0; margin-right: 6px; vertical
 .check { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; color: var(--text); cursor: pointer; }
 .field { margin-bottom: 12px; }
 .help { font-size: .8rem; color: var(--muted); margin-top: 4px; }
+.help.field-error { color: #b91c1c; font-weight: 600; }
+select.invalid, input.invalid { border-color: #dc2626; outline: 2px solid rgba(220,38,38,.35); background: #fef2f2; }
 
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
