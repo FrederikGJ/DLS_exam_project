@@ -16,6 +16,7 @@ Indhold:
 | `services/`          | 5 × Deployment (2 replicas) + ClusterIP Service + ConfigMap + Secret, liveness/readiness. 2 replicas er ok for outbox-relayet: en Postgres advisory lock sikrer, at kun én pod ad gangen sender events |
 | `frontend/`          | nginx Deployment + Service + ConfigMap der overskriver `js/config.js` med Ingress-stier    |
 | `tools/`             | pgAdmin (dev/demo-værktøj, ikke en del af systemet): Deployment + Service + ConfigMap + Secret |
+| `ai/`                | **Opt-in**, ikke med i `kubectl apply -k k8s/`: Ollama (lokal LLM til shop-service' `askRoute`) – Deployment (1 replica) + PVC 5Gi + Service, egen `kustomization.yaml` |
 | `ingress.yaml`       | Én Ingress: `/` → frontend, `/api/<x>/graphql` → den enkelte service, `/pgadmin` → pgAdmin |
 
 Secrets indeholder **dev-værdier** (fx `flight/flight`). Skift dem før brug i et delt cluster.
@@ -139,3 +140,32 @@ Demo-idé: lav en booking i frontenden og betal den. Se derefter rækken i `book
 `passenger`), betalingen i `payment_db` (`payment`) og bagage-snapshottet i `baggage_db` (`booking_snapshot`).
 Tabellen `processed_event` i hver database viser, hvilke events servicen har behandlet (idempotens), og at
 `booking_db` ikke indeholder flights, viser "én database pr. service" i praksis.
+
+## AI (Ollama) – valgfrit
+
+shop-service' GraphQL-query `askRoute` ("hvor kan jeg købe kaffe på vej til gate B12?") bruger en lokal LLM
+(Ollama, CPU only). Ollama ligger i `ai/` med sin egen `kustomization.yaml` og er **ikke** en del af standard-stakken,
+fordi modellen bruger ca. 2,5 GB RAM ekstra i clusteret. Der er to måder at køre på:
+
+**Uden AI (standard)** – `kubectl apply -k k8s/` som normalt. `askRoute` virker stadig: shop-service kan ikke nå
+`OLLAMA_URL` og svarer med keyword-fallbacken (`aiUsed: false`, `fallbackReason` forklarer hvorfor).
+
+**Med AI** – deploy add-on'et oven på stakken:
+
+```bash
+kubectl apply -k k8s/                 # normal stak
+kubectl apply -k k8s/ai               # + Ollama (Deployment, PVC, Service "ollama":11434)
+kubectl -n airport get pods -l app.kubernetes.io/name=ollama -w
+```
+
+- Første start henter modellen (`qwen2.5:3b`, ca. 2 GB) til PVC'en; podden er først Ready, når modellen er hentet
+  (startupProbe tillader op til 10 min). Senere starter genbruger PVC'en.
+- Kræver netværksadgang fra clusteret til `registry.ollama.ai` første gang. Imaget `ollama/ollama` hentes fra Docker Hub
+  (kind: `kind load docker-image ollama/ollama:0.34.0 --name airport` hvis noden ikke selv kan hente det).
+- shop-service finder Ollama via `OLLAMA_URL=http://ollama:11434` i ConfigMap'en `shop-service-config`
+  (`k8s/services/shop-service.yaml`) sammen med `OLLAMA_MODEL`, `AI_ENABLED` og `OLLAMA_TIMEOUT`. Der er ingen
+  afhængighed den anden vej: shop-service starter og er Ready uden Ollama.
+- Podden beder om 3Gi RAM (limit 4Gi), da `qwen2.5:3b` bruger ca. 2,5 GB, når den er indlæst.
+- Lidt RAM i clusteret? Skift til `qwen2.5:1.5b` (ca. 1,5 GB RAM, svagere svar): ret `MODEL` i `ai/ollama.yaml`
+  **og** `OLLAMA_MODEL` i `shop-service-config`, sænk evt. requests/limits til 1536Mi/3Gi, og kør `kubectl apply` + `kubectl -n airport rollout restart deploy/shop-service`.
+- Fjern igen: `kubectl delete -k k8s/ai` (PVC'en med modellen slettes også).
