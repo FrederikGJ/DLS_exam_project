@@ -96,6 +96,13 @@
       <artifactId>awaitility</artifactId>
       <scope>test</scope>
     </dependency>
+    <!-- Fake Ollama HTTP server for the askRoute integration test (no real model in CI) -->
+    <dependency>
+      <groupId>org.wiremock</groupId>
+      <artifactId>wiremock-standalone</artifactId>
+      <version>3.13.1</version>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <build>
