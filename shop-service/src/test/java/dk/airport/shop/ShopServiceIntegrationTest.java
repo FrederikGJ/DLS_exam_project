@@ -17,6 +17,7 @@ import org.springframework.boot.test.autoconfigure.graphql.tester.AutoConfigureG
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.graphql.test.tester.GraphQlTester;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -41,9 +42,10 @@ import static org.mockito.Mockito.doThrow;
  * End-to-end test against real PostgreSQL + RabbitMQ (Testcontainers):
  * Flyway seed, shop queries/mutations, Dijkstra routing via GraphQL and idempotent event consumption.
  */
+@Testcontainers          // declared first: JUnit then closes the Spring context before it stops the containers
 @SpringBootTest
 @AutoConfigureGraphQlTester
-@Testcontainers
+@DirtiesContext          // close the context after the class, so the outbox relay never polls a stopped database
 class ShopServiceIntegrationTest {
 
     @Container
