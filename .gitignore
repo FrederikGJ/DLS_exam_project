@@ -96,7 +96,6 @@ venv/
 .claude/
 CLAUDE.md
 **/CLAUDE.md
-EXAM_NOTES_TICKET4.md
 
 # Local planning notes (kept local, not shared via the repo)
 reqs.md
