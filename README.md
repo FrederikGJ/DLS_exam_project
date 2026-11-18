@@ -247,6 +247,9 @@ RabbitMQ-klienten, som Spring Boot 3.5.16 stadig styrer – de er løftet med ve
 hver kørsel, hvert job og hvert trins log kan åbnes. På en pull request står jobbene som checks nederst i PR'en, og
 ved et push vises ✓/✗ ud for commit'et. Testrapporterne hentes under *Artifacts* på kørslens side.
 
+At en fejlende test faktisk gør pipelinen rød, er vist med en bevidst rød test på en midlertidig branch – se
+[docs/ci-red-test/](docs/ci-red-test/README.md).
+
 Kør det samme lokalt:
 
 ```bash
