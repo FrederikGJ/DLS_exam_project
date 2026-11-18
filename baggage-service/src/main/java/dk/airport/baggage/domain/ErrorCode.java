@@ -7,5 +7,7 @@ public enum ErrorCode {
     INVALID_STATE,
     BAGGAGE_LIMIT_EXCEEDED,
     CONFLICT,
+    UNAUTHORIZED,       // no (valid) token, but the operation requires a login
+    FORBIDDEN,          // logged in, but the role does not allow the operation
     INTERNAL_ERROR
 }

@@ -16,6 +16,11 @@ data:
   # be allowed explicitly. Keep this in sync with hostPort in k8s/kind-config.yaml.
   CORS_ALLOWED_ORIGINS: "http://airport.local,http://localhost,http://localhost:8090"
   GRAPHQL_PATH: /api/flights/graphql
+  # JWT validation (see keycloak/keycloak.yaml and README.md "Keycloak (login)"): OIDC_ISSUER_URI is the
+  # browser-facing issuer tokens carry (must equal KC_HOSTNAME + /realms/airport), JWK_SET_URI the in-cluster
+  # address the pod fetches the signing keys from.
+  OIDC_ISSUER_URI: http://localhost:8090/auth/realms/airport
+  JWK_SET_URI: http://keycloak:8080/auth/realms/airport/protocol/openid-connect/certs
 
 ---
 # DEV VALUES ONLY - replace before any shared cluster.

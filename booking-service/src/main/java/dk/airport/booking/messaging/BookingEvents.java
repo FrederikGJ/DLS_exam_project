@@ -26,7 +26,8 @@ public final class BookingEvents {
     public static BookingPayload payload(Booking b, String reason) {
         return new BookingPayload(b.getId(), b.getBookingReference(), b.getFlightId(), b.getFlightNumber(),
                 b.getDepartureTime(), b.getSeatNumber(), b.getPrice(), b.getCurrency(), b.getStatus(),
-                new PassengerPayload(b.getPassenger().getFirstName(), b.getPassenger().getLastName(), b.getPassenger().getEmail()),
+                new PassengerPayload(b.getPassenger().getFirstName(), b.getPassenger().getLastName(),
+                        b.getPassenger().getEmail()),
                 reason);
     }
 }

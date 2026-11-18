@@ -15,6 +15,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.springframework.amqp.AmqpException;
@@ -24,10 +25,13 @@ import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.graphql.tester.AutoConfigureGraphQlTester;
+import org.springframework.boot.test.autoconfigure.graphql.tester.AutoConfigureHttpGraphQlTester;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.context.annotation.Import;
 import org.springframework.graphql.test.tester.GraphQlTester;
+import org.springframework.graphql.test.tester.HttpGraphQlTester;
+import org.springframework.http.HttpHeaders;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -37,6 +41,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.time.Duration;
 import java.time.OffsetDateTime;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -47,16 +52,17 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doThrow;
 
 /**
  * End-to-end test against real PostgreSQL + RabbitMQ (Testcontainers): Flyway migrations, GraphQL,
  * booking/flight event consumption (idempotent) and publishing of baggage.* events.
  * Steps build on each other, hence the explicit ordering.
+ * Requests go over HTTP through the security filter chain; mutations carry a test token from {@link TestTokens}.
  */
-@SpringBootTest
-@AutoConfigureGraphQlTester
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@AutoConfigureHttpGraphQlTester
+@Import(TestTokens.class)
 @Testcontainers
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class BaggageServiceIntegrationTest {
@@ -79,7 +85,11 @@ class BaggageServiceIntegrationTest {
     static SimpleMessageListenerContainer testListener;
     static String firstTag;
 
-    @Autowired GraphQlTester graphQlTester;
+    /** Anonymous client - enough for public queries. */
+    @Autowired HttpGraphQlTester graphQlTester;
+    /** Same client with a PASSENGER (anna) / OPERATIONS (ops) token. */
+    GraphQlTester asPassenger;
+    GraphQlTester asOperations;
     /** Spy so a single test can make the outbox relay's publish attempt fail (reset after every test). */
     @MockitoSpyBean RabbitTemplate rabbitTemplate;
     @Autowired ObjectMapper objectMapper;
@@ -92,7 +102,8 @@ class BaggageServiceIntegrationTest {
     @Autowired MeterRegistry meterRegistry;
 
     @BeforeAll
-    static void startTestListener(@Autowired ConnectionFactory connectionFactory, @Autowired ObjectMapper objectMapper) {
+    static void startTestListener(@Autowired ConnectionFactory connectionFactory,
+                                  @Autowired ObjectMapper objectMapper) {
         RabbitAdmin admin = new RabbitAdmin(connectionFactory);
         Queue queue = new Queue(TEST_QUEUE, false, false, false);
         admin.declareQueue(queue);
@@ -117,6 +128,12 @@ class BaggageServiceIntegrationTest {
         }
     }
 
+    @BeforeEach
+    void authenticatedClients() {
+        asPassenger = graphQlTester.mutate().header(HttpHeaders.AUTHORIZATION, TestTokens.passenger()).build();
+        asOperations = graphQlTester.mutate().header(HttpHeaders.AUTHORIZATION, TestTokens.operations()).build();
+    }
+
     @Test
     @Order(1)
     void unknownBookingIsNotFound() {
@@ -133,7 +150,8 @@ class BaggageServiceIntegrationTest {
         await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
                 assertThat(snapshotRepository.findById(REF)).isPresent());
 
-        graphQlTester.document("query($ref: String!) { bookingSnapshot(reference: $ref) { bookingReference passengerName flightNumber status } }")
+        asPassenger.document("query($ref: String!) { bookingSnapshot(reference: $ref) { "
+                        + "bookingReference passengerName flightNumber status } }")
                 .variable("ref", REF)
                 .execute()
                 .path("bookingSnapshot.status").entity(String.class).isEqualTo("PENDING_PAYMENT")
@@ -164,7 +182,8 @@ class BaggageServiceIntegrationTest {
                 .path("registerBaggage.flightNumber").entity(String.class).isEqualTo(FLIGHT_NUMBER)
                 .path("registerBaggage.lastLocation").entity(String.class).isEqualTo("CHECK_IN")
                 .path("registerBaggage.weightKg").entity(Double.class).isEqualTo(23.0)
-                .path("registerBaggage.tagNumber").entity(String.class).matches(t -> t.matches("^BAG-[A-Z0-9]{8}$")).get();
+                .path("registerBaggage.tagNumber").entity(String.class)
+                .matches(t -> t.matches("^BAG-[A-Z0-9]{8}$")).get();
 
         List<EventEnvelope> events = awaitEvents(e -> e.eventType().equals("baggage.registered")
                 && e.payload().path("tagNumber").asText().equals(firstTag), 1);
@@ -190,8 +209,10 @@ class BaggageServiceIntegrationTest {
     @Order(5)
     void maxThreeCheckedBagsPerBooking() {
         // one CHECKED bag already exists (step 3); two more are fine
-        register(REF, "18.5", "CHECKED").path("registerBaggage.tagNumber").entity(String.class).matches(t -> t.startsWith("BAG-"));
-        register(REF, "32.0", "CHECKED").path("registerBaggage.tagNumber").entity(String.class).matches(t -> t.startsWith("BAG-"));
+        register(REF, "18.5", "CHECKED").path("registerBaggage.tagNumber").entity(String.class)
+                .matches(t -> t.startsWith("BAG-"));
+        register(REF, "32.0", "CHECKED").path("registerBaggage.tagNumber").entity(String.class)
+                .matches(t -> t.startsWith("BAG-"));
 
         register(REF, "10.0", "CHECKED").errors().satisfy(errors -> {
             assertThat(errors).hasSize(1);
@@ -207,7 +228,8 @@ class BaggageServiceIntegrationTest {
     @Test
     @Order(6)
     void updateStatusPublishesStatusChanged() {
-        graphQlTester.document("mutation($tag: String!) { updateBaggageStatus(tagNumber: $tag, status: LOADED, location: \"Belt 4\") { tagNumber status lastLocation } }")
+        asOperations.document("mutation($tag: String!) { updateBaggageStatus(tagNumber: $tag, status: LOADED, "
+                        + "location: \"Belt 4\") { tagNumber status lastLocation } }")
                 .variable("tag", firstTag)
                 .execute()
                 .path("updateBaggageStatus.status").entity(String.class).isEqualTo("LOADED")
@@ -220,7 +242,8 @@ class BaggageServiceIntegrationTest {
         assertThat(events.get(0).payload().path("location").asText()).isEqualTo("Belt 4");
         assertThat(events.get(0).payload().path("bookingReference").asText()).isEqualTo(REF);
 
-        graphQlTester.document("mutation { updateBaggageStatus(tagNumber: \"BAG-NOPE0000\", status: LOST) { tagNumber } }")
+        asOperations.document("mutation { updateBaggageStatus(tagNumber: \"BAG-NOPE0000\", status: LOST) { "
+                        + "tagNumber } }")
                 .execute()
                 .errors().satisfy(errors -> {
                     assertThat(errors).hasSize(1);
@@ -238,7 +261,8 @@ class BaggageServiceIntegrationTest {
         await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
             List<Baggage> bags = baggageRepository.findByFlightNumberIgnoreCaseOrderByCreatedAt(FLIGHT_NUMBER);
             assertThat(bags).hasSize(4);
-            assertThat(bags).allMatch(b -> b.getStatus() == BaggageStatus.REGISTERED && "RETURN_DESK".equals(b.getLastLocation()));
+            assertThat(bags).allMatch(b -> b.getStatus() == BaggageStatus.REGISTERED
+                    && "RETURN_DESK".equals(b.getLastLocation()));
         });
         assertThat(snapshotRepository.findById(REF).orElseThrow().getStatus()).isEqualTo("CANCELLED");
 
@@ -251,26 +275,68 @@ class BaggageServiceIntegrationTest {
     @Test
     @Order(8)
     void queriesReturnBaggage() {
-        graphQlTester.document("query($ref: String!) { baggageByBooking(reference: $ref) { tagNumber status lastLocation type weightKg } }")
+        asPassenger.document("query($ref: String!) { baggageByBooking(reference: $ref) { "
+                        + "tagNumber status lastLocation type weightKg } }")
                 .variable("ref", REF)
                 .execute()
                 .path("baggageByBooking").entityList(Object.class).hasSize(4)
-                .path("baggageByBooking[*].lastLocation").entityList(String.class).containsExactly("RETURN_DESK", "RETURN_DESK", "RETURN_DESK", "RETURN_DESK");
+                .path("baggageByBooking[*].lastLocation").entityList(String.class)
+                .containsExactly("RETURN_DESK", "RETURN_DESK", "RETURN_DESK", "RETURN_DESK");
 
-        graphQlTester.document("query($fn: String!) { baggageByFlight(flightNumber: $fn) { tagNumber } }")
+        asOperations.document("query($fn: String!) { baggageByFlight(flightNumber: $fn) { tagNumber } }")
                 .variable("fn", FLIGHT_NUMBER)
                 .execute()
                 .path("baggageByFlight").entityList(Object.class).hasSize(4);
 
-        graphQlTester.document("query($tag: String!) { baggage(tagNumber: $tag) { tagNumber bookingReference passengerName status updatedAt } }")
+        asPassenger.document("query($tag: String!) { baggage(tagNumber: $tag) { "
+                        + "tagNumber bookingReference passengerName status updatedAt } }")
                 .variable("tag", firstTag)
                 .execute()
                 .path("baggage.bookingReference").entity(String.class).isEqualTo(REF)
                 .path("baggage.status").entity(String.class).isEqualTo("REGISTERED");
 
-        graphQlTester.document("{ baggage(tagNumber: \"BAG-UNKNOWN1\") { tagNumber } }")
+        asPassenger.document("{ baggage(tagNumber: \"BAG-UNKNOWN1\") { tagNumber } }")
                 .execute()
                 .path("baggage").valueIsNull();
+    }
+
+    @Test
+    @Order(9)
+    void registrationWithTheSameIdempotencyKeyIsReplayedNotRepeated() throws Exception {
+        String ref = "GQLIDM";
+        Map<String, Object> payload = new HashMap<>(bookingPayload("CONFIRMED"));
+        payload.put("bookingReference", ref);
+        payload.put("flightNumber", "DY1234");
+        publish(UUID.randomUUID().toString(), "booking.confirmed", payload);
+        await().atMost(Duration.ofSeconds(10)).until(() -> snapshotRepository.findById(ref).isPresent());
+
+        // the same key twice -> the same bag; the same key with other data -> CONFLICT
+        String key = UUID.randomUUID().toString();
+        String tag = registerWithKey(ref, "15.0", "CHECKED", key)
+                .path("registerBaggage.tagNumber").entity(String.class).get();
+        registerWithKey(ref, "15.0", "CHECKED", key)
+                .path("registerBaggage.tagNumber").entity(String.class).isEqualTo(tag);
+        registerWithKey(ref, "16.0", "CHECKED", key).errors().satisfy(errors ->
+                assertThat(errors.get(0).getExtensions()).containsEntry("code", "CONFLICT"));
+
+        assertThat(baggageRepository.findByBookingReferenceIgnoreCaseOrderByCreatedAt(ref)).hasSize(1);
+
+        // a repeated status update is a no-op: one baggage.status.changed, not two
+        for (int i = 0; i < 2; i++) {
+            asOperations.document("mutation($tag: String!) { updateBaggageStatus(tagNumber: $tag, status: SECURITY, "
+                            + "location: \"Security T2\") { status } }")
+                    .variable("tag", tag).execute()
+                    .path("updateBaggageStatus.status").entity(String.class).isEqualTo("SECURITY");
+        }
+        await().during(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(10)).until(() -> RECEIVED.stream()
+                .filter(e -> e.eventType().equals("baggage.status.changed")
+                        && e.payload().path("tagNumber").asText().equals(tag))
+                .count() == 1);
+        // exactly one baggage.registered - give the relay a few poll intervals to send a (wrong) second one
+        await().during(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(10)).until(() -> RECEIVED.stream()
+                .filter(e -> e.eventType().equals("baggage.registered")
+                        && e.payload().path("bookingReference").asText().equals(ref))
+                .count() == 1);
     }
 
     // ------------------------------------------------------------------ outbox guarantees
@@ -323,8 +389,20 @@ class BaggageServiceIntegrationTest {
 
     // ------------------------------------------------------------------ helpers
 
+    private GraphQlTester.Response registerWithKey(String ref, String weight, String type, String key) {
+        return asPassenger.document("""
+                mutation($ref: String!, $w: BigDecimal!, $t: BaggageType!, $key: String) {
+                  registerBaggage(bookingReference: $ref, weightKg: $w, type: $t, idempotencyKey: $key) { tagNumber }
+                }""")
+                .variable("ref", ref).variable("w", weight).variable("t", type).variable("key", key)
+                .execute();
+    }
+
     private GraphQlTester.Response register(String ref, String weight, String type) {
-        return graphQlTester.document("mutation($ref: String!, $w: BigDecimal!, $t: BaggageType!) { registerBaggage(bookingReference: $ref, weightKg: $w, type: $t) { id tagNumber bookingReference passengerName flightNumber weightKg type status lastLocation updatedAt } }")
+        return asPassenger.document("mutation($ref: String!, $w: BigDecimal!, $t: BaggageType!) { "
+                        + "registerBaggage(bookingReference: $ref, weightKg: $w, type: $t) { "
+                        + "id tagNumber bookingReference passengerName flightNumber weightKg type status lastLocation "
+                        + "updatedAt } }")
                 .variable("ref", ref)
                 .variable("w", weight)
                 .variable("t", type)
@@ -341,7 +419,8 @@ class BaggageServiceIntegrationTest {
     }
 
     private void publish(String eventId, String type, Map<String, Object> payload) throws Exception {
-        EventEnvelope env = new EventEnvelope(eventId, type, OffsetDateTime.now(), "test", objectMapper.valueToTree(payload));
+        EventEnvelope env = new EventEnvelope(eventId, type, OffsetDateTime.now(), "test",
+                objectMapper.valueToTree(payload));
         MessageProperties props = new MessageProperties();
         props.setContentType(MessageProperties.CONTENT_TYPE_JSON);
         rabbitTemplate.send("airport.events", type, new Message(objectMapper.writeValueAsBytes(env), props));

@@ -1,0 +1,19 @@
+# Trivy exceptions for the image scan in the `security` job of .github/workflows/ci.yml. Every entry says why it is
+# accepted; any other HIGH/CRITICAL finding with a fix fails the job.
+#
+# Both entries are in Spring Framework 6.2.19, the version Spring Boot 3.5.16 (the last 3.5.x) manages. The fixes
+# only exist in Spring Framework 7.0.9 (= Spring Boot 4), i.e. a major upgrade of every service, which is outside the
+# scope of the pipeline ticket. Neither vulnerable feature is used: the services expose GraphQL only (Spring for
+# GraphQL's HTTP handler) plus actuator - there are no Spring MVC controllers, views, view resolvers, XsltView or
+# server-sent events in the code (checked with grep over */src/main/java, 2026-11-18). Revisit when the services
+# move to Spring Boot 4.
+vulnerabilities:
+  - id: CVE-2026-47884
+    statement: >-
+      spring-webmvc XsltView: SSRF/RCE only when an application renders views with XsltView behind a "/**" mapping
+      without an explicit view name. No service renders views (GraphQL + actuator only), so the vulnerable code path
+      is unreachable. Fixed only in Spring Framework 7.0.9.
+  - id: CVE-2026-47890
+    statement: >-
+      spring-webmvc/webflux: stream corruption in Server-Sent Events with view fragments. No service uses SSE or view
+      fragments (no GraphQL subscriptions either). Fixed only in Spring Framework 7.0.9.

@@ -3,6 +3,9 @@
 Alle services kommunikerer asynkront via **én topic exchange** `airport.events`.
 Routing key = eventnavn (fx `booking.confirmed`).
 
+Den maskinlæsbare udgave af kontrakten er [`asyncapi.yaml`](asyncapi.yaml) (AsyncAPI 3.1), som valideres i CI
+med AsyncAPI CLI og `scripts/check-asyncapi.sh`.
+
 ## Envelope
 
 Alle events er JSON med samme envelope. `payload` er event-specifik (se nedenfor).
@@ -129,7 +132,7 @@ Lyttere: flight-service (sæde `is_available=false`), baggage-service (opretter/
 
 ### `booking.cancelled`
 Samme payload med `"status": "CANCELLED"` og et ekstra felt `"reason"`, fx `"Flight cancelled"`
-eller `"Cancelled by passenger"` eller `"Payment failed"`.
+eller `"Cancelled by passenger"` eller `"Payment failed: <failureReason>"` (fx `"Payment failed: Insufficient funds"`).
 Lyttere: flight-service (sæde frigives), payment-service (automatisk refund hvis COMPLETED payment findes),
 baggage-service (snapshot → CANCELLED).
 

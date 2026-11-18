@@ -1,0 +1,10 @@
+# Dev/demo tools that are NOT part of the airport system and NOT in the default stack (no login). Apply them
+# on top of it on a local dev cluster only:  kubectl apply -k k8s/tools/   (remove: kubectl delete -k k8s/tools/)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: airport
+
+resources:
+  - pgadmin.yaml
+  - pgadmin-ingress.yaml

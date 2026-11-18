@@ -19,7 +19,25 @@
 
   <properties>
     <java.version>21</java.version>
+    <!-- Security overrides of versions managed by Spring Boot 3.5.16 (the last 3.5.x), found by the Trivy image scan
+         in CI (job `security` in .github/workflows/ci.yml, 2026-11-18). Remove when the parent manages these or newer:
+         tomcat 10.1.55 CVE-2026-55276/-65182/-65637 (CRITICAL), jackson 2.21.4 CVE-2026-89407/-89425/-68497/-91776/
+         -91777 (HIGH), postgresql 42.7.11 CVE-2026-54291 (HIGH), amqp-client 5.25.0 CVE-2026-63337/-69219/-75516
+         (HIGH); amqp-client 5.3x pulls in Netty, which is pinned to the newest 4.1.x as well. graphql-java is raised
+         to the newest 24.x for its shaded Guava (CVE-2026-102554); see .trivyignore.yaml for what stays accepted. -->
+    <tomcat.version>10.1.62</tomcat.version>
+    <jackson-bom.version>2.21.8</jackson-bom.version>
+    <postgresql.version>42.7.14</postgresql.version>
+    <rabbit-amqp-client.version>5.38.0</rabbit-amqp-client.version>
+    <netty.version>4.1.141.Final</netty.version>
+    <graphql-java.version>24.5</graphql-java.version>
     <graphql-java-extended-scalars.version>24.0</graphql-java-extended-scalars.version>
+    <!-- static analysis, only active with -Pci (see the `ci` profile at the bottom) -->
+    <maven-checkstyle-plugin.version>3.6.0</maven-checkstyle-plugin.version>
+    <checkstyle.version>14.1.0</checkstyle.version>
+    <spotbugs-maven-plugin.version>4.10.4.1</spotbugs-maven-plugin.version>
+    <spotbugs.version>4.10.4</spotbugs.version>
+    <findsecbugs-plugin.version>1.14.0</findsecbugs-plugin.version>
   </properties>
 
   <dependencies>
@@ -46,6 +64,14 @@
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
     </dependency>
     <dependency>
       <groupId>com.graphql-java</groupId>
@@ -75,6 +101,17 @@
     <dependency>
       <groupId>org.springframework.graphql</groupId>
       <artifactId>spring-graphql-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.security</groupId>
+      <artifactId>spring-security-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!-- WebTestClient for HttpGraphQlTester: the integration tests go through the real HTTP security chain -->
+    <dependency>
+      <groupId>org.springframework</groupId>
+      <artifactId>spring-webflux</artifactId>
       <scope>test</scope>
     </dependency>
     <dependency>
@@ -112,4 +149,80 @@
       </plugin>
     </plugins>
   </build>
+
+  <!-- Static analysis for CI: `mvn -Pci verify` runs Checkstyle (validate phase, config/checkstyle.xml) and
+       SpotBugs + find-sec-bugs (verify phase, exclusions with reasons in config/spotbugs-exclude.xml). Any finding
+       fails the build. Without -Pci (`mvn package`, the Docker build) nothing changes. -->
+  <profiles>
+    <profile>
+      <id>ci</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-checkstyle-plugin</artifactId>
+            <version>${maven-checkstyle-plugin.version}</version>
+            <dependencies>
+              <dependency>
+                <groupId>com.puppycrawl.tools</groupId>
+                <artifactId>checkstyle</artifactId>
+                <version>${checkstyle.version}</version>
+              </dependency>
+            </dependencies>
+            <configuration>
+              <configLocation>${project.basedir}/../config/checkstyle.xml</configLocation>
+              <includeTestSourceDirectory>true</includeTestSourceDirectory>
+              <consoleOutput>true</consoleOutput>
+              <failOnViolation>true</failOnViolation>
+              <violationSeverity>warning</violationSeverity>
+              <linkXRef>false</linkXRef>
+            </configuration>
+            <executions>
+              <execution>
+                <id>checkstyle</id>
+                <phase>validate</phase>
+                <goals>
+                  <goal>check</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>com.github.spotbugs</groupId>
+            <artifactId>spotbugs-maven-plugin</artifactId>
+            <version>${spotbugs-maven-plugin.version}</version>
+            <dependencies>
+              <dependency>
+                <groupId>com.github.spotbugs</groupId>
+                <artifactId>spotbugs</artifactId>
+                <version>${spotbugs.version}</version>
+              </dependency>
+            </dependencies>
+            <configuration>
+              <effort>Max</effort>
+              <threshold>Medium</threshold>
+              <failOnError>true</failOnError>
+              <excludeFilterFile>${project.basedir}/../config/spotbugs-exclude.xml</excludeFilterFile>
+              <plugins>
+                <plugin>
+                  <groupId>com.h3xstream.findsecbugs</groupId>
+                  <artifactId>findsecbugs-plugin</artifactId>
+                  <version>${findsecbugs-plugin.version}</version>
+                </plugin>
+              </plugins>
+            </configuration>
+            <executions>
+              <execution>
+                <id>spotbugs</id>
+                <phase>verify</phase>
+                <goals>
+                  <goal>check</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>

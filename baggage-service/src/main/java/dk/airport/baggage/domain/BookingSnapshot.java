@@ -35,7 +35,8 @@ public class BookingSnapshot {
 
     protected BookingSnapshot() {}
 
-    public BookingSnapshot(String bookingReference, String passengerName, String flightNumber, Long flightId, String status) {
+    public BookingSnapshot(String bookingReference, String passengerName, String flightNumber, Long flightId,
+                           String status) {
         this.bookingReference = bookingReference;
         this.passengerName = passengerName;
         this.flightNumber = flightNumber;

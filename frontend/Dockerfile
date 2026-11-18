@@ -1,7 +1,9 @@
 # Static frontend served by nginx. No build step: plain HTML/CSS/JS.
 FROM nginx:alpine
+# apk upgrade: the base image lags behind Alpine's security fixes; Trivy scans the result in CI.
+RUN apk upgrade --no-cache
 COPY nginx.conf /etc/nginx/conf.d/default.conf
-COPY index.html /usr/share/nginx/html/index.html
+COPY index.html silent-check-sso.html /usr/share/nginx/html/
 COPY css /usr/share/nginx/html/css
 COPY js  /usr/share/nginx/html/js
 EXPOSE 80
