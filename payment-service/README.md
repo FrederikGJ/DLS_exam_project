@@ -176,7 +176,7 @@ og køerne i [events.md](../docs/events.md#køer-bindings-og-dead-letter).
 | `SPRING_PROFILES_ACTIVE` | – | `prod` (k8s): GraphiQL slået fra og JSON-logs; compose sætter `dev` |
 | `OIDC_ISSUER_URI` | `http://localhost:8180/realms/airport` | Den `iss`, tokens skal have. compose: samme værdi; kind: `http://localhost:8090/auth/realms/airport` |
 | `JWK_SET_URI` | `http://localhost:8180/realms/airport/protocol/openid-connect/certs` | Hvor signeringsnøglerne hentes. compose: `http://keycloak:8080/realms/airport/protocol/openid-connect/certs`; kind: `http://keycloak:8080/auth/realms/airport/protocol/openid-connect/certs` |
-| `CORS_ALLOWED_ORIGINS` | `http://localhost:8080` | Kommasepareret (`app.cors.allowed-origins`); gælder alle stier via `SecurityConfig`, og preflight kræver intet token |
+| `CORS_ALLOWED_ORIGINS` | `http://localhost:8080` | Kommasepareret (`app.cors.allowed-origins`); gælder alle stier via `SecurityConfig`, og preflight kræver intet token. compose: `http://localhost:8080,http://127.0.0.1:8080`; kind: `http://airport.local,http://localhost,http://localhost:8090` |
 | `RABBITMQ_*` | localhost-værdier | Fælles for alle services, se [rod-README'en](../README.md#konfiguration) |
 
 Med begge OIDC-værdier sat bruger Spring aldrig OIDC discovery: nøglerne hentes fra `JWK_SET_URI` ved første token, og
@@ -211,7 +211,7 @@ bekræftet. Se også [Kør en enkelt service uden Docker](../README.md#kør-en-e
 
 | Testklasse | Type | Hvad den viser |
 |------------|------|----------------|
-| `service/PaymentSimulatorTest` | Unit, fast `Clock` (11-09-2026), 8 tests | Gyldigt kort godkendes; `0000` → "Insufficient funds"; `08/26` → "Card expired"; et kort, der udløber i indeværende måned, gælder; `MM/YYYY` accepteres; udløb vinder over `0000`; `13/28` og `2028-12` → `VALIDATION_ERROR`; `cardLast4` ignorerer mellemrum |
+| `service/PaymentSimulatorTest` | Unit, fast `Clock` (11-09-2026), 8 tests | Gyldigt kort godkendes; `0000` → "Insufficient funds"; `08/26` → "Card expired"; et kort, der udløber i indeværende måned, gælder; `MM/YYYY` accepteres; udløb vinder over `0000`; `13/28` → `VALIDATION_ERROR`, og `2028-12` afvises med `ApiException`; `cardLast4` ignorerer mellemrum |
 | `PaymentServiceIntegrationTest` | Integration: Testcontainers (Postgres 16 + RabbitMQ 3.13), GraphQL over HTTP gennem security-filterkæden (`HttpGraphQlTester`) med test-JWT (anna til `pay`/`paymentsByBooking`, ops til `refund`), 11 tests | `pay` → `COMPLETED` og `payment.completed` på exchangen (envelope med `eventId`, `producer`, `paymentId`), rækken har hverken kortnummer eller CVV; anden `pay` → `ALREADY_PAID`; `0000` → `FAILED` + `payment.failed`; `booking.cancelled` leveret to gange med samme `eventId` refunderer én gang og giver ét `payment.refunded`, ukendt reference og `booking.confirmed` ændrer intet; `paymentsByBooking` (også tom liste); `refund` af `FAILED` → `INVALID_STATE`, ukendt id → `NOT_FOUND`; manuel `refund` → `payment.refunded`; ugyldigt input → `VALIDATION_ERROR` med feltnavne og intet gemt; outbox: `publish` uden transaktion afvises, rollback giver hverken række eller event, relayet prøver igen efter en simuleret broker-fejl (`attempts`, `last_error`, `outbox.pending` 0 bagefter) |
 | `SecurityIntegrationTest` | Integration: Testcontainers, HTTP med test-JWT, 5 tests | Readiness uden token; `pay`, `paymentsByBooking`, `refund` og `payment(id)` uden token → `UNAUTHORIZED`; PASSENGER betaler og ser historikken, men `payment(id)` og `refund` → `FORBIDDEN`, OPERATIONS må begge; udløbet token, fremmed issuer og `not.a.jwt` → HTTP 401 med `invalid_token`; CORS-preflight fra `http://localhost:8080` tilladt |
 
@@ -223,10 +223,14 @@ De første 8 integrationstests kører i fast rækkefølge (`@Order`) og bygger v
 cd payment-service && mvn -B -ntp -Pci verify   # som CI: tests + Checkstyle + SpotBugs
 ```
 
-Det er samme kommando, som CI's `backend`-job kører for payment-service ([CI](../README.md#ci-github-actions));
-Surefire-rapporterne uploades som artifact `reports-payment-service`. Kører alle **24 tests** (8 + 11 + 5). Docker
-skal køre (Testcontainers starter `postgres:16-alpine` og `rabbitmq:3.13-management-alpine`). Samspillet med
-booking-service testes end-to-end af [smoke-testen](../README.md#automatisk-smoke-test-af-flow-ad) mod en kørende stak.
+Det er samme kommando, som CI-jobbet `backend · payment-service` kører ([CI](../README.md#ci-github-actions));
+Surefire-, Checkstyle- og SpotBugs-rapporterne uploades som artifact `reports-payment-service`, også når noget fejler.
+Kører alle **24 tests** (8 + 11 + 5). Docker skal køre (Testcontainers starter `postgres:16-alpine` og
+`rabbitmq:3.13-management-alpine`). Samspillet med booking-service testes end-to-end af
+[smoke-testen](../README.md#automatisk-smoke-test-af-flow-ad) mod en kørende stak og af
+[systemtestene](../README.md#systemtest-services-der-samarbejder-i-containere) (`system-tests/`, CI-jobbet `system`),
+der starter det byggede image sammen med flight- og booking-service: `pay` → `payment.completed` → `CONFIRMED`,
+aflyst fly → `booking.cancelled` → `payment.refunded`, og et kort på `0000` → `payment.failed` → bookingen annulleres.
 
 ## Drift
 

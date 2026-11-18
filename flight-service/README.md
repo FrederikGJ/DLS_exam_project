@@ -162,7 +162,7 @@ prøves 3 gange og ender derefter via `airport.events.dlx` i `flight-service.dlq
 | `SPRING_PROFILES_ACTIVE` | – | `prod` (Kubernetes): GraphiQL slået fra og JSON-logs; compose sætter `dev` (= defaults) |
 | `OIDC_ISSUER_URI` | `http://localhost:8180/realms/airport` | Den streng, tokenets `iss` skal være lig med; compose samme værdi, kind `http://localhost:8090/auth/realms/airport` |
 | `JWK_SET_URI` | `http://localhost:8180/realms/airport/protocol/openid-connect/certs` | Hvor Keycloaks signeringsnøgler hentes; compose `http://keycloak:8080/realms/airport/protocol/openid-connect/certs`, kind `http://keycloak:8080/auth/realms/airport/protocol/openid-connect/certs` |
-| `CORS_ALLOWED_ORIGINS` | `http://localhost:8080` | Kommasepareret (`app.cors.allowed-origins`); anvendes i `SecurityConfig` på alle stier, så preflight ikke kræver token |
+| `CORS_ALLOWED_ORIGINS` | `http://localhost:8080` | Kommasepareret (`app.cors.allowed-origins`); anvendes i `SecurityConfig` på alle stier, så preflight ikke kræver token; compose `http://localhost:8080,http://127.0.0.1:8080`, Kubernetes `http://airport.local,http://localhost,http://localhost:8090` |
 | `RABBITMQ_*` | `localhost:5672`, `airport`/`airport` | Fælles for alle services – se [Konfiguration](../README.md#konfiguration) |
 
 Begge OIDC-værdier er sat, så Spring bruger aldrig OIDC discovery – se
@@ -193,8 +193,9 @@ GraphiQL (åben, ikke i `prod`): `http://localhost:8081/graphiql?path=/api/fligh
 `http://localhost:8080/graphiql?path=/api/flights/graphql` med `mvn spring-boot:run`; til mutationer sættes
 `{"Authorization": "Bearer <token>"}` under *Headers*. I Kubernetes (uden GraphiQL) er API'et
 `http://localhost:8090/api/flights/graphql` gennem Ingress på kind ([k8s/README.md](../k8s/README.md#alternativ-kind))
-og `http://<minikube ip>/api/flights/graphql` på [minikube](../k8s/README.md#minikube); token fra
+og `http://<minikube ip>/api/flights/graphql` på [minikube](../k8s/README.md#minikube); token på kind fra
 `http://localhost:8090/auth/realms/airport/protocol/openid-connect/token` ([Keycloak](../k8s/README.md#keycloak-login)).
+På minikube virker login først, når issuer-værdierne er rettet til `http://<minikube ip>/auth` (samme afsnit).
 
 ## Test
 
@@ -203,7 +204,7 @@ og `http://<minikube ip>/api/flights/graphql` på [minikube](../k8s/README.md#mi
 | `PricingServiceTest` (5) | Unit | ECONOMY = basispris, BUSINESS × 2,5 (899 → 2247,50), FIRST × 4, `HALF_UP`-afrunding (333,33 × 2,5 = 833,33), negativ basispris afvises |
 | `SeatGeneratorTest` (4) | Unit | 180 unikke sæder `1A`–`30F`, række 1–2 BUSINESS, antal der ikke går op i 6, 0 sæder afvises |
 | `FlightServiceIntegrationTest` (8) | Integration (HTTP) | Seed via Flyway; filter (`destination: "lhr"`) + pris `1A` på LHR = 2247,50; `booking.confirmed` optager sædet idempotent (samme `eventId` to gange) og `booking.cancelled` frigiver det; aflysning giver `flight.status.changed` + `flight.cancelled` og anden aflysning `INVALID_STATE`; `createFlight` giver 100 sæder og `flight.created` gennem outboxen; outbox: `publish` uden transaktion afvises, rollback efterlader intet event, relayet prøver igen til brokeren bekræfter (`outbox.pending` = 0); mutationerne sendes med et OPERATIONS-token |
-| `SecurityIntegrationTest` (7) | Integration (HTTP) | `flights` og readiness uden token; `updateGate`/`updateFlightStatus` uden token `UNAUTHORIZED`, PASSENGER `FORBIDDEN`, OPERATIONS tilladt (`DELAYED`); udløbet/fremmed/ugyldigt token → HTTP 401 med `invalid_token`; `/actuator/metrics` giver 401 uden token og 200 med OPERATIONS; CORS-preflight fra `http://localhost:8080` med `authorization`-header |
+| `SecurityIntegrationTest` (7) | Integration (HTTP) | `flights` og readiness uden token; `updateGate`/`updateFlightStatus` uden token `UNAUTHORIZED`; `updateFlightStatus` som PASSENGER `FORBIDDEN` og som OPERATIONS tilladt (`DELAYED`); udløbet/fremmed/ugyldigt token → HTTP 401 med `invalid_token`; `/actuator/metrics` giver 401 uden token og 200 med OPERATIONS; CORS-preflight fra `http://localhost:8080` med `authorization`-header |
 
 `TestTokens` (ingen tests) erstatter Keycloak: den minter RS256-JWT'er med Keycloaks claims, signeret med en testnøgle
 (`passenger()` = anna, `operations()` = ops), og leverer en `JwtDecoder`, der stoler på nøglen. Begge integrationstests
@@ -216,13 +217,14 @@ mvn test                 # 24 tests
 mvn -B -ntp -Pci verify  # det samme som backend-jobbet i CI (.github/workflows/ci.yml): tests + Checkstyle + SpotBugs
 ```
 
-CI kører kommandoen for hver service ved hvert push – se [CI (GitHub Actions)](../README.md#ci-github-actions).
+CI kører kommandoen ved hvert push i jobbet `backend · flight-service` og uploader Surefire-, Checkstyle- og
+SpotBugs-rapporterne som artifact `reports-flight-service` – se [CI (GitHub Actions)](../README.md#ci-github-actions).
 
 ## Drift
 
 - **Health** (åben, uden token): liveness på `/actuator/health/liveness`, readiness på `/actuator/health/readiness`
-  (grupperne `readinessState`, `db`, `rabbit`; `show-details: always`). Compose' healthcheck kalder readiness, og
-  booking-service starter først, når flight-service er `healthy`.
+  (readiness-gruppen: `readinessState`, `db`, `rabbit`; `show-details: always`). Compose' healthcheck kalder
+  readiness, og booking-service starter først, når flight-service er `healthy`.
 - **Probes** (`k8s/services/flight-service.yaml`): startup (op til 30 × 5 s) og liveness på `/actuator/health/liveness`,
   readiness på `/actuator/health/readiness`. Der er ingen initContainer: er `flight-db` ikke klar, fejler opstarten
   (Flyway), og Kubernetes genstarter containeren.

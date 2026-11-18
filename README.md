@@ -153,7 +153,11 @@ docker compose exec booking-db psql -U booking -d booking_db \
 # -> booking.created står med published_at = NULL og attempts der tæller op
 docker compose start rabbitmq
 # få sekunder senere: published_at er sat, og baggage-service kender bookingen (Flow B kan fortsætte)
-curl -s localhost:8082/actuator/metrics/outbox.pending | jq '.measurements[0].value'   # 0 = tom backlog
+# /actuator/metrics kræver et OPERATIONS-token (se Login og roller)
+TOKEN=$(curl -s -d client_id=airport-frontend -d grant_type=password -d username=ops -d password=ops \
+  http://localhost:8180/realms/airport/protocol/openid-connect/token | jq -r .access_token)
+curl -s -H "Authorization: Bearer $TOKEN" localhost:8082/actuator/metrics/outbox.pending \
+  | jq '.measurements[0].value'   # 0 = tom backlog
 ```
 
 ### Kør en enkelt service uden Docker (udvikling)

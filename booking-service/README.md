@@ -56,8 +56,8 @@ ejerskab (se [Forretningsregler](#forretningsregler)). Rollerne for hele systeme
 | `/actuator/health/liveness`, `/actuator/health/readiness`, `/actuator/info` | REST (GET) | Alle | Probes og info, se [Drift](#drift) |
 | `/actuator/metrics/**` | REST (GET) | OPERATIONS | Metrics, fx `outbox.pending` |
 
-`Booking` har ud over status og reference flysnapshottet (`flightNumber`, `departureTime`, `gate`, `flightStatus`),
-`seatNumber`, `price`, `currency`, `passenger`, `createdAt` og `updatedAt`.
+`Booking` har ud over `id`, `bookingReference`, `status` og `flightId` flysnapshottet (`flightNumber`, `departureTime`,
+`gate`, `flightStatus`), `seatNumber`, `price`, `currency`, `passenger`, `createdAt` og `updatedAt`.
 
 Fejlkoder i `errors[].extensions.code` (fælles fejlmodel i [architecture.md](../docs/architecture.md#graphql-fejl),
 login-fejl i [Fejl og frontendens reaktion](../docs/architecture.md#fejl-og-frontendens-reaktion)):
@@ -128,7 +128,8 @@ curl -s http://localhost:8082/api/bookings/graphql -H 'Content-Type: application
 - **Betaling gennemført:** `payment.completed` bekræfter en `PENDING_PAYMENT`-booking. For en booking, der allerede er
   `CONFIRMED`/`CHECKED_IN`, ignoreres eventet; for en `CANCELLED` booking ændres intet, og der logges en advarsel.
 - **Afvist betaling:** `payment.failed` aflyser en `PENDING_PAYMENT`-booking med årsagen
-  `Payment failed: <failureReason>`; i andre tilstande ignoreres eventet.
+  `Payment failed: <failureReason>` (bare `Payment failed`, hvis `failureReason` mangler); i andre tilstande ignoreres
+  eventet.
 - **Aflyst fly:** `flight.cancelled` aflyser alle ikke-aflyste bookinger på flyet (årsag "Flight cancelled") og sætter
   `flight_status = CANCELLED` på alle flyets bookinger.
 
@@ -141,7 +142,7 @@ curl -s http://localhost:8082/api/bookings/graphql -H 'Content-Type: application
 |-------|---------|------------------|
 | `booking.created` | `createBooking` | `bookingId`, `bookingReference`, `flightId`, `flightNumber`, `departureTime`, `seatNumber`, `price`, `currency`, `status`, `passenger` |
 | `booking.confirmed` | `payment.completed` for en `PENDING_PAYMENT`-booking | Samme payload, `status: CONFIRMED` |
-| `booking.cancelled` | Passageren aflyser, betaling afvist, fly aflyst | Samme payload + `reason` |
+| `booking.cancelled` | `cancelBooking` (passager eller OPERATIONS), betaling afvist, fly aflyst | Samme payload + `reason` |
 | `booking.checkedin` | `checkIn` | Samme payload, `status: CHECKED_IN` |
 
 Lyttere: flight-service (`booking.confirmed` → sædet optaget, `booking.cancelled` → sædet frigives), payment-service
@@ -152,7 +153,7 @@ Lyttere: flight-service (`booking.confirmed` → sædet optaget, `booking.cancel
 | Kø | Binding | Events der bruges | Effekt |
 |----|---------|-------------------|--------|
 | `booking-service.payment-events` | `payment.#` | `payment.completed`, `payment.failed` | Bekræft / aflys bookingen (`payment.refunded` modtages, men ignoreres) |
-| `booking-service.flight-events` | `flight.#` | `flight.status.changed`, `flight.gate.changed`, `flight.cancelled` | Flysnapshot på bookingerne; aflys alle bookinger ved aflyst fly |
+| `booking-service.flight-events` | `flight.#` | `flight.status.changed`, `flight.gate.changed`, `flight.cancelled` | Flysnapshot på bookingerne; aflys alle bookinger ved aflyst fly (`flight.created` modtages, men ignoreres) |
 
 Leveringsgarantier – outbox med publisher confirms, idempotens via `processed_event` og 3 forsøg, før beskeden
 dead-letteres via `airport.events.dlx` til `booking-service.dlq` – står i
@@ -166,7 +167,7 @@ dead-letteres via `airport.events.dlx` til `booking-service.dlq` – står i
 | `FLIGHT_SERVICE_TIMEOUT` | `5s` | Read-timeout for kaldet til flight-service |
 | `OIDC_ISSUER_URI` | `http://localhost:8180/realms/airport` | Den `iss`, tokenet skal have (compose: samme; kind: `http://localhost:8090/auth/realms/airport`) – se [issuer og JWKS](../docs/architecture.md#konfiguration-issuer-og-jwks) |
 | `JWK_SET_URI` | `http://localhost:8180/realms/airport/protocol/openid-connect/certs` | Hvor signeringsnøglerne hentes (compose: `http://keycloak:8080/realms/airport/protocol/openid-connect/certs`; kind: `http://keycloak:8080/auth/realms/airport/protocol/openid-connect/certs`) |
-| `CORS_ALLOWED_ORIGINS` | `http://localhost:8080` | Kommasepareret; læses som `app.cors.allowed-origins` af `SecurityConfig`, så preflight aldrig kræver token |
+| `CORS_ALLOWED_ORIGINS` | `http://localhost:8080` | Kommasepareret; læses som `app.cors.allowed-origins` af `SecurityConfig`, så preflight aldrig kræver token (compose: `http://localhost:8080,http://127.0.0.1:8080`; Kubernetes: `http://airport.local,http://localhost,http://localhost:8090`) |
 | `OUTBOX_POLL_INTERVAL_MS` | `500` | Hvor ofte outbox-relayet sender ventende events |
 | `GRAPHQL_PATH` | `/api/bookings/graphql` | Stien GraphQL serveres på (samme lokalt og bag Ingress) |
 | `SERVER_PORT` | `8080` | HTTP-port i containeren (compose mapper den til `8082`) |
@@ -193,16 +194,17 @@ Token til `curl` og testbrugerne står i rod-README'ens [Login og roller](../REA
 
 ## Test
 
-`mvn -B -ntp -Pci verify` – det samme som CI-jobbet `backend` kører pr. service (tests + Checkstyle + SpotBugs)
-([ci.yml](../.github/workflows/ci.yml)) – kører 24 tests. Integrationstestene kræver Docker til Testcontainers
+`mvn -B -ntp -Pci verify` – det samme som CI-jobbet `backend · booking-service` kører (tests + Checkstyle + SpotBugs;
+rapporterne uploades som artefakten `reports-booking-service`, [ci.yml](../.github/workflows/ci.yml)) – kører 24
+tests. Integrationstestene kræver Docker til Testcontainers
 (`postgres:16-alpine` og `rabbitmq:3.13-management-alpine`), men ingen Keycloak: `TestTokens` (hjælpeklasse, ingen
 tests) minter RS256-JWT'er med samme claims som Keycloak og erstatter `JwtDecoder`, så kaldene går gennem den rigtige
 HTTP-filterkæde. flight-service er mocket (`@MockitoBean FlightClient`).
 
 | Testklasse | Type | Hvad den viser |
 |------------|------|----------------|
-| `BookingServiceIntegrationTest` (8) | integration | Hele livscyklussen (opret → `SEAT_TAKEN` → `payment.completed` leveret to gange giver præcis ét `booking.confirmed` → check-in → snapshot via `bookingByReference` → `flight.gate.changed` → `flight.cancelled` → sædet ledigt igen), `payment.failed`, aflysning (en anden passager får `FORBIDDEN`) og `bookingsByPassenger` (case-insensitiv), validering, `NOT_FOUND`, outbox-garantier (publish uden transaktion afvises, rollback efterlader intet event, relayet prøver igen, indtil brokeren bekræfter) |
-| `SecurityIntegrationTest` (7) | integration | Readiness uden token; alle operationer uden token → `UNAUTHORIZED`; ejerskab (egne bookinger, egen e-mail ved `createBooking` og `bookingsByPassenger`, en anden passager får `FORBIDDEN` på `bookingByReference`, `passenger`, `checkIn` og `cancelBooking`); OPERATIONS må alt; udløbet/fremmed/ugyldigt token → HTTP 401 `invalid_token`; CORS-preflight |
+| `BookingServiceIntegrationTest` (8) | integration | Hele livscyklussen (opret → `SEAT_TAKEN` → `payment.completed` leveret to gange giver præcis ét `booking.confirmed` → check-in → snapshot via `bookingByReference` → `flight.gate.changed` → `flight.cancelled` → sædet ledigt igen), `payment.failed`, aflysning (en anden passager får `FORBIDDEN`, anden aflysning giver `INVALID_STATE`) og `bookingsByPassenger` (case-insensitiv), validering (`VALIDATION_ERROR` med feltnavne), ukendt reference (`NOT_FOUND` i `checkIn`, `null` fra `bookingByReference`), outbox-garantier (publish uden transaktion afvises, rollback efterlader intet event, relayet prøver igen, indtil brokeren bekræfter) |
+| `SecurityIntegrationTest` (7) | integration | Readiness uden token; uden token → `UNAUTHORIZED` (alle fire queries, `createBooking` og `checkIn`); ejerskab (egne bookinger, egen e-mail ved `createBooking` – også med andre store/små bogstaver – og `bookingsByPassenger`, en anden passager får `FORBIDDEN` på `bookingByReference`, `passenger`, `checkIn` og `cancelBooking`); OPERATIONS lister og læser andres bookinger, booker og aflyser; udløbet/fremmed/ugyldigt token → HTTP 401 `invalid_token`; CORS-preflight fra `http://localhost:8080` |
 | `BookingStateTest` (6) | unit | Tilstandsmaskinen og at snapshot-opdateringer kun rører ændrede felter |
 | `BookingReferenceGeneratorTest` (3) | unit | Referenceformat, alfabet og tilfældighed |
 

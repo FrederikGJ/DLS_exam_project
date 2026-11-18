@@ -10,7 +10,7 @@ ingen events og har ingen mutationer på gangnettet.
 | Ansvar | Butikker, gangnet og rutevejledning |
 | Port | compose `8085` · Kubernetes via Ingress `/api/shops` |
 | API | GraphQL `/api/shops/graphql` (queries offentlige, mutationer OPERATIONS) · REST kun Actuator |
-| Database | `shop_db` (PostgreSQL 16, Flyway `V1`–`V3`) |
+| Database | `shop_db` (PostgreSQL 16, Flyway `V1`–`V5`) |
 | Events ud | ingen |
 | Events ind | `flight.gate.changed` (kø `shop-service.flight-events`, binding `flight.#`) – logges kun |
 | Image | `airport/shop-service:local` |
@@ -19,7 +19,7 @@ ingen events og har ingen mutationer på gangnettet.
 
 | Tabel | Indhold | Migration |
 |-------|---------|-----------|
-| `shop` | Butikkerne, og servicen er kilde til sandhed for dem. `node_id` (valgfri, `ON DELETE SET NULL`) placerer butikken i gangnettet, og `category` er låst med en `CHECK` | `V1` |
+| `shop` | Butikkerne, og servicen er kilde til sandhed for dem. `node_id` (valgfri, `ON DELETE SET NULL`) placerer butikken i gangnettet, og `category` er låst med en `CHECK`. `deleted_at` er tombstonen ved sletning, og `idempotency_key` (`UNIQUE`) er nøglen fra `createShop` | `V1`, `V4`, `V5` |
 | `nav_node` | Knudepunkter med `terminal`, `floor`, `x`/`y` (kort på 1000×600) og `type` (`SHOP`, `GATE`, `SECURITY`, `ENTRANCE`, `JUNCTION`, `ELEVATOR`) | `V1` |
 | `nav_edge` | Gangforbindelser med `distance_m` (> 0) og `accessible` (`false` = trappe). Hver kant gemmes én gang (`UNIQUE (from_node_id, to_node_id)`, ingen kant til sig selv) og bruges i begge retninger | `V1` |
 | `processed_event` | `eventId` på forbrugte events (idempotens) | `V1` |
@@ -59,9 +59,9 @@ Fejlkoder i `errors[].extensions.code` (`GraphQlExceptionResolver`):
 | Kode | Hvornår |
 |------|---------|
 | `NOT_FOUND` | Ukendt node (`route`, `input.nodeId`) eller butik (`updateShop`, `deleteShop`). `shop(id)` giver `null` i stedet |
-| `VALIDATION_ERROR` | Bean Validation fejler på `ShopInput` eller `searchShops(text)` (feltnavnet står i beskeden) |
+| `VALIDATION_ERROR` | Bean Validation fejler på `ShopInput`, `searchShops(text)` eller `createShop(idempotencyKey)` over 64 tegn (feltnavnet står i beskeden) |
 | `ROUTE_NOT_FOUND` | Der er ingen vej mellem noderne, fx kun via trapper med `accessibleOnly`. Sker ikke med seed-data, hvor alle noder kan nås via elevatorerne |
-| `CONFLICT` | En databasebegrænsning brydes (`DataIntegrityViolationException`). Fælles mapping; input valideres før det gemmes |
+| `CONFLICT` | `createShop` med en `idempotencyKey`, hvis butik siden er slettet (`ShopService`), eller en databasebegrænsning brydes (`DataIntegrityViolationException`), fx når to samtidige `createShop` bruger samme nøgle |
 | `UNAUTHORIZED` / `FORBIDDEN` | Mutation uden token / med en anden rolle end OPERATIONS. Svaret er HTTP 200 med GraphQL-fejlen |
 | `INTERNAL_ERROR` | Uventet fejl, logges som `Unhandled error in data fetcher …` |
 
@@ -146,9 +146,11 @@ curl -s -o /dev/null -w '%{http_code}\n' $GQL -H 'Content-Type: application/json
   bliver i databasen. `@SQLRestriction("deleted_at IS NULL")` på `Shop` skjuler den for alle queries, så `shop(id)`
   giver `null`, butikken er væk fra `shops`, `searchShops`, `NavNode.shops` og `shopsAlongRoute`, og et nyt
   `updateShop`/`deleteShop` giver `NOT_FOUND`. Se [Tombstone og snapshot](../docs/architecture.md#tombstone-og-snapshot-immutable-data).
-- **`createShop` med `idempotencyKey`** (valgfri, højst 64 tegn, `UNIQUE`-kolonne, `V5__shop_idempotency.sql`): et
-  gentaget kald med samme nøgle returnerer den butik, første kald oprettede. Er den butik siden slettet, er nøglen
-  stadig optaget → `CONFLICT`. Uden nøgle opretter hvert kald en ny butik.
+- **`createShop` med `idempotencyKey`** (valgfri, højst 64 tegn ellers `VALIDATION_ERROR`, `UNIQUE`-kolonne,
+  `V5__shop_idempotency.sql`): et gentaget kald med samme nøgle returnerer den butik, første kald oprettede. Er den
+  butik siden slettet, er nøglen stadig optaget → `CONFLICT`. To samtidige kald med samme nøgle afgøres af
+  `UNIQUE`-constrainten, og taberen får `CONFLICT`. Uden nøgle (eller med en blank) opretter hvert kald en ny butik.
+  Se [Idempotens](../docs/architecture.md#idempotens-hvad-sker-der-når-en-mutation-gentages).
 - **Søgning:** `searchShops` trimmer teksten og matcher med `LIKE` uden forskel på store og små bogstaver.
   `shops(filter)` filtrerer `terminal` og `category` i databasen og `openNow` bagefter ud fra klokken i `APP_TIMEZONE`.
 - **Åbningstider** (`OpeningHours`): åbningsminuttet tæller med, lukkeminuttet gør ikke. `22:00-04:00` går over
@@ -188,7 +190,7 @@ Levering: `processed_event` fjerner duplikater, og efter 3 forsøg (500 ms, ×2,
 | `DB_URL` / `DB_USERNAME` / `DB_PASSWORD` | `jdbc:postgresql://localhost:5437/shop_db` / `shop` / `shop` | Servicens database |
 | `OIDC_ISSUER_URI` | `http://localhost:8180/realms/airport` | Den `iss`, et token skal have. Compose bruger samme værdi, kind `http://localhost:8090/auth/realms/airport` |
 | `JWK_SET_URI` | `http://localhost:8180/realms/airport/protocol/openid-connect/certs` | Hvor Keycloaks signeringsnøgler hentes. Compose `http://keycloak:8080/realms/airport/protocol/openid-connect/certs`, kind `http://keycloak:8080/auth/realms/airport/protocol/openid-connect/certs` |
-| `CORS_ALLOWED_ORIGINS` | `http://localhost:8080` | Kommasepareret. Læses som `app.cors.allowed-origins` af `SecurityConfig` og gælder alle stier; preflight kræver intet token |
+| `CORS_ALLOWED_ORIGINS` | `http://localhost:8080` | Kommasepareret. Læses som `app.cors.allowed-origins` af `SecurityConfig` og gælder alle stier; preflight kræver intet token. Compose `http://localhost:8080,http://127.0.0.1:8080`, Kubernetes `http://airport.local,http://localhost,http://localhost:8090` |
 | `RABBITMQ_*`, `SPRING_PROFILES_ACTIVE` | se rod-README | Fælles, se [Konfiguration](../README.md#konfiguration). `prod` slår GraphiQL fra og giver JSON-logs |
 
 Issuer og JWKS er forklaret i [Konfiguration: issuer og JWKS](../docs/architecture.md#konfiguration-issuer-og-jwks).
@@ -221,7 +223,7 @@ compose-frontenden; skal begge køre, så start servicen med fx `SERVER_PORT=809
 |------------|------|----------------|
 | `DijkstraTest` | unit (6) | Flere hop slår en lang direkte kant, kanter virker begge veje, `accessibleOnly` tager elevatoren frem for trappen, en node, der ikke kan nås, eller en ukendt node giver ingen rute, samme node giver 0 m, og afstand ≤ 0 afvises |
 | `OpeningHoursTest` | unit (2 `@Test` + 2 `@ParameterizedTest` med 13 tilfælde = 15) | Almindelig tid (grænser: åbning med, lukning ikke med), tid over midnat, `24/7`/`00:00-00:00` og ugyldigt input giver lukket |
-| `ShopServiceIntegrationTest` | Testcontainers over HTTP (12) | Flyway-seed og filtre på `navNodes`/`navEdges`, rute Security T2 → Gate B12 (350 m, 5 min, Duty Free undervejs), trappe (205 m) mod elevator (225 m), rute mellem terminalerne og samme node, `NOT_FOUND`, søgning og filtre (`openNow` med 7-Eleven 24/7), opret/læs/opdatér/slet med OPERATIONS-token, `VALIDATION_ERROR`, `flight.gate.changed` forbrugt én gang og outbox (publish uden transaktion, rollback, relay-retry og `outbox.pending` = 0) |
+| `ShopServiceIntegrationTest` | Testcontainers over HTTP (14) | Flyway-seed og filtre på `navNodes`/`navEdges`, rute Security T2 → Gate B12 (350 m, 5 min, Duty Free undervejs), trappe (205 m) mod elevator (225 m), rute mellem terminalerne og samme node, `NOT_FOUND`, søgning og filtre (`openNow` med 7-Eleven 24/7), opret/læs/opdatér/slet med OPERATIONS-token, `VALIDATION_ERROR`, `flight.gate.changed` forbrugt én gang, outbox (publish uden transaktion, rollback, relay-retry og `outbox.pending` = 0), tombstone (slettet butik er væk fra `shop`, `shops`, `searchShops`, `NavNode.shops` og `shopsAlongRoute`, `updateShop` giver `NOT_FOUND`, men rækken findes med `deleted_at`) og `idempotencyKey` (samme nøgle → én butik, uden nøgle en ny, nøglen fra en slettet butik → `CONFLICT`) |
 | `SecurityIntegrationTest` | Testcontainers over HTTP (6) | Offentlige queries og readiness uden token, `UNAUTHORIZED` på `createShop`/`deleteShop` uden token, `FORBIDDEN` for PASSENGER, OPERATIONS opretter og sletter, udløbet/fremmed/ugyldigt token → HTTP 401 med `invalid_token`, CORS-preflight fra `http://localhost:8080` |
 
 `TestTokens` er en hjælpeklasse (ingen tests), der laver RS256-JWT'er med samme claims som Keycloak og en
@@ -232,7 +234,7 @@ cd shop-service && mvn -B -ntp -Pci verify  # samme kommando som CI-jobbet backe
 ```
 
 Kræver Docker (Testcontainers starter `postgres:16-alpine` og `rabbitmq:3.13-management-alpine`). Der er 41 tests i
-alt. CI ([ci.yml](../.github/workflows/ci.yml)) kører `mvn -Pci verify` (tests + Checkstyle + SpotBugs) og uploader
+alt. CI ([ci.yml](../.github/workflows/ci.yml)) kører `mvn -B -ntp -Pci verify` (tests + Checkstyle + SpotBugs) og uploader
 rapporterne som artifact `reports-shop-service`. Mod en kørende stak tester [`scripts/e2e-smoke.sh`](../scripts/e2e-smoke.sh) også
 Flow D (rute Security T2 → Gate B12 og `searchShops`).
 
@@ -258,7 +260,8 @@ Flow D (rute Security T2 → Gate B12 og `searchShops`).
 - **Metrics:** `/actuator/metrics` kræver et OPERATIONS-token, fx
   `curl -s -H "Authorization: Bearer $TOKEN" localhost:8085/actuator/metrics/outbox.pending`. Gaugen `outbox.pending`
   (usendte outbox-rækker) er altid 0 her.
-- **Loglinjer:** `Created shop … (…)`, `Updated shop … (…)`, `Deleted shop … (…)`,
+- **Loglinjer:** `Created shop … (…)`, `Idempotent replay: shop … (…) was already created with this key`,
+  `Updated shop … (…)`, `Deleted shop … (…) - tombstone kept`,
   `Received event flight.gate.changed eventId=…`, `Gate change for flight … : … -> … (eventId …)`,
   `Skipping already processed event …` og `Unhandled error in data fetcher …` (ERROR). Consumeren lægger `eventId`
   og `eventType` i MDC. Med `prod` er loggen JSON (logstash).
@@ -273,6 +276,8 @@ Flow D (rute Security T2 → Gate B12 og `searchShops`).
 | Åbningstider som tekst (`HH:MM-HH:MM`, også over midnat, eller `24/7`), evalueret i `APP_TIMEZONE` | Enkelt format i seed-data | [Designvalg](../docs/architecture.md#designvalg-hvor-specen-gav-frihed) |
 | Ekstra query `navEdges(terminal)` | Frontenden tegner gangnettet på SVG-kortet, og trapper stiples | [Designvalg](../docs/architecture.md#designvalg-hvor-specen-gav-frihed) |
 | Læsning er offentlig, og mutationerne kræver OPERATIONS med `@PreAuthorize` pr. operation. GraphQL-endpointet er åbent på HTTP-niveau | Passagerer finder vej uden login, og samme endpoint bærer både offentlige queries og beskyttede mutationer | [Hvad er offentligt?](../docs/architecture.md#hvad-er-offentligt), [Operation × rolle](../docs/architecture.md#operation--rolle) |
+| `deleteShop` er en soft delete (`deleted_at` + `@SQLRestriction`) i stedet for en fysisk `DELETE` | Kan fortrydes med en `UPDATE`, historikken bevares, og et id i en log peger aldrig ud i ingenting | [Tombstone og snapshot](../docs/architecture.md#tombstone-og-snapshot-immutable-data) |
+| `createShop` tager en valgfri `idempotencyKey` fra klienten | Et gentaget kald giver ikke en dublet, og klienter uden nøgle virker som før | [Idempotens](../docs/architecture.md#idempotens-hvad-sker-der-når-en-mutation-gentages) |
 | Lytter på `flight.#`, men logger kun gateskift | Ingen tilstand i servicen afhænger af fly, og gates er faste noder | [events.md](../docs/events.md#shop-service) |
 | Outbox-infrastrukturen er med, selv om servicen ikke publicerer | Samme skabelon som de fire andre services | [Teknologi pr. service](../docs/architecture.md#teknologi-pr-service), [Messaging](../docs/architecture.md#messaging) |
 
