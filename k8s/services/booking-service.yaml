@@ -16,6 +16,8 @@ data:
   # be allowed explicitly. Keep this in sync with hostPort in k8s/kind-config.yaml.
   CORS_ALLOWED_ORIGINS: "http://airport.local,http://localhost,http://localhost:8090"
   GRAPHQL_PATH: /api/bookings/graphql
+  OIDC_ISSUER_URI: http://localhost:8090/auth/realms/airport
+  JWK_SET_URI: http://keycloak:8080/auth/realms/airport/protocol/openid-connect/certs
   FLIGHT_SERVICE_URL: http://flight-service:8080/api/flights/graphql
 ---
 # DEV VALUES ONLY - replace before any shared cluster.

@@ -138,6 +138,17 @@ export const bookingApi = {
     query($reference: String!) { bookingByReference(reference: $reference) { ${BOOKING_FIELDS} } }`,
     { reference }, 'booking-service').then(d => d.bookingByReference),
 
+  bookingOverview: (reference) => gql(cfg.BOOKING_URL, `
+    query($reference: String!) {
+      bookingOverview(reference: $reference) {
+        booking { ${BOOKING_FIELDS} }
+        latestPaymentStatus
+        baggageCount
+        payments { paymentId status amount currency cardLast4 failureReason createdAt statusAt }
+        baggage { tagNumber status type weightKg lastLocation updatedAt }
+      }
+    }`, { reference }, 'booking-service').then(d => d.bookingOverview),
+
   bookingsByPassenger: (email) => gql(cfg.BOOKING_URL, `
     query($email: String!) { bookingsByPassenger(email: $email) { ${BOOKING_FIELDS} } }`,
     { email }, 'booking-service').then(d => d.bookingsByPassenger),

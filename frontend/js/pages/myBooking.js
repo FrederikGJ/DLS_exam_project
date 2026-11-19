@@ -1,5 +1,5 @@
-// Min booking: look up by reference -> booking + payments + baggage, check-in and cancel.
-import { bookingApi, paymentApi, baggageApi } from '../api.js';
+// Min booking: read the booking overview, check in or cancel.
+import { bookingApi } from '../api.js';
 import { esc, formatDateTime, formatDate, formatMoney, badge, toast, showError, busy, state, qs } from '../app.js';
 
 export async function render(container, params) {
@@ -29,31 +29,23 @@ export async function render(container, params) {
   async function load(ref) {
     if (!ref) return;
     host.innerHTML = '<div class="card"><div class="empty"><span class="spinner"></span> Henter booking…</div></div>';
-    let booking;
+    let overview;
     try {
-      booking = await bookingApi.bookingByReference(ref);
+      overview = await bookingApi.bookingOverview(ref);
     } catch (err) {
       host.innerHTML = `<div class="card"><div class="alert error">${esc(err.message)}</div></div>`;
       showError(err);
       return;
     }
-    if (!booking) {
+    if (!overview) {
       host.innerHTML = `<div class="card"><div class="alert error">Ingen booking med reference <strong>${esc(ref)}</strong> (NOT_FOUND).</div></div>`;
       return;
     }
-    state.bookingRef = booking.bookingReference;
-    draw(booking);
-
-    // payments and baggage live in other services - load independently so one failure doesn't hide the rest
-    const [payments, baggage] = await Promise.allSettled([
-      paymentApi.paymentsByBooking(booking.bookingReference),
-      baggageApi.baggageByBooking(booking.bookingReference),
-    ]);
-    drawPayments(payments);
-    drawBaggage(baggage, booking);
+    state.bookingRef = overview.booking.bookingReference;
+    draw(overview);
   }
 
-  function draw(b) {
+  function draw({ booking: b, payments, baggage, latestPaymentStatus, baggageCount }) {
     const canCheckIn = b.status === 'CONFIRMED';
     const canCancel = b.status !== 'CANCELLED';
     host.innerHTML = `
@@ -88,9 +80,12 @@ export async function render(container, params) {
           </dl>
         </div>
       </div>
-      <div class="card"><div class="card-head"><h2>Betalinger</h2></div><div id="payments"><span class="spinner"></span></div></div>
-      <div class="card"><div class="card-head"><h2>Bagage</h2><a class="btn sm" href="#/baggage${qs({ ref: b.bookingReference })}">Registrér bagage</a></div><div id="baggage"><span class="spinner"></span></div></div>
+      <div class="card"><div class="card-head"><h2>Betalinger</h2>${latestPaymentStatus ? badge(latestPaymentStatus) : ''}</div><div id="payments"></div></div>
+      <div class="card"><div class="card-head"><h2>Bagage (${baggageCount})</h2><a class="btn sm" href="#/baggage${qs({ ref: b.bookingReference })}">Registrér bagage</a></div><div id="baggage"></div></div>
     `;
+
+    drawPayments(payments);
+    drawBaggage(baggage, b);
 
     host.querySelector('#checkin-btn').addEventListener('click', (e) => busy(e.currentTarget, async () => {
       try {
@@ -114,34 +109,29 @@ export async function render(container, params) {
     if (el) el.innerHTML = `<div class="alert error">${esc(err.message)} <span class="mono small">(${esc(err.code)})</span></div>`;
   }
 
-  function drawPayments(res) {
+  function drawPayments(payments) {
     const el = host.querySelector('#payments');
-    if (!el) return;
-    if (res.status === 'rejected') { el.innerHTML = `<div class="alert warn small">${esc(res.reason?.message || 'Kunne ikke hente betalinger')}</div>`; return; }
-    const payments = res.value || [];
-    if (!payments.length) { el.innerHTML = '<div class="empty">Ingen betalinger registreret.</div>'; return; }
+    if (!payments.length) { el.innerHTML = '<div class="empty">Ingen betalingsoplysninger i oversigten.</div>'; return; }
     el.innerHTML = `<div class="table-wrap"><table>
       <thead><tr><th>Tidspunkt</th><th>Beløb</th><th>Kort</th><th>Status</th><th>Årsag</th></tr></thead>
       <tbody>${payments.map(p => `<tr>
-        <td>${esc(formatDateTime(p.createdAt))}</td><td>${esc(formatMoney(p.amount, p.currency))}</td>
-        <td class="mono">•••• ${esc(p.cardLast4)}</td><td>${badge(p.status)}</td><td>${esc(p.failureReason || '')}</td></tr>`).join('')}
+        <td>${esc(formatDateTime(p.createdAt || p.statusAt))}</td><td>${p.amount == null || !p.currency ? '–' : esc(formatMoney(p.amount, p.currency))}</td>
+        <td class="mono">${p.cardLast4 ? `•••• ${esc(p.cardLast4)}` : '–'}</td><td>${badge(p.status)}</td><td>${esc(p.failureReason || '')}</td></tr>`).join('')}
       </tbody></table></div>`;
   }
 
-  function drawBaggage(res, booking) {
+  function drawBaggage(bags, booking) {
     const el = host.querySelector('#baggage');
-    if (!el) return;
-    if (res.status === 'rejected') { el.innerHTML = `<div class="alert warn small">${esc(res.reason?.message || 'Kunne ikke hente bagage')}</div>`; return; }
-    const bags = res.value || [];
     if (!bags.length) {
       const hint = ['CONFIRMED', 'CHECKED_IN'].includes(booking.status) ? '' : ' Bagage kan først registreres når bookingen er bekræftet.';
-      el.innerHTML = `<div class="empty">Ingen bagage registreret.${esc(hint)}</div>`;
+      el.innerHTML = `<div class="empty">Ingen bagage i oversigten.${esc(hint)}</div>`;
       return;
     }
     el.innerHTML = `<div class="table-wrap"><table>
       <thead><tr><th>Tag</th><th>Type</th><th>Vægt</th><th>Status</th><th>Sidste lokation</th><th>Opdateret</th></tr></thead>
       <tbody>${bags.map(bg => `<tr>
-        <td class="mono"><strong>${esc(bg.tagNumber)}</strong></td><td>${badge(bg.type)}</td><td>${esc(Number(bg.weightKg).toLocaleString('da-DK'))} kg</td>
+        <td class="mono"><strong>${esc(bg.tagNumber)}</strong></td><td>${bg.type ? badge(bg.type) : '–'}</td>
+        <td>${bg.weightKg == null ? '–' : `${esc(Number(bg.weightKg).toLocaleString('da-DK'))} kg`}</td>
         <td>${badge(bg.status)}</td><td>${esc(bg.lastLocation || '–')}</td><td>${esc(formatDateTime(bg.updatedAt))}</td></tr>`).join('')}
       </tbody></table></div>`;
   }

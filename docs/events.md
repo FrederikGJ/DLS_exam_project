@@ -28,6 +28,7 @@ Hver service har én durable kø pr. interesse og én DLQ:
 |-----------------|------------------------------------|-----------------|------------------------|
 | flight-service  | `flight-service.booking-events`    | `booking.#`     | `flight-service.dlq`   |
 | booking-service | `booking-service.payment-events`   | `payment.#`     | `booking-service.dlq`  |
+| booking-service | `booking-service.baggage-events`   | `baggage.#`     | `booking-service.dlq`  |
 | booking-service | `booking-service.flight-events`    | `flight.#`      | `booking-service.dlq`  |
 | payment-service | `payment-service.booking-events`   | `booking.#`     | `payment-service.dlq`  |
 | baggage-service | `baggage-service.booking-events`   | `booking.#`     | `baggage-service.dlq`  |
@@ -148,7 +149,7 @@ Lyttere: baggage-service (snapshot → CHECKED_IN).
   "amount": 899.00, "currency": "DKK", "cardLast4": "4242"
 }
 ```
-Lyttere: booking-service (booking → CONFIRMED, publicerer `booking.confirmed`).
+Lyttere: booking-service (booking → CONFIRMED, publicerer `booking.confirmed`, opdaterer `booking_overview`).
 
 ### `payment.failed`
 ```json
@@ -158,7 +159,7 @@ Lyttere: booking-service (booking → CONFIRMED, publicerer `booking.confirmed`)
   "failureReason": "Insufficient funds"
 }
 ```
-Lyttere: booking-service (booking → CANCELLED, publicerer `booking.cancelled`).
+Lyttere: booking-service (booking → CANCELLED, publicerer `booking.cancelled`, opdaterer `booking_overview`).
 
 ### `payment.refunded`
 ```json
@@ -167,7 +168,7 @@ Lyttere: booking-service (booking → CANCELLED, publicerer `booking.cancelled`)
   "amount": 899.00, "currency": "DKK"
 }
 ```
-Lyttere: ingen (informativt; kan vises under "Min booking" via `paymentsByBooking`).
+Lyttere: booking-service (opdaterer betalingsstatus i `booking_overview`).
 
 ---
 
@@ -182,6 +183,8 @@ Lyttere: ingen (informativt; kan vises under "Min booking" via `paymentsByBookin
 }
 ```
 
+Lyttere: booking-service (tilføjer bagagetag i `booking_overview`).
+
 ### `baggage.status.changed`
 ```json
 {
@@ -189,7 +192,7 @@ Lyttere: ingen (informativt; kan vises under "Min booking" via `paymentsByBookin
   "oldStatus": "REGISTERED", "newStatus": "LOADED", "location": "Belt 4"
 }
 ```
-Lyttere: ingen krævede.
+Lyttere: booking-service (opdaterer bagagelinjens status og lokation i `booking_overview`).
 
 ---
 

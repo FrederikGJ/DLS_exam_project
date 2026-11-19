@@ -4,6 +4,7 @@ import dk.airport.booking.domain.*;
 import dk.airport.booking.graphql.input.PassengerInput;
 import dk.airport.booking.messaging.BookingEvents;
 import dk.airport.booking.messaging.EventPublisher;
+import dk.airport.booking.query.BookingOverviewProjector;
 import dk.airport.booking.repository.BookingRepository;
 import dk.airport.booking.repository.PassengerRepository;
 import org.slf4j.Logger;
@@ -13,53 +14,34 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 
 @Service
-@Transactional(readOnly = true)
-public class BookingService {
+public class BookingCommandService {
 
-    private static final Logger log = LoggerFactory.getLogger(BookingService.class);
+    private static final Logger log = LoggerFactory.getLogger(BookingCommandService.class);
     private static final int REFERENCE_ATTEMPTS = 5;
 
     private final BookingRepository bookings;
     private final PassengerRepository passengers;
     private final FlightClient flightClient;
     private final EventPublisher events;
+    private final BookingOverviewProjector projector;
     private final BookingReferenceGenerator references = new BookingReferenceGenerator();
 
-    public BookingService(BookingRepository bookings, PassengerRepository passengers,
-                          FlightClient flightClient, EventPublisher events) {
+    public BookingCommandService(BookingRepository bookings, PassengerRepository passengers,
+                          FlightClient flightClient, EventPublisher events, BookingOverviewProjector projector) {
         this.bookings = bookings;
         this.passengers = passengers;
         this.flightClient = flightClient;
         this.events = events;
+        this.projector = projector;
     }
 
-    // ------------------------------------------------------------ queries
-
-    public Optional<Booking> booking(Long id) {
-        return bookings.findById(id);
-    }
-
-    public Optional<Booking> bookingByReference(String reference) {
-        return bookings.findByBookingReference(normalizeReference(reference));
-    }
-
-    public Booking requireBooking(String reference) {
-        return bookingByReference(reference).orElseThrow(() -> ApiException.notFound("Booking", reference));
-    }
-
-    public List<Booking> bookingsByPassenger(String email) {
-        return bookings.findByPassengerEmail(email.trim());
-    }
-
-    public List<Booking> bookingsByPassengerId(Long passengerId) {
-        return bookings.findByPassengerIdOrderByCreatedAtDesc(passengerId);
-    }
-
-    public Optional<Passenger> passenger(Long id) {
-        return passengers.findById(id);
+    private Booking requireBooking(String reference) {
+        return bookings.findByBookingReference(normalizeReference(reference))
+                .orElseThrow(() -> ApiException.notFound("Booking", reference));
     }
 
     // ------------------------------------------------------------ mutations
@@ -108,6 +90,7 @@ public class BookingService {
             throw new ApiException(ErrorCode.CONFLICT, "Could not generate a unique booking reference, please retry");
         }
 
+        projector.bookingCreated(booking.getId(), passenger.getId());
         events.publish(BookingEvents.CREATED, BookingEvents.payload(booking, null));
         log.info("Created booking {} for flight {} seat {} ({} {})", booking.getBookingReference(),
                 booking.getFlightNumber(), booking.getSeatNumber(), booking.getPrice(), booking.getCurrency());
@@ -118,6 +101,7 @@ public class BookingService {
     public Booking cancelBooking(String reference) {
         Booking booking = requireBooking(reference);
         booking.cancel();
+        projectBooking(booking);
         events.publish(BookingEvents.CANCELLED, BookingEvents.payload(booking, "Cancelled by passenger"));
         log.info("Booking {} cancelled by passenger", booking.getBookingReference());
         return booking;
@@ -127,6 +111,7 @@ public class BookingService {
     public Booking checkIn(String reference) {
         Booking booking = requireBooking(reference);
         booking.checkIn();
+        projectBooking(booking);
         events.publish(BookingEvents.CHECKED_IN, BookingEvents.payload(booking, null));
         log.info("Booking {} checked in", booking.getBookingReference());
         return booking;
@@ -146,6 +131,7 @@ public class BookingService {
         switch (booking.getStatus()) {
             case PENDING_PAYMENT -> {
                 booking.confirm();
+                projectBooking(booking);
                 events.publish(BookingEvents.CONFIRMED, BookingEvents.payload(booking, null));
                 log.info("Booking {} confirmed after payment", booking.getBookingReference());
             }
@@ -167,6 +153,7 @@ public class BookingService {
         Booking booking = found.get();
         if (booking.getStatus() == BookingStatus.PENDING_PAYMENT) {
             booking.cancel();
+            projectBooking(booking);
             String reason = "Payment failed" + (failureReason == null || failureReason.isBlank() ? "" : ": " + failureReason);
             events.publish(BookingEvents.CANCELLED, BookingEvents.payload(booking, reason));
             log.info("Booking {} cancelled: {}", booking.getBookingReference(), reason);
@@ -186,6 +173,8 @@ public class BookingService {
         }
         // bookings already cancelled still get the snapshot updated
         bookings.findByFlightId(flightId).forEach(b -> b.updateFlightSnapshot("CANCELLED", null));
+        bookings.flush();
+        projector.flightBookingsChanged(flightId);
         log.info("Flight {} cancelled -> {} booking(s) cancelled", flightId, affected.size());
         return affected.size();
     }
@@ -195,10 +184,17 @@ public class BookingService {
     public void onFlightSnapshotChanged(Long flightId, String flightStatus, String gate) {
         List<Booking> affected = bookings.findByFlightId(flightId);
         affected.forEach(b -> b.updateFlightSnapshot(flightStatus, gate));
+        bookings.flush();
+        projector.flightBookingsChanged(flightId);
         log.info("Flight {} snapshot updated on {} booking(s): status={}, gate={}", flightId, affected.size(), flightStatus, gate);
     }
 
+    private void projectBooking(Booking booking) {
+        bookings.flush();
+        projector.bookingChanged(booking.getId());
+    }
+
     private static String normalizeReference(String reference) {
-        return reference == null ? "" : reference.trim().toUpperCase();
+        return reference == null ? "" : reference.trim().toUpperCase(Locale.ROOT);
     }
 }

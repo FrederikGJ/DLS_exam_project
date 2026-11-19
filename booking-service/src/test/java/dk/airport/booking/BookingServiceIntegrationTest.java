@@ -22,9 +22,15 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.graphql.tester.AutoConfigureGraphQlTester;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.context.annotation.Import;
 import org.springframework.graphql.test.tester.GraphQlTester;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -50,12 +56,17 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
  * End-to-end test against real PostgreSQL + RabbitMQ (Testcontainers). flight-service is mocked.
  */
 @SpringBootTest
 @AutoConfigureGraphQlTester
+@AutoConfigureMockMvc
+@Import(TestTokens.class)
 @Testcontainers
 class BookingServiceIntegrationTest {
 
@@ -76,6 +87,7 @@ class BookingServiceIntegrationTest {
     static SimpleMessageListenerContainer testListener;
 
     @Autowired GraphQlTester graphQlTester;
+    @Autowired MockMvc mvc;
     /** Spy so a single test can make the outbox relay's publish attempt fail (reset after every test). */
     @MockitoSpyBean RabbitTemplate rabbitTemplate;
     @Autowired ObjectMapper objectMapper;
@@ -118,6 +130,78 @@ class BookingServiceIntegrationTest {
         when(flightClient.fetchFlightSeat(anyLong(), any())).thenAnswer(inv -> new FlightSeatInfo(
                 inv.getArgument(0), "SK1501", DEPARTURE, "A12", "SCHEDULED", "DKK",
                 inv.getArgument(1), "ECONOMY", true, new BigDecimal("899.00")));
+    }
+
+    @Test
+    void bookingOverviewProjectsPaymentAndBaggageEvents() throws Exception {
+        String reference = graphQlTester.document("""
+                mutation {
+                  createBooking(flightId: 70, seatNumber: "1A", passenger: {
+                    firstName: "Anna", lastName: "Jensen", email: "anna@example.com",
+                    passportNumber: "P1234567", dateOfBirth: "1990-05-17" }) { bookingReference }
+                }""").execute().path("createBooking.bookingReference").entity(String.class).get();
+
+        overview(reference, TestTokens.passenger())
+                .andExpect(jsonPath("$.data.bookingOverview.booking.status").value("PENDING_PAYMENT"))
+                .andExpect(jsonPath("$.data.bookingOverview.baggageCount").value(0));
+        overview(reference, TestTokens.bearer("bo", "bo@example.com", "PASSENGER"))
+                .andExpect(jsonPath("$.errors[0].extensions.code").value("FORBIDDEN"));
+        overview(reference, null).andExpect(jsonPath("$.errors[0].extensions.code").value("UNAUTHORIZED"));
+        overview(reference, TestTokens.operations())
+                .andExpect(jsonPath("$.data.bookingOverview.booking.passenger.email").value("anna@example.com"));
+
+        Map<String, Object> payment = Map.of("bookingReference", reference, "paymentId", 71, "amount", 899,
+                "currency", "DKK", "cardLast4", "4242");
+        publish(UUID.randomUUID().toString(), "payment.completed", "payment-service", payment);
+        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> overview(reference, TestTokens.passenger())
+                .andExpect(jsonPath("$.data.bookingOverview.booking.status").value("CONFIRMED"))
+                .andExpect(jsonPath("$.data.bookingOverview.latestPaymentStatus").value("COMPLETED"))
+                .andExpect(jsonPath("$.data.bookingOverview.payments[0].cardLast4").value("4242")));
+
+        OffsetDateTime changed = OffsetDateTime.now();
+        String tag = "BAG-CQRS0001";
+        publish(UUID.randomUUID().toString(), "baggage.status.changed", "baggage-service", changed,
+                Map.of("bookingReference", reference, "tagNumber", tag, "newStatus", "LOADED", "location", "Belt 4"));
+        String registeredId = UUID.randomUUID().toString();
+        Map<String, Object> bag = Map.of("bookingReference", reference, "tagNumber", tag,
+                "status", "REGISTERED", "type", "CHECKED", "weightKg", 23.0);
+        publish(registeredId, "baggage.registered", "baggage-service", changed.minusSeconds(1), bag);
+        publish(registeredId, "baggage.registered", "baggage-service", changed.minusSeconds(1), bag);
+        publish(UUID.randomUUID().toString(), "baggage.registered", "baggage-service", changed.minusSeconds(1), bag);
+        publish(UUID.randomUUID().toString(), "payment.refunded", "payment-service",
+                Map.of("bookingReference", reference, "paymentId", 71, "amount", 899, "currency", "DKK"));
+
+        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> overview(reference, TestTokens.passenger())
+                .andExpect(jsonPath("$.data.bookingOverview.latestPaymentStatus").value("REFUNDED"))
+                .andExpect(jsonPath("$.data.bookingOverview.payments.length()").value(1))
+                .andExpect(jsonPath("$.data.bookingOverview.payments[0].cardLast4").value("4242"))
+                .andExpect(jsonPath("$.data.bookingOverview.baggageCount").value(1))
+                .andExpect(jsonPath("$.data.bookingOverview.baggage[0].status").value("LOADED"))
+                .andExpect(jsonPath("$.data.bookingOverview.baggage[0].type").value("CHECKED"))
+                .andExpect(jsonPath("$.data.bookingOverview.baggage[0].lastLocation").value("Belt 4")));
+    }
+
+    private ResultActions overview(String reference, String token) throws Exception {
+        String query = """
+                query($ref: String!) {
+                  bookingOverview(reference: $ref) {
+                    booking {
+                      id bookingReference flightId flightNumber departureTime gate flightStatus seatNumber
+                      price currency status createdAt updatedAt
+                      passenger { id firstName lastName email passportNumber dateOfBirth }
+                    }
+                    latestPaymentStatus baggageCount
+                    payments { paymentId status amount currency cardLast4 failureReason createdAt statusAt }
+                    baggage { tagNumber type weightKg status lastLocation updatedAt }
+                  }
+                }
+                """;
+        var request = post("/api/bookings/graphql").contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(Map.of("query", query, "variables", Map.of("ref", reference))));
+        if (token != null) {
+            request.header(HttpHeaders.AUTHORIZATION, token);
+        }
+        return mvc.perform(request).andExpect(status().isOk());
     }
 
     @Test
@@ -224,7 +308,7 @@ class BookingServiceIntegrationTest {
     }
 
     @Test
-    void paymentFailedCancelsPendingBooking() {
+    void paymentFailedCancelsPendingBooking() throws Exception {
         String reference = graphQlTester.document("""
                 mutation {
                   createBooking(flightId: 2, seatNumber: "3A", passenger: {
@@ -240,6 +324,10 @@ class BookingServiceIntegrationTest {
                 assertThat(bookingRepository.findByBookingReference(reference).orElseThrow().getStatus().name()).isEqualTo("CANCELLED"));
         List<EventEnvelope> cancelled = awaitEvents(forRef(reference, "booking.cancelled"), 1);
         assertThat(cancelled.get(0).payload().get("reason").asText()).isEqualTo("Payment failed: Insufficient funds");
+        overview(reference, TestTokens.operations())
+                .andExpect(jsonPath("$.data.bookingOverview.booking.status").value("CANCELLED"))
+                .andExpect(jsonPath("$.data.bookingOverview.latestPaymentStatus").value("FAILED"))
+                .andExpect(jsonPath("$.data.bookingOverview.payments[0].failureReason").value("Insufficient funds"));
     }
 
     @Test
@@ -352,8 +440,13 @@ class BookingServiceIntegrationTest {
     }
 
     private void publish(String eventId, String type, String producer, Map<String, Object> payload) {
+        publish(eventId, type, producer, OffsetDateTime.now(), payload);
+    }
+
+    private void publish(String eventId, String type, String producer, OffsetDateTime occurredAt,
+                         Map<String, Object> payload) {
         try {
-            EventEnvelope env = new EventEnvelope(eventId, type, OffsetDateTime.now(), producer, objectMapper.valueToTree(payload));
+            EventEnvelope env = new EventEnvelope(eventId, type, occurredAt, producer, objectMapper.valueToTree(payload));
             MessageProperties props = new MessageProperties();
             props.setContentType(MessageProperties.CONTENT_TYPE_JSON);
             rabbitTemplate.send("airport.events", type, new Message(objectMapper.writeValueAsBytes(env), props));

@@ -154,6 +154,8 @@ services:
       DB_URL: jdbc:postgresql://booking-db:5432/booking_db
       DB_USERNAME: booking
       DB_PASSWORD: booking
+      OIDC_ISSUER_URI: http://localhost:8180/realms/airport
+      JWK_SET_URI: http://keycloak:8080/realms/airport/protocol/openid-connect/certs
       FLIGHT_SERVICE_URL: http://flight-service:8080/api/flights/graphql
     ports: ["8082:8080"]
     depends_on:

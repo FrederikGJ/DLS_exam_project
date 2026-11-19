@@ -9,6 +9,7 @@ import org.springframework.context.annotation.Configuration;
  * Declares the messaging topology used by booking-service:
  * <pre>
  *  airport.events (topic)  --payment.#-->  booking-service.payment-events
+ *                          --baggage.#--> booking-service.baggage-events
  *                          --flight.#-->   booking-service.flight-events
  *                                            | (rejected after 3 attempts)
  *                                            v
@@ -26,6 +27,8 @@ public class RabbitConfig {
     private String serviceName;
     @Value("${app.messaging.queues.payment-events}")
     private String paymentEventsQueue;
+    @Value("${app.messaging.queues.baggage-events}")
+    private String baggageEventsQueue;
     @Value("${app.messaging.queues.flight-events}")
     private String flightEventsQueue;
     @Value("${app.messaging.queues.dead-letter}")
@@ -62,6 +65,19 @@ public class RabbitConfig {
     @Bean
     public Binding paymentEventsBinding() {
         return BindingBuilder.bind(paymentEventsQueue()).to(airportEventsExchange()).with("payment.#");
+    }
+
+    @Bean
+    public Queue baggageEventsQueue() {
+        return QueueBuilder.durable(baggageEventsQueue)
+                .deadLetterExchange(deadLetterExchangeName)
+                .deadLetterRoutingKey(serviceName)
+                .build();
+    }
+
+    @Bean
+    public Binding baggageEventsBinding() {
+        return BindingBuilder.bind(baggageEventsQueue()).to(airportEventsExchange()).with("baggage.#");
     }
 
     @Bean

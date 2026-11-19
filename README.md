@@ -57,12 +57,13 @@ og health-endpoints på `/actuator/health/liveness` og `/actuator/health/readine
 Bag Kubernetes Ingress bruges samme stier på Ingress-adressen. Vælg **Authorize** i Swagger UI og indsæt et
 Keycloak-access-token for at kalde API'et.
 
-I Docker Compose kan du logge ind som `anna` (PASSENGER) eller `ops` (OPERATIONS), med samme navn som adgangskode.
+I Docker Compose kan du logge ind som `anna` (PASSENGER) eller `ops` (OPERATIONS), med samme navn som adgangskode. Brug `anna@example.com` på bookingen, hvis du tester **Min booking** som Anna.
 Ved lokal Kubernetes-test er Keycloaks issuer sat til `http://localhost:8090/auth/realms/airport` af Ticket 2-konfigurationen.
 
-Efter en betalt booking kan du registrere en taske på **Bagage**. Søg på den samme reference under
-**Min booking** og åbn **Network** i browserens udviklerværktøjer. Opslaget henter booking og betalinger
-over GraphQL og bagagelisten over REST. Se [API-versionering](docs/architecture.md#api-versionering).
+På **Bagage** hentes bookingstatus med GraphQL, mens registrering, liste og statusskift bruger REST.
+Søg på den samme reference under **Min booking** for at se booking, betaling og bagage fra ét
+`bookingOverview`-kald. Se [API-versionering](docs/architecture.md#api-versionering) og
+[CQRS i booking-service](docs/architecture.md#cqrs-i-booking-service).
 
 ## Kør lokalt med Docker
 

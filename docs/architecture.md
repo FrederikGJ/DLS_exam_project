@@ -81,6 +81,28 @@ koden som `code` i `application/problem+json` med en HTTP-status, fx `400` for `
 `404` for `NOT_FOUND` og `409` for `INVALID_STATE`, `BAGGAGE_LIMIT_EXCEEDED` og `CONFLICT`.
 Keycloak-rollerne er fælles. API'erne kan bruges på den samme bookingreference og det samme bagagetag.
 
+### CQRS i booking-service
+
+**Min booking** er en læsetung visning. Før skulle klienten hente booking, betalinger og bagage fra tre
+services. Nu beder den kun booking-service om `bookingOverview(reference)`. Queryen læser én række i
+`booking_overview` via bookingreferencen. Rækken indeholder booking og passager, senest observerede
+betalingsstatus, antal unikke bagagetags og de betalings- og bagagelinjer, som siden viser.
+
+`BookingCommandService` håndterer kommandoer og domæneændringer. `BookingQueryService` håndterer læsninger.
+Den almindelige booking-API har stadig sine queries, og de øvrige sider kan fortsat bruge service-API'erne.
+GraphQL-opslaget kræver login. En passager har adgang til egne oversigter, og `OPERATIONS` kan slå flere op.
+
+- Bookingændringer kopieres til projektionen i samme databasetransaktion som kommandoen.
+- `payment.completed`, `payment.failed`, `payment.refunded`, `baggage.registered` og `baggage.status.changed`
+  opdaterer projektionen via RabbitMQ. Behandlede event-id'er registreres i samme transaktion som ændringerne.
+  Betalinger identificeres med betalings-id og bagage med tag. En statusændring øger derfor ikke bagagetallet for et kendt tag.
+- Betalings- og bagageoplysninger er eventual consistent. Siden kan kortvarigt vise en ældre status, mens events er på vej.
+  Flyway fylder eksisterende bookinger og passagerer fra bookingdatabasen. Historiske betalings- og bagagelinjer
+  kræver genafspilning af events fra deres kildeservices for at blive vist fuldt ud.
+
+Læsemodellen er afledte data. Det gør det muligt at flytte eller replikere den og skalere læsninger uafhængigt
+af kommandoerne senere. I den nuværende deployment bruger begge sider samme PostgreSQL-database i booking-service.
+
 ### GraphQL-fejl
 
 Alle fejl returneres i `errors[].extensions.code` med en af koderne
@@ -160,8 +182,8 @@ sequenceDiagram
    pr. stykke. Svaret indeholder et tag, og servicen publicerer `baggage.registered`.
 2. En bruger med rollen `OPERATIONS` opdaterer status med `PATCH /api/baggage/v1/baggage/{tag}/status`.
    En ændring udløser `baggage.status.changed`.
-3. **Min booking** henter booking og betalinger med GraphQL og viser bagage fra
-   `GET /api/baggage/v1/bookings/{ref}/baggage`. Opslag på et enkelt tag bruger fortsat GraphQL.
+3. **Bagage** henter listen med `GET /api/baggage/v1/bookings/{ref}/baggage`. Opslag på et enkelt tag bruger GraphQL.
+   **Min booking** bruger booking-services samlede GraphQL-read model, som opdateres fra bagage- og betalingsevents.
 
 ### Flow C – Aflysning
 
