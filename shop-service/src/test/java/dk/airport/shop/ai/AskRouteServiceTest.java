@@ -27,6 +27,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
@@ -153,6 +154,57 @@ class AskRouteServiceTest {
                 .isInstanceOf(ApiException.class)
                 .extracting(e -> ((ApiException) e).getCode()).isEqualTo(ErrorCode.NOT_FOUND);
         verify(ollama, never()).chat(anyString(), anyString(), any());
+    }
+
+    @Test
+    void noShopButADestinationGivesADirectRoute() {
+        modelAnswers("{\"need\":\"toilet\",\"shop\":\"NONE\",\"destination\":\"Gate B12\"}");
+        when(routes.route(1L, 2L, false)).thenReturn(route);
+
+        AskRouteAnswer a = service(true).askRoute("hvor er gate B12", 1L, false);
+
+        assertThat(a.shop()).isNull();
+        assertThat(a.destination()).isEqualTo(gateB12);       // found again by the fallback
+        assertThat(a.route()).isSameAs(route);
+        verify(routes).route(1L, 2L, false);                  // straight there, no shop stop
+        verify(routes, never()).routeVia(anyLong(), anyLong(), any(), anyBoolean());
+    }
+
+    @Test
+    void unknownDestinationFallsBackToKeywords() {
+        modelAnswers("{\"need\":\"coffee\",\"shop\":\"Starbucks (T2)\",\"destination\":\"Gate Z99\"}");
+
+        AskRouteAnswer a = service(true).askRoute("kaffe", 1L, false);
+
+        assertThat(a.aiUsed()).isFalse();
+        assertThat(a.fallbackReason()).contains("ukendt destination");
+        assertThat(a.shop()).isEqualTo(starbucks);
+    }
+
+    @Test
+    void accessibleOnlyIsPassedOnToTheRouting() {
+        modelAnswers("{\"need\":\"books\",\"shop\":\"WHSmith (T2)\",\"destination\":\"Gate B12\"}");
+
+        service(true).askRoute("bog", 1L, true);
+
+        verify(routes).routeVia(1L, whsmith.getNode().getId(), 2L, true);
+    }
+
+    @Test
+    void fallbackAlsoPassesAccessibleOnly() {
+        service(false).askRoute("kaffe på vej til gate B12", 1L, true);
+
+        verify(routes).routeVia(1L, starbucks.getNode().getId(), 2L, true);
+    }
+
+    @Test
+    void theModelGetsTheQuestionAndWhereThePassengerIs() {
+        modelAnswers("{\"need\":\"coffee\",\"shop\":\"Starbucks (T2)\",\"destination\":\"NONE\"}");
+
+        service(true).askRoute("kaffe tak", 1L, false);
+
+        verify(ollama).chat(contains("Starbucks (T2)"),
+                eq("I am at Security T2 in terminal T2. kaffe tak"), any());
     }
 
     @Test

@@ -54,6 +54,37 @@ class KeywordMatcherTest {
         assertThat(KeywordMatcher.match("", SECURITY_T2, SHOPS, DESTINATIONS).shop()).isNull();
     }
 
+    @Test
+    void tieGoesToTheLowestIdWhateverTheOrder() {
+        Shop a = shop(7, "Cafe Nord", ShopCategory.FOOD, "T2", "Kaffe.");
+        Shop b = shop(5, "Cafe Syd", ShopCategory.FOOD, "T2", "Kaffe.");
+
+        assertThat(KeywordMatcher.match("kaffe", SECURITY_T2, List.of(a, b), DESTINATIONS).shop()).isEqualTo(b);
+        assertThat(KeywordMatcher.match("kaffe", SECURITY_T2, List.of(b, a), DESTINATIONS).shop()).isEqualTo(b);
+    }
+
+    @Test
+    void withoutADestinationThePassengersOwnTerminalIsPreferred() {
+        // "kaffe" gives Joe (T1) and Starbucks (T2) the same score; the terminal bonus decides
+        assertThat(KeywordMatcher.match("kaffe", SECURITY_T1, SHOPS, DESTINATIONS).shop()).isEqualTo(JOE_T1);
+        assertThat(KeywordMatcher.match("kaffe", SECURITY_T2, SHOPS, DESTINATIONS).shop()).isEqualTo(STARBUCKS_T2);
+    }
+
+    @Test
+    void shortWordsOnlyCountAsCategoryWords() {
+        // "og" is in every description but is too short to count; "te" (tea) still maps to FOOD
+        assertThat(KeywordMatcher.match("og", SECURITY_T2, SHOPS, DESTINATIONS).shop()).isNull();
+        assertThat(KeywordMatcher.match("te", SECURITY_T2, SHOPS, DESTINATIONS).shop()).isEqualTo(STARBUCKS_T2);
+    }
+
+    @Test
+    void matchingIgnoresCaseAndPunctuation() {
+        KeywordMatcher.Match m = KeywordMatcher.match("KAFFE?! ... GATE B12!!", SECURITY_T1, SHOPS, DESTINATIONS);
+
+        assertThat(m.shop()).isEqualTo(STARBUCKS_T2);
+        assertThat(m.destination()).isEqualTo(GATE_B12);
+    }
+
     static NavNode node(long id, String name, String terminal, NodeType type) {
         NavNode n = new NavNode(name, terminal, 0, 0, 0, type);
         ReflectionTestUtils.setField(n, "id", id);

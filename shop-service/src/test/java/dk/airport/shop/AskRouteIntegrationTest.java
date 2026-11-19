@@ -4,6 +4,10 @@ import com.github.tomakehurst.wiremock.WireMockServer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import dk.airport.shop.domain.Route;
+import dk.airport.shop.domain.RouteStep;
+import dk.airport.shop.domain.Shop;
+import dk.airport.shop.service.RouteService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.graphql.tester.AutoConfigureGraphQlTester;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -68,6 +72,7 @@ class AskRouteIntegrationTest {
     static void ai(DynamicPropertyRegistry registry) {
         registry.add("app.ai.url", ollama::baseUrl);
         registry.add("app.ai.timeout", () -> "1s");          // short, so the timeout test is fast
+        registry.add("app.ai.model", () -> "test-model");     // checked in the request body
     }
 
     @AfterAll
@@ -76,14 +81,15 @@ class AskRouteIntegrationTest {
     }
 
     @Autowired GraphQlTester graphQlTester;
+    @Autowired RouteService routeService;
 
     static final String ASK = """
-            query($q: String!, $from: ID!) {
-              askRoute(question: $q, fromNodeId: $from) {
+            query($q: String!, $from: ID!, $acc: Boolean = false) {
+              askRoute(question: $q, fromNodeId: $from, accessibleOnly: $acc) {
                 aiUsed fallbackReason
                 shop { name terminal }
                 destination { name }
-                route { totalDistanceM steps { instruction } }
+                route { totalDistanceM estimatedMinutes steps { instruction } }
               }
             }""";
 
@@ -116,6 +122,8 @@ class AskRouteIntegrationTest {
 
         // The request followed the prompt contract: JSON schema with the closed list, no streaming
         ollama.verify(postRequestedFor(urlEqualTo("/api/chat"))
+                .withRequestBody(matchingJsonPath("$.model", equalTo("test-model")))
+                .withRequestBody(matchingJsonPath("$.options.temperature", equalTo("0")))
                 .withRequestBody(matchingJsonPath("$.stream", equalTo("false")))
                 .withRequestBody(matchingJsonPath("$.format.properties.shop.enum[?(@ == 'Starbucks (T2)')]"))
                 .withRequestBody(matchingJsonPath("$.format.properties.destination.enum[?(@ == 'Gate B12')]"))
@@ -168,6 +176,77 @@ class AskRouteIntegrationTest {
     }
 
     @Test
+    void emptyAnswerFromOllamaFallsBackToKeywords() {
+        modelAnswers("");
+
+        GraphQlTester.Response r = ask("kaffe", nodeId("Security T2"));
+
+        r.path("askRoute.aiUsed").entity(Boolean.class).isEqualTo(false);
+        r.path("askRoute.fallbackReason").entity(String.class).satisfies(reason -> assertThat(reason).contains("empty answer"));
+        r.path("askRoute.shop.name").entity(String.class).isEqualTo("Starbucks");
+    }
+
+    @Test
+    void accessibleOnlyTakesTheElevatorToTheLounge() {
+        modelAnswers("{\"need\":\"lounge\",\"shop\":\"SAS Lounge (T1)\",\"destination\":\"NONE\"}");
+        long from = nodeId("Junction T1 Central");
+
+        GraphQlTester.Response stairs = ask("lounge", from, false);
+        GraphQlTester.Response elevator = ask("lounge", from, true);
+
+        // same distances as the plain route in ShopServiceIntegrationTest.accessibleOnlyAvoidsStairs
+        stairs.path("askRoute.route.totalDistanceM").entity(Integer.class).isEqualTo(205);
+        elevator.path("askRoute.route.totalDistanceM").entity(Integer.class).isEqualTo(225);
+        assertThat(elevator.path("askRoute.route.steps[*].instruction").entityList(String.class).get())
+                .anyMatch(i -> i.startsWith("Tag elevatoren"))
+                .noneMatch(i -> i.contains("trappen"));
+    }
+
+    @Test
+    void blankOrTooLongQuestionIsAValidationErrorAndOllamaIsNotCalled() {
+        long from = nodeId("Security T2");
+        for (String question : List.of("   ", "x".repeat(301))) {
+            graphQlTester.document(ASK).variable("q", question).variable("from", from).execute()
+                    .errors().satisfy(errors -> assertThat(errors.get(0).getExtensions()).containsEntry("code", "VALIDATION_ERROR"));
+        }
+        assertThat(ollama.getAllServeEvents()).isEmpty();
+    }
+
+    @Test
+    void routeViaIsTheTwoLegsJoinedAtTheShop() {
+        long from = nodeId("Security T2"), shop = nodeId("Starbucks T2"), to = nodeId("Gate B12");
+        Route toShop = routeService.route(from, shop, false);
+        Route toGate = routeService.route(shop, to, false);
+
+        Route via = routeService.routeVia(from, shop, to, false);
+
+        int total = toShop.totalDistanceM() + toGate.totalDistanceM();
+        assertThat(via.totalDistanceM()).isEqualTo(total);
+        assertThat(via.estimatedMinutes()).isEqualTo((int) Math.ceil(total / RouteService.METRES_PER_MINUTE));
+        // the shop step appears once (the second leg's "Start ved" is dropped) and says "Stop ved"
+        List<String> steps = via.steps().stream().map(RouteStep::instruction).toList();
+        assertThat(steps).hasSize(toShop.steps().size() + toGate.steps().size() - 1);
+        assertThat(steps.get(toShop.steps().size() - 1)).isEqualTo("Stop ved Starbucks T2");
+        assertThat(steps.get(0)).isEqualTo("Start ved Security T2");
+        assertThat(steps.get(steps.size() - 1)).isEqualTo("Du er fremme ved Gate B12");
+        // shops along both legs, each only once
+        assertThat(via.shopsAlongRoute()).extracting(Shop::getId).doesNotHaveDuplicates();
+    }
+
+    @Test
+    void routeViaWithoutADestinationEndsAtTheShop() {
+        long from = nodeId("Security T2"), shop = nodeId("Starbucks T2");
+
+        Route via = routeService.routeVia(from, shop, null, false);
+
+        Route direct = routeService.route(from, shop, false);
+        assertThat(via.totalDistanceM()).isEqualTo(direct.totalDistanceM());
+        assertThat(via.steps()).extracting(RouteStep::instruction)
+                .isEqualTo(direct.steps().stream().map(RouteStep::instruction).toList())
+                .last().isEqualTo("Du er fremme ved Starbucks T2");
+    }
+
+    @Test
     void unknownStartNodeIsNotFound() {
         modelAnswers("{\"need\":\"coffee\",\"shop\":\"Starbucks (T2)\",\"destination\":\"NONE\"}");
 
@@ -177,7 +256,11 @@ class AskRouteIntegrationTest {
     }
 
     private GraphQlTester.Response ask(String question, long from) {
-        return graphQlTester.document(ASK).variable("q", question).variable("from", from).execute();
+        return ask(question, from, false);
+    }
+
+    private GraphQlTester.Response ask(String question, long from, boolean accessibleOnly) {
+        return graphQlTester.document(ASK).variable("q", question).variable("from", from).variable("acc", accessibleOnly).execute();
     }
 
     private long nodeId(String name) {
