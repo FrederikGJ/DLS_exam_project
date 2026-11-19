@@ -49,15 +49,17 @@ public class OutboxRelay {
     private final RabbitTemplate rabbitTemplate;
     private final EntityManager entityManager;
     private final OutboxProperties props;
+    private final EventMetrics metrics;
     private final String exchange;
 
     public OutboxRelay(OutboxEventRepository outbox, RabbitTemplate rabbitTemplate, EntityManager entityManager,
-                       OutboxProperties props, MeterRegistry meterRegistry,
+                       OutboxProperties props, MeterRegistry meterRegistry, EventMetrics metrics,
                        @Value("${app.messaging.exchange}") String exchange) {
         this.outbox = outbox;
         this.rabbitTemplate = rabbitTemplate;
         this.entityManager = entityManager;
         this.props = props;
+        this.metrics = metrics;
         this.exchange = exchange;
         Gauge.builder("outbox.pending", outbox, OutboxEventRepository::countByPublishedAtIsNull)
                 .description("Events written to the outbox but not yet confirmed by RabbitMQ")
@@ -86,6 +88,7 @@ public class OutboxRelay {
             OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
             for (OutboxEvent event : batch) {
                 event.markPublished(now);
+                metrics.published(event.getEventType());
                 logPublished(event);
             }
         } catch (AmqpException ex) {

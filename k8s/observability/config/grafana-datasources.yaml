@@ -8,6 +8,9 @@ datasources:
     url: http://prometheus:9090
     isDefault: true
     editable: false
+    jsonData:
+      manageAlerts: true
+      prometheusType: Prometheus
   - name: Loki
     uid: loki
     type: loki
