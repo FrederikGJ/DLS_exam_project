@@ -233,6 +233,7 @@ services:
     ports: ["127.0.0.1:9090:9090"]
     volumes:
       - ./k8s/observability/config/compose-prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./k8s/observability/config/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus-data:/prometheus
 
   loki:

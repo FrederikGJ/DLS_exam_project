@@ -14,6 +14,7 @@ configMapGenerator:
   - name: prometheus-config
     files:
       - config/prometheus.yml
+      - config/alerts.yml
   - name: loki-config
     files:
       - config/loki.yaml

@@ -129,6 +129,23 @@ Alloy sender podlogs i `airport`-namespacet til Loki. Compose-udgaven bruger Doc
 læse projektets containerlogs. Loki bevarer loglinjen og indekserer app som label. Trace-id søges i
 JSON-feltet, så hver trace kan findes uden at danne en separat logstrøm.
 
+#### Event-metrics og alarmer
+
+`events_published_total` tæller beskeder, som RabbitMQ har bekræftet. `events_consumed_total` grupperer
+behandlingsforsøg efter service, eventtype og udfald (`processed`, `duplicate` eller `failed`). Hvert
+fejlet forsøg tælles, også når et senere retry lykkes. Ukendte eventtyper samles under `unknown`.
+
+Grafana viser også eventrater, fejlede forsøg, CPU og aktive alarmer. Prometheus bruger samme regelfil i
+Compose og Kubernetes. Alarmerne kan ses på [Prometheus Alerts](http://localhost:9090/alerts) i Compose.
+
+| Alarm | Udløses ved |
+|---|---|
+| `ServiceDown` | En service kan ikke scrapes i 1 minut |
+| `OutboxBacklog` | Mere end 20 ventende events i samme service i 2 minutter |
+| `MessagesDeadLettered` | Beskeder i en DLQ i 1 minut |
+| `EventHandlingFailing` | Fejlede eventforsøg inden for det seneste 5-minutters vindue i 2 minutter |
+| `HighServerErrorRate` | Over 5 % HTTP-svar med 5xx i 5 minutter |
+
 #### Find en fejl fra booking til bagage
 
 1. Åbn Grafana **Explore**, vælg **Loki**, og find bookingreferencen med
