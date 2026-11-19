@@ -21,7 +21,7 @@ Dokumentation: [docs/architecture.md](docs/architecture.md) (diagram, flows, des
 |---------------------|-----------------------------------------------------------------------|
 | Frontend            | Vanilla JavaScript, HTML, CSS – serveret af nginx (ingen frameworks)  |
 | Backend             | Java 21, Spring Boot 3.5 (Maven)                                       |
-| API                 | GraphQL (Spring for GraphQL) – kun `/actuator/health` er REST         |
+| API                 | GraphQL (Spring for GraphQL) og versioneret REST i baggage-service         |
 | Database            | PostgreSQL 16 – én database pr. service, migrationer med Flyway       |
 | Message broker      | RabbitMQ (Spring AMQP) – topic exchange `airport.events`              |
 | Containerisering    | Docker, multi-stage builds (maven → eclipse-temurin JRE)              |
@@ -43,6 +43,26 @@ Dokumentation: [docs/architecture.md](docs/architecture.md) (diagram, flows, des
 
 Hver service har GraphiQL på `http://localhost:808x/graphiql?path=/api/<x>/graphql` i dev-profilen
 og health-endpoints på `/actuator/health/liveness` og `/actuator/health/readiness`.
+
+### Bagage-API v1
+
+| Metode | Endpoint | Rolle |
+|--------|----------|-------|
+| GET | `/api/baggage/v1/bookings/{ref}/baggage` | `PASSENGER` eller `OPERATIONS` |
+| POST | `/api/baggage/v1/baggage` | `PASSENGER` eller `OPERATIONS` |
+| PATCH | `/api/baggage/v1/baggage/{tag}/status` | `OPERATIONS` |
+
+[Swagger UI](http://localhost:8084/api/baggage/swagger-ui.html) og
+[OpenAPI JSON](http://localhost:8084/api/baggage/v3/api-docs) er tilgængelige i Docker Compose.
+Bag Kubernetes Ingress bruges samme stier på Ingress-adressen. Vælg **Authorize** i Swagger UI og indsæt et
+Keycloak-access-token for at kalde API'et.
+
+I Docker Compose kan du logge ind som `anna` (PASSENGER) eller `ops` (OPERATIONS), med samme navn som adgangskode.
+Ved lokal Kubernetes-test er Keycloaks issuer sat til `http://localhost:8090/auth/realms/airport` af Ticket 2-konfigurationen.
+
+Efter en betalt booking kan du registrere en taske på **Bagage**. Søg på den samme reference under
+**Min booking** og åbn **Network** i browserens udviklerværktøjer. Opslaget henter booking og betalinger
+over GraphQL og bagagelisten over REST. Se [API-versionering](docs/architecture.md#api-versionering).
 
 ## Kør lokalt med Docker
 

@@ -20,4 +20,12 @@ resources:
   - services/shop-service.yaml
   - frontend/frontend.yaml
   - tools/pgadmin.yaml   # dev/demo: pgAdmin at /pgadmin - remove this line to deploy without it
+  - keycloak/keycloak.yaml
   - ingress.yaml
+
+configMapGenerator:
+  - name: keycloak-realm
+    files:
+      - keycloak/realm-airport.json
+    options:
+      disableNameSuffixHash: true

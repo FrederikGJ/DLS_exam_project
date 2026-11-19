@@ -11,7 +11,7 @@ flowchart LR
   FE -- GraphQL /api/flights/graphql --> FS[flight-service]
   FE -- GraphQL /api/bookings/graphql --> BS[booking-service]
   FE -- GraphQL /api/payments/graphql --> PS[payment-service]
-  FE -- GraphQL /api/baggage/graphql --> BG[baggage-service]
+  FE -- REST v1 og GraphQL --> BG[baggage-service]
   FE -- GraphQL /api/shops/graphql --> SS[shop-service]
 
   BS -. GraphQL: pris + sæde .-> FS
@@ -33,7 +33,7 @@ flowchart LR
   [Frontend]  --GraphQL-->  [Flight Service]   ---> flight_db
               --GraphQL-->  [Booking Service]  ---> booking_db   --GraphQL--> Flight Service (pris/sæde)
               --GraphQL-->  [Payment Service]  ---> payment_db
-              --GraphQL-->  [Baggage Service]  ---> baggage_db
+              --REST/GraphQL--> [Baggage Service]  ---> baggage_db
               --GraphQL-->  [Shop Service]     ---> shop_db
 
   Alle backend-services <--events--> [RabbitMQ: topic exchange "airport.events"]
@@ -42,7 +42,7 @@ flowchart LR
 Regler der overholdes:
 
 * Én PostgreSQL-database pr. service. Ingen service læser i en anden services database.
-* Synkront: frontend → service via GraphQL over HTTP (Spring for GraphQL). Kun `/actuator/health` er REST.
+* Synkront: frontend → service via GraphQL over HTTP (Spring for GraphQL) og REST v1 for bagage.
 * Asynkront: service → service via events på RabbitMQ (se [events.md](events.md)).
 * Services cacher snapshots fra events (fx booking gemmer flightnummer, afgangstid, gate og flystatus;
   baggage gemmer `booking_snapshot`). Kilden til sandhed er altid den ejende service.
@@ -65,6 +65,21 @@ kopier af strukturen):
 
 Skema og seed-data styres af Flyway (`V1__init.sql`, `V2__seed.sql`, `V{n}__outbox.sql`); Hibernate kører med
 `ddl-auto=validate`.
+
+### API-versionering
+
+REST-kontrakten har major-versionen i stien `/api/baggage/v1`. Bagudkompatible tilføjelser, fx et valgfrit felt,
+kan leveres i v1. En breaking change, fx et omdøbt eller fjernet svarfelt, får en ny sti under
+`/api/baggage/v2`. v1 kører parallelt, mens klienterne migrerer. `/api/baggage/v3/api-docs` er stien til
+OpenAPI-dokumentet. Forretnings-API'ets version fremgår af de dokumenterede operationer.
+
+GraphQL beholder sin eksisterende endpoint-sti. Skemaet får nye felter eller operationer, og en forgænger
+markeres med `@deprecated(reason: "...")` med en henvisning til erstatningen.
+
+REST og GraphQL kalder begge `BaggageService` og bruger samme data, regler og fejlkoder. REST sender
+koden som `code` i `application/problem+json` med en HTTP-status, fx `400` for `VALIDATION_ERROR`,
+`404` for `NOT_FOUND` og `409` for `INVALID_STATE`, `BAGGAGE_LIMIT_EXCEEDED` og `CONFLICT`.
+Keycloak-rollerne er fælles. API'erne kan bruges på den samme bookingreference og det samme bagagetag.
 
 ### GraphQL-fejl
 
@@ -140,10 +155,13 @@ sequenceDiagram
 
 ### Flow B – Bagage
 
-1. `registerBaggage(reference, 23, CHECKED)` → baggage-service tjekker `booking_snapshot.status ∈ {CONFIRMED, CHECKED_IN}`,
-   max 3 CHECKED pr. booking og max 32 kg → tag `BAG-XXXXXXXX`, event `baggage.registered`.
-2. `updateBaggageStatus(tag, LOADED, "Belt 4")` → event `baggage.status.changed`.
-3. Frontend viser bagage under "Min booking" (`baggageByBooking`).
+1. **Bagage** henter bookingstatus med GraphQL. `POST /api/baggage/v1/baggage` registrerer bagagen.
+   Baggage-service tjekker snapshottet for `CONFIRMED` eller `CHECKED_IN`, maks. tre stykker `CHECKED` og maks. 32 kg
+   pr. stykke. Svaret indeholder et tag, og servicen publicerer `baggage.registered`.
+2. En bruger med rollen `OPERATIONS` opdaterer status med `PATCH /api/baggage/v1/baggage/{tag}/status`.
+   En ændring udløser `baggage.status.changed`.
+3. **Min booking** henter booking og betalinger med GraphQL og viser bagage fra
+   `GET /api/baggage/v1/bookings/{ref}/baggage`. Opslag på et enkelt tag bruger fortsat GraphQL.
 
 ### Flow C – Aflysning
 

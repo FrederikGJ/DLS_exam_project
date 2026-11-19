@@ -3,6 +3,7 @@ package dk.airport.baggage;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dk.airport.baggage.domain.Baggage;
 import dk.airport.baggage.domain.BaggageStatus;
+import dk.airport.baggage.domain.BookingSnapshot;
 import dk.airport.baggage.messaging.EventEnvelope;
 import dk.airport.baggage.messaging.EventPublisher;
 import dk.airport.baggage.messaging.OutboxEvent;
@@ -13,6 +14,7 @@ import dk.airport.baggage.repository.BookingSnapshotRepository;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -24,11 +26,17 @@ import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.graphql.tester.AutoConfigureGraphQlTester;
+import org.springframework.boot.test.autoconfigure.graphql.tester.AutoConfigureHttpGraphQlTester;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.context.annotation.Import;
 import org.springframework.graphql.test.tester.GraphQlTester;
+import org.springframework.graphql.test.tester.HttpGraphQlTester;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
+import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.containers.RabbitMQContainer;
@@ -50,13 +58,25 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doThrow;
 
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.options;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.redirectedUrl;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
 /**
  * End-to-end test against real PostgreSQL + RabbitMQ (Testcontainers): Flyway migrations, GraphQL,
  * booking/flight event consumption (idempotent) and publishing of baggage.* events.
  * Steps build on each other, hence the explicit ordering.
  */
-@SpringBootTest
-@AutoConfigureGraphQlTester
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@AutoConfigureHttpGraphQlTester
+@AutoConfigureMockMvc
+@Import(TestTokens.class)
 @Testcontainers
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class BaggageServiceIntegrationTest {
@@ -79,7 +99,16 @@ class BaggageServiceIntegrationTest {
     static SimpleMessageListenerContainer testListener;
     static String firstTag;
 
-    @Autowired GraphQlTester graphQlTester;
+    @Autowired HttpGraphQlTester graphQlTester;
+    @Autowired MockMvc mvc;
+    GraphQlTester asPassenger;
+    GraphQlTester asOperations;
+
+    @BeforeEach
+    void authenticatedClients() {
+        asPassenger = graphQlTester.mutate().header(HttpHeaders.AUTHORIZATION, TestTokens.passenger()).build();
+        asOperations = graphQlTester.mutate().header(HttpHeaders.AUTHORIZATION, TestTokens.operations()).build();
+    }
     /** Spy so a single test can make the outbox relay's publish attempt fail (reset after every test). */
     @MockitoSpyBean RabbitTemplate rabbitTemplate;
     @Autowired ObjectMapper objectMapper;
@@ -133,7 +162,7 @@ class BaggageServiceIntegrationTest {
         await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
                 assertThat(snapshotRepository.findById(REF)).isPresent());
 
-        graphQlTester.document("query($ref: String!) { bookingSnapshot(reference: $ref) { bookingReference passengerName flightNumber status } }")
+        asPassenger.document("query($ref: String!) { bookingSnapshot(reference: $ref) { bookingReference passengerName flightNumber status } }")
                 .variable("ref", REF)
                 .execute()
                 .path("bookingSnapshot.status").entity(String.class).isEqualTo("PENDING_PAYMENT")
@@ -207,7 +236,7 @@ class BaggageServiceIntegrationTest {
     @Test
     @Order(6)
     void updateStatusPublishesStatusChanged() {
-        graphQlTester.document("mutation($tag: String!) { updateBaggageStatus(tagNumber: $tag, status: LOADED, location: \"Belt 4\") { tagNumber status lastLocation } }")
+        asOperations.document("mutation($tag: String!) { updateBaggageStatus(tagNumber: $tag, status: LOADED, location: \"Belt 4\") { tagNumber status lastLocation } }")
                 .variable("tag", firstTag)
                 .execute()
                 .path("updateBaggageStatus.status").entity(String.class).isEqualTo("LOADED")
@@ -220,7 +249,7 @@ class BaggageServiceIntegrationTest {
         assertThat(events.get(0).payload().path("location").asText()).isEqualTo("Belt 4");
         assertThat(events.get(0).payload().path("bookingReference").asText()).isEqualTo(REF);
 
-        graphQlTester.document("mutation { updateBaggageStatus(tagNumber: \"BAG-NOPE0000\", status: LOST) { tagNumber } }")
+        asOperations.document("mutation { updateBaggageStatus(tagNumber: \"BAG-NOPE0000\", status: LOST) { tagNumber } }")
                 .execute()
                 .errors().satisfy(errors -> {
                     assertThat(errors).hasSize(1);
@@ -251,29 +280,135 @@ class BaggageServiceIntegrationTest {
     @Test
     @Order(8)
     void queriesReturnBaggage() {
-        graphQlTester.document("query($ref: String!) { baggageByBooking(reference: $ref) { tagNumber status lastLocation type weightKg } }")
+        asPassenger.document("query($ref: String!) { baggageByBooking(reference: $ref) { tagNumber status lastLocation type weightKg } }")
                 .variable("ref", REF)
                 .execute()
                 .path("baggageByBooking").entityList(Object.class).hasSize(4)
                 .path("baggageByBooking[*].lastLocation").entityList(String.class).containsExactly("RETURN_DESK", "RETURN_DESK", "RETURN_DESK", "RETURN_DESK");
 
-        graphQlTester.document("query($fn: String!) { baggageByFlight(flightNumber: $fn) { tagNumber } }")
+        asOperations.document("query($fn: String!) { baggageByFlight(flightNumber: $fn) { tagNumber } }")
                 .variable("fn", FLIGHT_NUMBER)
                 .execute()
                 .path("baggageByFlight").entityList(Object.class).hasSize(4);
 
-        graphQlTester.document("query($tag: String!) { baggage(tagNumber: $tag) { tagNumber bookingReference passengerName status updatedAt } }")
+        asPassenger.document("query($tag: String!) { baggage(tagNumber: $tag) { tagNumber bookingReference passengerName status updatedAt } }")
                 .variable("tag", firstTag)
                 .execute()
                 .path("baggage.bookingReference").entity(String.class).isEqualTo(REF)
                 .path("baggage.status").entity(String.class).isEqualTo("REGISTERED");
 
-        graphQlTester.document("{ baggage(tagNumber: \"BAG-UNKNOWN1\") { tagNumber } }")
+        asPassenger.document("{ baggage(tagNumber: \"BAG-UNKNOWN1\") { tagNumber } }")
                 .execute()
                 .path("baggage").valueIsNull();
     }
 
     // ------------------------------------------------------------------ outbox guarantees
+
+    @Test
+    void restRegistrationListAndStatusShareDataWithGraphQl() throws Exception {
+        String ref = "REST01";
+        snapshotRepository.save(new BookingSnapshot(ref, "Anna Jensen", "DY1234", 2L, "CONFIRMED"));
+        String body = """
+                {"bookingReference":"REST01","weightKg":23,"type":"CHECKED"}
+                """;
+        String registration = mvc.perform(post("/api/baggage/v1/baggage")
+                        .header(HttpHeaders.AUTHORIZATION, TestTokens.passenger())
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.status").value("REGISTERED"))
+                .andReturn().getResponse().getContentAsString();
+        String tag = objectMapper.readTree(registration).path("tagNumber").asText();
+
+        mvc.perform(get("/api/baggage/v1/bookings/{ref}/baggage", ref)
+                        .header(HttpHeaders.AUTHORIZATION, TestTokens.passenger()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(1))
+                .andExpect(jsonPath("$[0].tagNumber").value(tag));
+
+        mvc.perform(patch("/api/baggage/v1/baggage/{tag}/status", tag)
+                        .header(HttpHeaders.AUTHORIZATION, TestTokens.operations())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"status":"LOADED","location":"Belt 4"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("LOADED"))
+                .andExpect(jsonPath("$.lastLocation").value("Belt 4"));
+
+        asPassenger.document("query($tag: String!) { baggage(tagNumber: $tag) { status } }")
+                .variable("tag", tag).execute()
+                .path("baggage.status").entity(String.class).isEqualTo("LOADED");
+    }
+
+    @Test
+    void restErrorsExposeGraphQlCodes() throws Exception {
+        String registration = "/api/baggage/v1/baggage";
+        String statusPath = registration + "/{tag}/status";
+        mvc.perform(get("/api/baggage/v1/bookings/REST02/baggage"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.code").value("UNAUTHORIZED"));
+        mvc.perform(get("/api/baggage/v1/bookings/REST02/baggage")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer invalid"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code").value("UNAUTHORIZED"));
+        mvc.perform(patch(statusPath, "BAG-UNKNOWN")
+                        .header(HttpHeaders.AUTHORIZATION, TestTokens.passenger())
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"status\":\"LOADED\"}"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("FORBIDDEN"));
+        mvc.perform(post(registration)
+                        .header(HttpHeaders.AUTHORIZATION, TestTokens.passenger())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"bookingReference":"REST02","weightKg":32.01,"type":"CHECKED"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"));
+        mvc.perform(post(registration)
+                        .header(HttpHeaders.AUTHORIZATION, TestTokens.passenger())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"bookingReference":"REST02","weightKg":23,"type":"CHECKED"}
+                                """))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("NOT_FOUND"));
+        mvc.perform(patch(statusPath, "BAG-UNKNOWN")
+                        .header(HttpHeaders.AUTHORIZATION, TestTokens.operations())
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"status\":\"unknown\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"));
+        mvc.perform(patch(statusPath, "BAG-UNKNOWN")
+                        .header(HttpHeaders.AUTHORIZATION, TestTokens.operations())
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"status\":\"LOADED\"}"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("NOT_FOUND"));
+    }
+
+    @Test
+    void restAllowsBrowserPatchAndPublishesOpenApiUnderIngressPrefix() throws Exception {
+        mvc.perform(options("/api/baggage/v1/baggage/BAG-EXAMPLE/status")
+                        .header(HttpHeaders.ORIGIN, "http://localhost:8080")
+                        .header(HttpHeaders.ACCESS_CONTROL_REQUEST_METHOD, "PATCH")
+                        .header(HttpHeaders.ACCESS_CONTROL_REQUEST_HEADERS, "authorization,content-type"))
+                .andExpect(status().isOk())
+                .andExpect(header().string(HttpHeaders.ACCESS_CONTROL_ALLOW_ORIGIN, "http://localhost:8080"));
+
+        mvc.perform(get("/api/baggage/v3/api-docs"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.paths['/api/baggage/v1/bookings/{ref}/baggage'].get").exists())
+                .andExpect(jsonPath("$.paths['/api/baggage/v1/baggage'].post").exists())
+                .andExpect(jsonPath("$.paths['/api/baggage/v1/baggage/{tag}/status'].patch").exists())
+                .andExpect(jsonPath("$.components.securitySchemes.bearerAuth.scheme").value("bearer"));
+        mvc.perform(get("/api/baggage/swagger-ui.html"))
+                .andExpect(status().is3xxRedirection())
+                .andExpect(redirectedUrl("/api/baggage/swagger-ui/index.html"));
+        mvc.perform(get("/api/baggage/swagger-ui/index.html")).andExpect(status().isOk());
+        mvc.perform(get("/api/baggage/swagger-ui/swagger-initializer.js")).andExpect(status().isOk());
+        mvc.perform(get("/api/baggage/v3/api-docs/swagger-config"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.url").value("/api/baggage/v3/api-docs"));
+    }
 
     @Test
     void publishOutsideTransactionIsRejected() {
@@ -324,7 +459,7 @@ class BaggageServiceIntegrationTest {
     // ------------------------------------------------------------------ helpers
 
     private GraphQlTester.Response register(String ref, String weight, String type) {
-        return graphQlTester.document("mutation($ref: String!, $w: BigDecimal!, $t: BaggageType!) { registerBaggage(bookingReference: $ref, weightKg: $w, type: $t) { id tagNumber bookingReference passengerName flightNumber weightKg type status lastLocation updatedAt } }")
+        return asPassenger.document("mutation($ref: String!, $w: BigDecimal!, $t: BaggageType!) { registerBaggage(bookingReference: $ref, weightKg: $w, type: $t) { id tagNumber bookingReference passengerName flightNumber weightKg type status lastLocation updatedAt } }")
                 .variable("ref", ref)
                 .variable("w", weight)
                 .variable("t", type)

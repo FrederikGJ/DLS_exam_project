@@ -9,9 +9,18 @@ PAYMENT=${PAYMENT_URL:-http://localhost:8083/api/payments/graphql}
 BAGGAGE=${BAGGAGE_URL:-http://localhost:8084/api/baggage/graphql}
 SHOP=${SHOP_URL:-http://localhost:8085/api/shops/graphql}
 
-gql() { # gql <url> <query> [variables-json]
+KEYCLOAK=${KEYCLOAK_URL:-http://localhost:8180}
+REALM=${KEYCLOAK_REALM:-airport}
+
+token() { # token <username> <password> -> access token (password grant on the public client airport-frontend)
+  curl -sS -d client_id=airport-frontend -d grant_type=password -d "username=$1" -d "password=$2" \
+       "$KEYCLOAK/realms/$REALM/protocol/openid-connect/token" | jq -r '.access_token // empty'
+}
+gql() { # gql <url> <query> [variables-json] [token]
   local url=$1 query=$2 vars=${3:-'{}'}
-  curl -sS -H 'Content-Type: application/json' "$url" \
+  local -a args=()
+  [[ -z "${4:-}" ]] || args+=(-H "Authorization: Bearer $4")
+  curl -sS "${args[@]}" -H 'Content-Type: application/json' "$url" \
        --data "$(jq -cn --arg q "$query" --argjson v "$vars" '{query:$q, variables:$v}')"
 }
 expect() { # expect <description> <actual> <expected>
@@ -26,6 +35,13 @@ wait_for() { # wait_for <description> <cmd producing value> <expected> [seconds]
   done
   echo "  FAIL $desc: expected '$expected' got '$val'"; exit 1
 }
+
+TOKEN_ANNA=$(token anna anna)
+TOKEN_OPS=$(token ops ops)
+if [[ -z "$TOKEN_ANNA" || -z "$TOKEN_OPS" ]]; then
+  echo "  FAIL kunne ikke hente bagagetokens fra $KEYCLOAK/realms/$REALM"
+  exit 1
+fi
 
 echo "== Flow A: booking og betaling =="
 FLIGHT_ID=$(gql "$FLIGHT" '{ flights(filter:{status:SCHEDULED}) { id flightNumber gate } }' | jq -r '.data.flights[0].id')
@@ -50,7 +66,7 @@ expect "payment.cardLast4" "$(echo "$PAY" | jq -r '.data.pay.cardLast4')" "4242"
 
 wait_for "booking CONFIRMED" "gql '$BOOKING' 'query(\$r:String!){ bookingByReference(reference:\$r){ status } }' '{\"r\":\"$REF\"}' | jq -r '.data.bookingByReference.status'" "CONFIRMED"
 wait_for "seat taken in flight-service" "gql '$FLIGHT' 'query(\$id:ID!,\$s:String!){ flight(id:\$id){ seat(seatNumber:\$s){ isAvailable } } }' '{\"id\":\"$FLIGHT_ID\",\"s\":\"$SEAT\"}' | jq -r '.data.flight.seat.isAvailable'" "false"
-wait_for "baggage snapshot CONFIRMED" "gql '$BAGGAGE' 'query(\$r:String!){ bookingSnapshot(reference:\$r){ status } }' '{\"r\":\"$REF\"}' | jq -r '.data.bookingSnapshot.status'" "CONFIRMED"
+wait_for "baggage snapshot CONFIRMED" "gql '$BAGGAGE' 'query(\$r:String!){ bookingSnapshot(reference:\$r){ status } }' '{\"r\":\"$REF\"}' '$TOKEN_ANNA' | jq -r '.data.bookingSnapshot.status'" "CONFIRMED"
 
 echo "== Flow A (negativ): kort der slutter på 0000 =="
 SEAT2=$(gql "$FLIGHT" "query(\$id:ID!){ availableSeats(flightId:\$id){ seatNumber } }" "{\"id\":\"$FLIGHT_ID\"}" | jq -r '.data.availableSeats[-1].seatNumber')
@@ -62,23 +78,23 @@ expect "failureReason" "$(echo "$FAILPAY" | jq -r '.data.pay.failureReason')" "I
 wait_for "booking CANCELLED after failed payment" "gql '$BOOKING' 'query(\$r:String!){ bookingByReference(reference:\$r){ status } }' '{\"r\":\"$REF2\"}' | jq -r '.data.bookingByReference.status'" "CANCELLED"
 
 echo "== Flow B: bagage =="
-BAG=$(gql "$BAGGAGE" 'mutation($r:String!){ registerBaggage(bookingReference:$r, weightKg:23, type:CHECKED){ tagNumber status lastLocation } }' "{\"r\":\"$REF\"}")
+BAG=$(gql "$BAGGAGE" 'mutation($r:String!){ registerBaggage(bookingReference:$r, weightKg:23, type:CHECKED){ tagNumber status lastLocation } }' "{\"r\":\"$REF\"}" "$TOKEN_ANNA")
 TAG=$(echo "$BAG" | jq -r '.data.registerBaggage.tagNumber')
 expect "baggage.status" "$(echo "$BAG" | jq -r '.data.registerBaggage.status')" "REGISTERED"
 [[ "$TAG" =~ ^BAG-[A-Z0-9]{8}$ ]] && echo "  ok   tag $TAG" || { echo "  FAIL tag format $TAG"; exit 1; }
-UPD=$(gql "$BAGGAGE" 'mutation($t:String!){ updateBaggageStatus(tagNumber:$t, status:LOADED, location:"Belt 4"){ status lastLocation } }' "{\"t\":\"$TAG\"}")
+UPD=$(gql "$BAGGAGE" 'mutation($t:String!){ updateBaggageStatus(tagNumber:$t, status:LOADED, location:"Belt 4"){ status lastLocation } }' "{\"t\":\"$TAG\"}" "$TOKEN_OPS")
 expect "baggage LOADED" "$(echo "$UPD" | jq -r '.data.updateBaggageStatus.status')" "LOADED"
 expect "baggage location" "$(echo "$UPD" | jq -r '.data.updateBaggageStatus.lastLocation')" "Belt 4"
-TOOHEAVY=$(gql "$BAGGAGE" 'mutation($r:String!){ registerBaggage(bookingReference:$r, weightKg:33, type:CHECKED){ tagNumber } }' "{\"r\":\"$REF\"}")
+TOOHEAVY=$(gql "$BAGGAGE" 'mutation($r:String!){ registerBaggage(bookingReference:$r, weightKg:33, type:CHECKED){ tagNumber } }' "{\"r\":\"$REF\"}" "$TOKEN_ANNA")
 expect "33 kg -> code" "$(echo "$TOOHEAVY" | jq -r '.errors[0].extensions.code')" "VALIDATION_ERROR"
-expect "baggageByBooking count" "$(gql "$BAGGAGE" 'query($r:String!){ baggageByBooking(reference:$r){ tagNumber } }' "{\"r\":\"$REF\"}" | jq -r '.data.baggageByBooking | length')" "1"
+expect "baggageByBooking count" "$(gql "$BAGGAGE" 'query($r:String!){ baggageByBooking(reference:$r){ tagNumber } }' "{\"r\":\"$REF\"}" "$TOKEN_ANNA" | jq -r '.data.baggageByBooking | length')" "1"
 
 echo "== Flow C: aflysning =="
 CANCEL=$(gql "$FLIGHT" 'mutation($id:ID!){ updateFlightStatus(flightId:$id, status:CANCELLED){ status } }' "{\"id\":\"$FLIGHT_ID\"}")
 expect "flight CANCELLED" "$(echo "$CANCEL" | jq -r '.data.updateFlightStatus.status')" "CANCELLED"
 wait_for "booking CANCELLED" "gql '$BOOKING' 'query(\$r:String!){ bookingByReference(reference:\$r){ status flightStatus } }' '{\"r\":\"$REF\"}' | jq -r '.data.bookingByReference.status'" "CANCELLED"
 wait_for "payment REFUNDED" "gql '$PAYMENT' 'query(\$r:String!){ paymentsByBooking(reference:\$r){ status } }' '{\"r\":\"$REF\"}' | jq -r '.data.paymentsByBooking[0].status'" "REFUNDED"
-wait_for "baggage at RETURN_DESK" "gql '$BAGGAGE' 'query(\$t:String!){ baggage(tagNumber:\$t){ status lastLocation } }' '{\"t\":\"$TAG\"}' | jq -r '.data.baggage.lastLocation'" "RETURN_DESK"
+wait_for "baggage at RETURN_DESK" "gql '$BAGGAGE' 'query(\$t:String!){ baggage(tagNumber:\$t){ status lastLocation } }' '{\"t\":\"$TAG\"}' '$TOKEN_ANNA' | jq -r '.data.baggage.lastLocation'" "RETURN_DESK"
 wait_for "seat released" "gql '$FLIGHT' 'query(\$id:ID!,\$s:String!){ flight(id:\$id){ seat(seatNumber:\$s){ isAvailable } } }' '{\"id\":\"$FLIGHT_ID\",\"s\":\"$SEAT\"}' | jq -r '.data.flight.seat.isAvailable'" "true"
 
 echo "== Flow D: navigation =="

@@ -51,6 +51,10 @@ Bruger du Docker-driveren på macOS eller Windows, er `minikube ip` ikke direkte
 `minikube tunnel` i en separat terminal og åbn <http://127.0.0.1/> (eller `minikube service -n airport frontend`
 for en direkte NodePort-tunnel uden Ingress). På Linux virker `minikube ip` direkte.
 
+Bagagesidernes Keycloak-login bruger `http://localhost:8090` som lokal adgangsadresse i Kubernetes.
+Hvis du bruger Minikube, kan du videresende Ingress-controlleren med
+`kubectl -n ingress-nginx port-forward service/ingress-nginx-controller 8090:80` og åbne den adresse.
+
 RabbitMQ management UI (bruger/kode `airport`/`airport`):
 
 ```bash
@@ -104,6 +108,7 @@ Kør end-to-end-smoketesten mod Kubernetes-stakken gennem Ingress:
 FLIGHT_URL=http://localhost:8090/api/flights/graphql \
 BOOKING_URL=http://localhost:8090/api/bookings/graphql \
 PAYMENT_URL=http://localhost:8090/api/payments/graphql \
+KEYCLOAK_URL=http://localhost:8090/auth \
 BAGGAGE_URL=http://localhost:8090/api/baggage/graphql \
 SHOP_URL=http://localhost:8090/api/shops/graphql \
 scripts/e2e-smoke.sh

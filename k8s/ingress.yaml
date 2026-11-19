@@ -49,6 +49,13 @@ spec:
                 name: shop-service
                 port:
                   number: 8080
+          - path: /auth
+            pathType: Prefix
+            backend:
+              service:
+                name: keycloak
+                port:
+                  number: 8080
           - path: /pgadmin
             pathType: Prefix
             backend:

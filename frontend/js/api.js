@@ -1,5 +1,8 @@
-// GraphQL client + one small API module per backend service.
-// URLs come from js/config.js (window.AIRPORT_CONFIG).
+// GraphQL and REST clients + one small API module per backend service.
+// URLs come from js/config.js (window.AIRPORT_CONFIG). Every request carries the Keycloak access token when the
+// user is logged in (auth.js); UNAUTHORIZED/FORBIDDEN answers from the services are turned into Danish messages,
+// and UNAUTHORIZED also sends the user to the login page and back to the current route.
+import { getToken, login, username } from './auth.js';
 
 const cfg = window.AIRPORT_CONFIG || {};
 
@@ -18,14 +21,13 @@ export class GraphQLError extends Error {
  */
 export async function gql(url, query, variables = {}, serviceName = 'servicen') {
   if (!url) throw new GraphQLError(`Ingen URL konfigureret for ${serviceName} (se js/config.js)`, 'CONFIG_ERROR');
+  const headers = { 'Content-Type': 'application/json', Accept: 'application/json' };
+  const token = await getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
   let res;
   try {
-    res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ query, variables }),
-    });
-  } catch (e) {
+    res = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ query, variables }) });
+  } catch (_) {
     throw new GraphQLError(`Kan ikke nå ${serviceName}`, 'NETWORK_ERROR');
   }
   let body = null;
@@ -33,7 +35,18 @@ export async function gql(url, query, variables = {}, serviceName = 'servicen') 
   if (body && Array.isArray(body.errors) && body.errors.length) {
     const first = body.errors[0];
     const code = (first.extensions && first.extensions.code) || 'UNKNOWN';
+    if (code === 'UNAUTHORIZED') {
+      login();   // to Keycloak and back to this route; the user repeats the action once logged in
+      throw new GraphQLError('Log ind for at fortsætte', code, body.errors);
+    }
+    if (code === 'FORBIDDEN') {
+      throw new GraphQLError(`${username() || 'Din bruger'} har ikke rettighed til denne handling`, code, body.errors);
+    }
     throw new GraphQLError(first.message || 'Ukendt fejl', code, body.errors);
+  }
+  if (res.status === 401) {
+    login();   // the service rejected the token itself (expired, wrong issuer): a fresh login fixes it
+    throw new GraphQLError('Din session er udløbet - log ind igen', 'UNAUTHORIZED');
   }
   if (!res.ok) {
     throw new GraphQLError(`${serviceName} svarede HTTP ${res.status}`, 'HTTP_' + res.status);
@@ -42,6 +55,37 @@ export async function gql(url, query, variables = {}, serviceName = 'servicen') 
     throw new GraphQLError(`${serviceName} gav et uventet svar (ikke GraphQL)`, 'BAD_RESPONSE');
   }
   return body.data || {};
+}
+
+/** Call a JSON REST endpoint and expose the same error codes as gql(). */
+async function rest(method, url, body) {
+  if (!url) throw new GraphQLError('Ingen URL konfigureret for baggage-service (se js/config.js)', 'CONFIG_ERROR');
+  const headers = { Accept: 'application/json, application/problem+json' };
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  const token = await getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  let res;
+  try {
+    res = await fetch(url, { method, headers, body: JSON.stringify(body) });
+  } catch (_) {
+    throw new GraphQLError('Kan ikke nå baggage-service', 'NETWORK_ERROR');
+  }
+  const payload = await res.json().catch(() => null);
+  if (res.ok) {
+    if (payload && typeof payload === 'object') return payload;
+    throw new GraphQLError('baggage-service gav et uventet svar', 'BAD_RESPONSE');
+  }
+
+  const code = payload?.code || { 401: 'UNAUTHORIZED', 403: 'FORBIDDEN' }[res.status] || `HTTP_${res.status}`;
+  if (code === 'UNAUTHORIZED') {
+    login();
+    throw new GraphQLError('Log ind for at fortsætte', code);
+  }
+  if (code === 'FORBIDDEN') {
+    throw new GraphQLError(`${username() || 'Din bruger'} har ikke rettighed til denne handling`, code);
+  }
+  throw new GraphQLError(payload?.detail || `baggage-service svarede HTTP ${res.status}`, code);
 }
 
 // ----------------------------------------------------------------- flight-service
@@ -130,20 +174,21 @@ export const paymentApi = {
 // ---------------------------------------------------------------- baggage-service
 const BAGGAGE_FIELDS = `id tagNumber bookingReference passengerName flightNumber weightKg type status lastLocation updatedAt`;
 
+// Compose and Kubernetes use the same baggage-service origin for GraphQL and REST.
+const baggageRestUrl = (path) => cfg.BAGGAGE_URL
+  ? new URL(`/api/baggage/v1${path}`, new URL(cfg.BAGGAGE_URL, window.location.href)).href
+  : null;
+
 export const baggageApi = {
-  registerBaggage: (bookingReference, weightKg, type) => gql(cfg.BAGGAGE_URL, `
-    mutation($bookingReference: String!, $weightKg: BigDecimal!, $type: BaggageType!) {
-      registerBaggage(bookingReference: $bookingReference, weightKg: $weightKg, type: $type) { ${BAGGAGE_FIELDS} }
-    }`, { bookingReference, weightKg, type }, 'baggage-service').then(d => d.registerBaggage),
+  registerBaggage: (bookingReference, weightKg, type) =>
+    rest('POST', baggageRestUrl('/baggage'), { bookingReference, weightKg, type }),
 
-  updateBaggageStatus: (tagNumber, status, location) => gql(cfg.BAGGAGE_URL, `
-    mutation($tagNumber: String!, $status: BaggageStatus!, $location: String) {
-      updateBaggageStatus(tagNumber: $tagNumber, status: $status, location: $location) { ${BAGGAGE_FIELDS} }
-    }`, { tagNumber, status, location: location || null }, 'baggage-service').then(d => d.updateBaggageStatus),
+  updateBaggageStatus: (tagNumber, status, location) =>
+    rest('PATCH', baggageRestUrl(`/baggage/${encodeURIComponent(tagNumber)}/status`),
+      { status, location: location || null }),
 
-  baggageByBooking: (reference) => gql(cfg.BAGGAGE_URL, `
-    query($reference: String!) { baggageByBooking(reference: $reference) { ${BAGGAGE_FIELDS} } }`,
-    { reference }, 'baggage-service').then(d => d.baggageByBooking),
+  baggageByBooking: (reference) =>
+    rest('GET', baggageRestUrl(`/bookings/${encodeURIComponent(reference)}/baggage`)),
 
   baggage: (tagNumber) => gql(cfg.BAGGAGE_URL, `
     query($tagNumber: String!) { baggage(tagNumber: $tagNumber) { ${BAGGAGE_FIELDS} } }`,

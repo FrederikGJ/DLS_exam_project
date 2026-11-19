@@ -58,6 +58,33 @@ services:
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
 
+  # Keycloak login and roles for baggage-service.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.3
+    command: ["start-dev", "--import-realm"]
+    restart: unless-stopped
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HOSTNAME: http://localhost:8180
+      KC_HEALTH_ENABLED: "true"
+      KC_HTTP_MANAGEMENT_RELATIVE_PATH: /
+    ports: ["8180:8080"]
+    volumes:
+      - ./k8s/keycloak/realm-airport.json:/opt/keycloak/data/import/realm-airport.json:ro
+    healthcheck:
+      # The image has neither curl nor wget; bash's /dev/tcp against the management port (9000) does the job.
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000
+          && printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3
+          && grep -q '"status": "UP"' <&3
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
+
   flight-db:
     <<: *postgres-defaults
     environment:
@@ -157,6 +184,8 @@ services:
       DB_URL: jdbc:postgresql://baggage-db:5432/baggage_db
       DB_USERNAME: baggage
       DB_PASSWORD: baggage
+      OIDC_ISSUER_URI: http://localhost:8180/realms/airport
+      JWK_SET_URI: http://keycloak:8080/realms/airport/protocol/openid-connect/certs
     ports: ["8084:8080"]
     depends_on:
       baggage-db: { condition: service_healthy }
@@ -183,11 +212,12 @@ services:
     restart: unless-stopped
     ports: ["8080:80"]
     depends_on:
-      - flight-service
-      - booking-service
-      - payment-service
-      - baggage-service
-      - shop-service
+      flight-service: { condition: service_started }
+      booking-service: { condition: service_started }
+      payment-service: { condition: service_started }
+      baggage-service: { condition: service_started }
+      shop-service: { condition: service_started }
+      keycloak: { condition: service_healthy }
 
 volumes:
   rabbitmq-data:

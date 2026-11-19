@@ -6,14 +6,19 @@ metadata:
     app.kubernetes.io/name: frontend
     app.kubernetes.io/part-of: airport
 data:
-  # Overrides js/config.js baked into the image: behind the Ingress all APIs are same-origin.
+  # Overrides js/config.js baked into the image: behind the Ingress all APIs are same-origin, and so is Keycloak
+  # (/auth). KEYCLOAK_URL is built from the page's own origin, so it works for any host the Ingress is reached on;
+  # note that the token issuer is still pinned by KC_HOSTNAME in keycloak/keycloak.yaml (see README.md).
   config.js: |
     window.AIRPORT_CONFIG = {
       FLIGHT_URL: '/api/flights/graphql',
       BOOKING_URL: '/api/bookings/graphql',
       PAYMENT_URL: '/api/payments/graphql',
       BAGGAGE_URL: '/api/baggage/graphql',
-      SHOP_URL: '/api/shops/graphql'
+      SHOP_URL: '/api/shops/graphql',
+      KEYCLOAK_URL: window.location.origin + '/auth',
+      KEYCLOAK_REALM: 'airport',
+      KEYCLOAK_CLIENT_ID: 'airport-frontend'
     };
 ---
 apiVersion: v1
