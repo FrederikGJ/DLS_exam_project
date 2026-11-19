@@ -65,6 +65,10 @@ spec:
       app.kubernetes.io/name: booking-service
   template:
     metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /actuator/prometheus
       labels:
         app.kubernetes.io/name: booking-service
         app.kubernetes.io/part-of: airport

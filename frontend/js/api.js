@@ -5,6 +5,26 @@
 import { getToken, login, username } from './auth.js';
 
 const cfg = window.AIRPORT_CONFIG || {};
+const workflowTraces = new Map();
+
+function randomHex(bytes) {
+  return Array.from(crypto.getRandomValues(new Uint8Array(bytes)), value => value.toString(16).padStart(2, '0')).join('');
+}
+
+function traceForBooking(reference, traceId) {
+  const key = `airport.trace.${reference.trim().toUpperCase()}`;
+  try {
+    if (!traceId) traceId = sessionStorage.getItem(key);
+  } catch (_) { /* In-memory fallback when session storage is blocked. */ }
+  traceId ||= workflowTraces.get(key) || randomHex(16);
+  workflowTraces.set(key, traceId);
+  try { sessionStorage.setItem(key, traceId); } catch (_) { /* The current tab can still use the trace. */ }
+  return traceId;
+}
+
+function addTrace(headers, traceId) {
+  if (traceId) headers.traceparent = `00-${traceId}-${randomHex(8)}-01`;
+}
 
 export class GraphQLError extends Error {
   constructor(message, code = 'UNKNOWN', errors = []) {
@@ -19,9 +39,10 @@ export class GraphQLError extends Error {
  * POST a GraphQL document. Resolves with `data`.
  * Throws GraphQLError with `.code` taken from errors[0].extensions.code.
  */
-export async function gql(url, query, variables = {}, serviceName = 'servicen') {
+export async function gql(url, query, variables = {}, serviceName = 'servicen', traceId) {
   if (!url) throw new GraphQLError(`Ingen URL konfigureret for ${serviceName} (se js/config.js)`, 'CONFIG_ERROR');
   const headers = { 'Content-Type': 'application/json', Accept: 'application/json' };
+  addTrace(headers, traceId);
   const token = await getToken();
   if (token) headers.Authorization = `Bearer ${token}`;
   let res;
@@ -58,9 +79,10 @@ export async function gql(url, query, variables = {}, serviceName = 'servicen') 
 }
 
 /** Call a JSON REST endpoint and expose the same error codes as gql(). */
-async function rest(method, url, body) {
+async function rest(method, url, body, traceId) {
   if (!url) throw new GraphQLError('Ingen URL konfigureret for baggage-service (se js/config.js)', 'CONFIG_ERROR');
   const headers = { Accept: 'application/json, application/problem+json' };
+  addTrace(headers, traceId);
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   const token = await getToken();
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -129,10 +151,15 @@ const BOOKING_FIELDS = `
 `;
 
 export const bookingApi = {
-  createBooking: (flightId, seatNumber, passenger) => gql(cfg.BOOKING_URL, `
-    mutation($flightId: ID!, $seatNumber: String!, $passenger: PassengerInput!) {
-      createBooking(flightId: $flightId, seatNumber: $seatNumber, passenger: $passenger) { ${BOOKING_FIELDS} }
-    }`, { flightId, seatNumber, passenger }, 'booking-service').then(d => d.createBooking),
+  async createBooking(flightId, seatNumber, passenger) {
+    const traceId = randomHex(16);
+    const { createBooking: booking } = await gql(cfg.BOOKING_URL, `
+      mutation($flightId: ID!, $seatNumber: String!, $passenger: PassengerInput!) {
+        createBooking(flightId: $flightId, seatNumber: $seatNumber, passenger: $passenger) { ${BOOKING_FIELDS} }
+      }`, { flightId, seatNumber, passenger }, 'booking-service', traceId);
+    if (booking?.bookingReference) traceForBooking(booking.bookingReference, traceId);
+    return booking;
+  },
 
   bookingByReference: (reference) => gql(cfg.BOOKING_URL, `
     query($reference: String!) { bookingByReference(reference: $reference) { ${BOOKING_FIELDS} } }`,
@@ -171,7 +198,7 @@ export const paymentApi = {
       pay(bookingReference: $bookingReference, amount: $amount, cardNumber: $cardNumber, expiry: $expiry, cvv: $cvv) {
         ${PAYMENT_FIELDS}
       }
-    }`, { bookingReference, amount, cardNumber, expiry, cvv }, 'payment-service').then(d => d.pay),
+    }`, { bookingReference, amount, cardNumber, expiry, cvv }, 'payment-service', traceForBooking(bookingReference)).then(d => d.pay),
 
   paymentsByBooking: (reference) => gql(cfg.PAYMENT_URL, `
     query($reference: String!) { paymentsByBooking(reference: $reference) { ${PAYMENT_FIELDS} } }`,
@@ -192,7 +219,7 @@ const baggageRestUrl = (path) => cfg.BAGGAGE_URL
 
 export const baggageApi = {
   registerBaggage: (bookingReference, weightKg, type) =>
-    rest('POST', baggageRestUrl('/baggage'), { bookingReference, weightKg, type }),
+    rest('POST', baggageRestUrl('/baggage'), { bookingReference, weightKg, type }, traceForBooking(bookingReference)),
 
   updateBaggageStatus: (tagNumber, status, location) =>
     rest('PATCH', baggageRestUrl(`/baggage/${encodeURIComponent(tagNumber)}/status`),

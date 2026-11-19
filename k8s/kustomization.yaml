@@ -24,6 +24,9 @@ resources:
   - ingress.yaml
 
 configMapGenerator:
+  - name: rabbitmq-plugins
+    files:
+      - rabbitmq/enabled_plugins
   - name: keycloak-realm
     files:
       - keycloak/realm-airport.json

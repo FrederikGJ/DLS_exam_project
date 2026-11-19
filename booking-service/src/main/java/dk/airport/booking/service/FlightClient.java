@@ -37,11 +37,11 @@ public class FlightClient {
 
     private final RestClient restClient;
 
-    public FlightClient(@Value("${app.flight-service.url}") String url,
+    public FlightClient(RestClient.Builder builder, @Value("${app.flight-service.url}") String url,
                         @Value("${app.flight-service.timeout:5s}") Duration timeout) {
         JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory();
         requestFactory.setReadTimeout(timeout);
-        this.restClient = RestClient.builder()
+        this.restClient = builder
                 .baseUrl(url)
                 .requestFactory(requestFactory)
                 .build();

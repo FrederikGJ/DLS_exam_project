@@ -103,6 +103,47 @@ GraphQL-opslaget kræver login. En passager har adgang til egne oversigter, og `
 Læsemodellen er afledte data. Det gør det muligt at flytte eller replikere den og skalere læsninger uafhængigt
 af kommandoerne senere. I den nuværende deployment bruger begge sider samme PostgreSQL-database i booking-service.
 
+### Logging og monitoring
+
+Alle fem backendservices skriver JSON-logs i Compose og Kubernetes. Micrometer Tracing med OpenTelemetry
+sætter `traceId` og `spanId` i logkonteksten for HTTP-requests og RabbitMQ-events. Frontenden bruger samme
+W3C-trace til oprettelse, betaling og bagageregistrering for en booking i samme browsersession. Hvert kald
+har sit eget span. Booking-service bruger Spring Boots instrumenterede `RestClient.Builder`, så opslag
+på sædet i flight-service også får trace-konteksten.
+
+En outbox-række gemmer `traceparent` sammen med eventet. Den planlagte relay sender den gemte header på
+RabbitMQ, også ved retries. Lytterens Micrometer-observation genoptager samme trace, og events, som
+modtageren producerer, får den videre med i deres outbox. Logs uden en aktiv eller gemt sporingskontekst,
+fx opstartslogs, har ingen trace-id. Der eksporteres ingen spans til en separat trace-backend.
+
+Prometheus scraper `/actuator/prometheus` på alle fem services og RabbitMQs køspecifikke metrics på
+`/metrics/detailed?family=queue_coarse_metrics`. Grafana-dashboardet **Airport** samler følgende målinger.
+
+- `max by (application) (outbox_pending)` for events, der venter på brokerens bekræftelse. Maksimum undgår
+  at tælle samme outbox flere gange, når en service har flere replikaer.
+- DLQ-dybde pr. kø fra RabbitMQs `rabbitmq_detailed_queue_messages`.
+- HTTP-latens som p95 pr. service fra request-histogrammer, eksklusive Actuator-kald.
+- JVM-heap pr. service og status for Prometheus-scrapet.
+
+Alloy sender podlogs i `airport`-namespacet til Loki. Compose-udgaven bruger Docker-daemonens socket til at
+læse projektets containerlogs. Loki bevarer loglinjen og indekserer app som label. Trace-id søges i
+JSON-feltet, så hver trace kan findes uden at danne en separat logstrøm.
+
+#### Find en fejl fra booking til bagage
+
+1. Åbn Grafana **Explore**, vælg **Loki**, og find bookingreferencen med
+   `{app="booking-service"} |= "BOOKINGREF"`. Åbn en relevant linje, og kopier `traceId`.
+2. Søg på ID'et i dashboardets trace-felt eller i Explore med
+   `{app=~".+-service"} | json | traceId = "TRACE_ID"`. Du kan følge bookingen, sædet i flight-service,
+   betalingen og bagagen i tidsrækkefølge. Brug `eventId` til at sammenligne den samme RabbitMQ-besked på tværs
+   af relay og modtager.
+3. Stiger outbox, så tjek relayets publish-fejl og RabbitMQ. Stiger en DLQ, så tjek modtagerens fejl for det
+   pågældende event. Brug p95 og JVM-heap til at se, om en enkelt service har langsomme requests eller høj hukommelsesbrug.
+
+Fra Git Bash kan du køre `TRACE_BOOKING=1 bash scripts/e2e-smoke.sh` mod en opdateret Compose-stak.
+Scriptet opretter og betaler en booking, registrerer bagage og kontrollerer samme trace-id i JSON-logs fra
+booking-, flight-, payment- og baggage-service.
+
 ### GraphQL-fejl
 
 Alle fejl returneres i `errors[].extensions.code` med en af koderne

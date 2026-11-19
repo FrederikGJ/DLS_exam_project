@@ -17,6 +17,7 @@ x-service-defaults: &service-defaults
   restart: unless-stopped
   environment: &service-env
     SPRING_PROFILES_ACTIVE: dev
+    LOGGING_STRUCTURED_FORMAT_CONSOLE: logstash
     RABBITMQ_HOST: rabbitmq
     RABBITMQ_PORT: "5672"
     RABBITMQ_USERNAME: airport
@@ -57,6 +58,7 @@ services:
       retries: 10
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
+      - ./k8s/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
 
   # Keycloak login and roles for baggage-service.
   keycloak:
@@ -221,6 +223,55 @@ services:
       shop-service: { condition: service_started }
       keycloak: { condition: service_healthy }
 
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles: [observability]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=24h
+    ports: ["127.0.0.1:9090:9090"]
+    volumes:
+      - ./k8s/observability/config/compose-prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+
+  loki:
+    image: grafana/loki:3.5.3
+    profiles: [observability]
+    command: [-config.file=/etc/loki/loki.yaml]
+    volumes:
+      - ./k8s/observability/config/loki.yaml:/etc/loki/loki.yaml:ro
+      - loki-data:/loki
+
+  alloy:
+    image: grafana/alloy:v1.10.0
+    profiles: [observability]
+    user: "0:0"
+    command: [run, /etc/alloy/config.alloy, --storage.path=/var/lib/alloy/data, --disable-reporting]
+    environment:
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-dls_exam_project}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./k8s/observability/config/compose.alloy:/etc/alloy/config.alloy:ro
+      - alloy-data:/var/lib/alloy/data
+    depends_on: [loki]
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    profiles: [observability]
+    ports: ["127.0.0.1:3000:3000"]
+    environment:
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/airport-dashboard.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+    volumes:
+      - ./k8s/observability/config/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro
+      - ./k8s/observability/config/grafana-dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml:ro
+      - ./k8s/observability/config/airport-dashboard.json:/var/lib/grafana/dashboards/airport-dashboard.json:ro
+      - grafana-data:/var/lib/grafana
+    depends_on: [prometheus, loki]
+
 volumes:
   rabbitmq-data:
   flight-db-data:
@@ -228,3 +279,7 @@ volumes:
   payment-db-data:
   baggage-db-data:
   shop-db-data:
+  prometheus-data:
+  grafana-data:
+  loki-data:
+  alloy-data:

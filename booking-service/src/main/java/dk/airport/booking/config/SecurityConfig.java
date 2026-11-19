@@ -51,7 +51,8 @@ public class SecurityConfig {
                 .cors(cors -> cors.configurationSource(corsConfigurationSource))
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/info").permitAll()
+                        .requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/info",
+                                "/actuator/prometheus").permitAll()
                         .requestMatchers(graphqlPath).permitAll()       // per-operation checks via @PreAuthorize
                         .requestMatchers("/graphiql", "/graphiql/**").permitAll()
                         .anyRequest().hasRole("OPERATIONS"))

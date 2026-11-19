@@ -168,6 +168,22 @@ cd shop-service    && mvn test
 | baggage-service | `BaggageRules` (3 stk., 32 kg), tag-format     | snapshot via events, register/limit, statusopdatering, RETURN_DESK ved aflysning |
 | shop-service    | `Dijkstra`, `OpeningHours`                     | rute Security T2 → Gate B12, accessibleOnly, søgning, CRUD, idempotens |
 
+## Observability
+
+Start Prometheus, Grafana, Loki og Alloy lokalt med observability-profilen.
+
+```bash
+docker compose --profile observability up -d --build
+```
+
+Åbn [Grafana](http://localhost:3000) og log ind med `admin` / `admin` ved første lokale opstart.
+Dashboardet **Airport** indeholder metrics og logopslag pr. trace-id.
+[Prometheus](http://localhost:9090/targets) viser scrape-targets.
+
+I Kubernetes startes appen først med `kubectl apply -k k8s`. Tilføj monitoring med
+`kubectl apply -k k8s/observability` og åbn Grafana med `kubectl -n airport port-forward svc/grafana 3000:3000`. Se
+[logging og fejlsøgning](docs/architecture.md#logging-og-monitoring) for trace-opslag og flowverifikation.
+
 ## Kubernetes
 
 Manifests ligger i `k8s/` (Kustomize): namespace `airport`, Deployment (2 replicas) + Service + ConfigMap +
