@@ -57,6 +57,13 @@ public class Booking {
     @Column(name = "updated_at", nullable = false)
     private OffsetDateTime updatedAt;
 
+    /** occurredAt of the newest flight event applied to flightStatus / gate (ticket 10). */
+    @Column(name = "flight_status_event_at")
+    private OffsetDateTime flightStatusEventAt;
+
+    @Column(name = "gate_event_at")
+    private OffsetDateTime gateEventAt;
+
     protected Booking() {}
 
     public Booking(String bookingReference, Passenger passenger, Long flightId, String flightNumber,
@@ -75,6 +82,10 @@ public class Booking {
         this.status = BookingStatus.PENDING_PAYMENT;
         this.createdAt = OffsetDateTime.now();
         this.updatedAt = this.createdAt;
+        // gate/status were just read from flight-service, so they already include every flight event
+        // that happened before now: an older event delivered late must not overwrite them.
+        this.flightStatusEventAt = this.createdAt;
+        this.gateEventAt = this.createdAt;
     }
 
     // ------------------------------------------------------------ state transitions
@@ -116,19 +127,44 @@ public class Booking {
 
     // ------------------------------------------------------------ snapshot updates
 
-    public void updateFlightSnapshot(String flightStatus, String gate) {
+    /**
+     * Applies a flight.* event to the snapshot. Commutative (ticket 10): each field only takes a value from an
+     * event that is newer than the last one applied to that field, and a CANCELLED flight status is terminal,
+     * so the same set of events gives the same snapshot in any delivery order.
+     *
+     * @param occurredAt the event's envelope occurredAt; {@code null} (legacy event) counts as "now"
+     */
+    public void updateFlightSnapshot(String flightStatus, String gate, OffsetDateTime occurredAt) {
+        OffsetDateTime at = occurredAt == null ? OffsetDateTime.now() : occurredAt;
         boolean changed = false;
-        if (flightStatus != null && !flightStatus.equals(this.flightStatus)) {
+        if (flightStatus != null && !"CANCELLED".equals(this.flightStatus)
+                && ("CANCELLED".equals(flightStatus) || isNewer(at, flightStatusEventAt))) {
+            changed |= !flightStatus.equals(this.flightStatus);
             this.flightStatus = flightStatus;
-            changed = true;
+            this.flightStatusEventAt = max(at, flightStatusEventAt);
         }
-        if (gate != null && !gate.equals(this.gate)) {
+        if (gate != null && isNewer(at, gateEventAt)) {
+            changed |= !gate.equals(this.gate);
             this.gate = gate;
-            changed = true;
+            this.gateEventAt = max(at, gateEventAt);
         }
         if (changed) {
             touch();
         }
+    }
+
+    /** Same as {@link #updateFlightSnapshot(String, String, OffsetDateTime)} for a change happening now. */
+    public void updateFlightSnapshot(String flightStatus, String gate) {
+        updateFlightSnapshot(flightStatus, gate, OffsetDateTime.now());
+    }
+
+    /** Not older than the stored time (a tie counts as newer, so a change made "now" always applies). */
+    private static boolean isNewer(OffsetDateTime candidate, OffsetDateTime stored) {
+        return stored == null || !candidate.isBefore(stored);
+    }
+
+    private static OffsetDateTime max(OffsetDateTime a, OffsetDateTime b) {
+        return b == null || a.isAfter(b) ? a : b;
     }
 
     private void touch() {

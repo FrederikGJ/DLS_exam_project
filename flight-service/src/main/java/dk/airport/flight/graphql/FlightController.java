@@ -5,9 +5,12 @@ import dk.airport.flight.graphql.input.CreateAircraftInput;
 import dk.airport.flight.graphql.input.CreateAirlineInput;
 import dk.airport.flight.graphql.input.CreateFlightInput;
 import dk.airport.flight.graphql.input.FlightFilter;
+import dk.airport.flight.repository.OffsetLimit;
 import dk.airport.flight.service.FlightService;
 import dk.airport.flight.service.PricingService;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import org.springframework.graphql.data.method.annotation.Argument;
 import org.springframework.graphql.data.method.annotation.MutationMapping;
@@ -45,8 +48,10 @@ public class FlightController {
     }
 
     @QueryMapping
-    public List<Flight> flights(@Argument FlightFilter filter) {
-        return flightService.flights(filter);
+    public List<Flight> flights(@Argument FlightFilter filter,
+                                @Argument @Min(1) @Max(OffsetLimit.MAX_LIMIT) Integer limit,
+                                @Argument @Min(0) Integer offset) {
+        return flightService.flights(filter, offset, limit);
     }
 
     @QueryMapping

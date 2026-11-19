@@ -1,0 +1,138 @@
+# Ticket 12: serverless function with a KEDA ScaledJob.
+# notification-job runs as one Kubernetes Job per message on the "notifications" queue: 0 pods when the queue is empty.
+# Needs KEDA (CRDs ScaledJob/TriggerAuthentication) - that is why this folder is NOT part of k8s/kustomization.yaml.
+# Deploy with:  kubectl apply -k k8s/notifications/     (see k8s/README.md, "Serverless: notifikationer med KEDA")
+
+# ---------------------------------------------------------------------------------------------------------------
+# 1. One-off setup: declare the queue, its bindings and the DLQ. With zero Jobs running nobody else would declare
+#    it, so events would be dropped and KEDA would have no queue to count.
+#    A completed Job cannot be updated in place: `kubectl -n airport delete job notification-setup` before re-applying.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: notification-setup
+  labels:
+    app.kubernetes.io/name: notification-setup
+    app.kubernetes.io/part-of: airport
+spec:
+  backoffLimit: 10                 # RabbitMQ may still be starting: retry with backoff
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: notification-setup
+        app.kubernetes.io/part-of: airport
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: setup
+          image: airport/notification-job:local
+          imagePullPolicy: IfNotPresent
+          args: ["setup"]
+          env:
+            - name: RABBITMQ_HOST
+              value: rabbitmq
+            - name: RABBITMQ_PORT
+              value: "5672"
+            - name: RABBITMQ_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-secret
+                  key: username
+            - name: RABBITMQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-secret
+                  key: password
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+# ---------------------------------------------------------------------------------------------------------------
+# 2. How KEDA logs in to RabbitMQ to read the queue length: the existing rabbitmq-secret (username/password).
+#    The host (without credentials) is in the trigger below.
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: rabbitmq-trigger-auth
+  labels:
+    app.kubernetes.io/part-of: airport
+spec:
+  secretTargetRef:
+    - parameter: username
+      name: rabbitmq-secret
+      key: username
+    - parameter: password
+      name: rabbitmq-secret
+      key: password
+---
+# ---------------------------------------------------------------------------------------------------------------
+# 3. The function: KEDA polls the queue every 5 s and starts one Job per waiting message (queue length / value 1),
+#    at most 5 at a time. Each Job takes one message, logs the mail and exits.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledJob
+metadata:
+  name: notification-job
+  labels:
+    app.kubernetes.io/name: notification-job
+    app.kubernetes.io/part-of: airport
+spec:
+  pollingInterval: 5
+  minReplicaCount: 0               # scale to zero: no pods while the queue is empty
+  maxReplicaCount: 5               # at most 5 Jobs started per polling interval (minus the ones still running)
+  successfulJobsHistoryLimit: 10   # keep the last finished Jobs, so their logs (= the mails) can be read
+  failedJobsHistoryLimit: 5
+  scalingStrategy:
+    strategy: default              # new Jobs = min(queue length, max) - running Jobs
+  jobTargetRef:
+    backoffLimit: 0                # a failed run has already moved its message to the DLQ: do not run the pod again
+    activeDeadlineSeconds: 120
+    template:
+      metadata:
+        labels:
+          app.kubernetes.io/name: notification-job
+          app.kubernetes.io/part-of: airport
+      spec:
+        restartPolicy: Never
+        containers:
+          - name: notification-job
+            image: airport/notification-job:local
+            imagePullPolicy: IfNotPresent
+            args: ["once"]
+            env:
+              - name: RABBITMQ_HOST
+                value: rabbitmq
+              - name: RABBITMQ_PORT
+                value: "5672"
+              - name: RABBITMQ_USERNAME
+                valueFrom:
+                  secretKeyRef:
+                    name: rabbitmq-secret
+                    key: username
+              - name: RABBITMQ_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    name: rabbitmq-secret
+                    key: password
+            resources:
+              requests:
+                cpu: 50m
+                memory: 64Mi
+              limits:
+                cpu: 500m
+                memory: 256Mi
+  triggers:
+    - type: rabbitmq
+      metadata:
+        protocol: amqp
+        # the KEDA operator runs in namespace "keda", so the full service name is needed
+        host: amqp://rabbitmq.airport.svc.cluster.local:5672/
+        queueName: notifications
+        mode: QueueLength
+        value: "1"                 # one Job per message
+      authenticationRef:
+        name: rabbitmq-trigger-auth

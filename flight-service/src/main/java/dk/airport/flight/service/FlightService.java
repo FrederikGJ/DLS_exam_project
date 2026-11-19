@@ -10,6 +10,7 @@ import dk.airport.flight.messaging.FlightEvents;
 import dk.airport.flight.repository.AircraftRepository;
 import dk.airport.flight.repository.AirlineRepository;
 import dk.airport.flight.repository.FlightRepository;
+import dk.airport.flight.repository.OffsetLimit;
 import dk.airport.flight.repository.SeatRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -64,6 +65,11 @@ public class FlightService {
     }
 
     public List<Flight> flights(FlightFilter filter) {
+        return flights(filter, null, null);
+    }
+
+    /** Ticket 17.1: one page of flights, sorted by departure. {@code null} offset/limit = defaults (0 / 50). */
+    public List<Flight> flights(FlightFilter filter, Integer offset, Integer limit) {
         Specification<Flight> spec = Specification.where(null);
         if (filter != null) {
             if (filter.destination() != null && !filter.destination().isBlank()) {
@@ -81,7 +87,9 @@ public class FlightService {
                         cb.lessThan(root.get("scheduledDeparture"), to)));
             }
         }
-        return flights.findAll(spec, org.springframework.data.domain.Sort.by("scheduledDeparture"));
+        // id as tie-breaker: without a unique sort order, rows with the same departure could move between pages
+        return flights.findAll(spec, OffsetLimit.of(offset, limit,
+                org.springframework.data.domain.Sort.by("scheduledDeparture", "id"))).getContent();
     }
 
     public Optional<Flight> flight(Long id) {
@@ -185,10 +193,24 @@ public class FlightService {
 
     /** Called from booking events: mark a seat taken/free. Idempotent by nature (sets a flag). */
     @Transactional
-    public void setSeatAvailability(Long flightId, String seatNumber, boolean available) {
+    /**
+     * booking.confirmed / booking.cancelled. Commutative (ticket 10): see {@link Seat#takeFor} and {@link Seat#releaseFor}.
+     *
+     * @param available  true for booking.cancelled (free the seat), false for booking.confirmed (take it)
+     * @param occurredAt the event's envelope occurredAt; {@code null} (legacy event) counts as "now"
+     */
+    public void setSeatAvailability(Long flightId, String seatNumber, String bookingReference, boolean available,
+                                    OffsetDateTime occurredAt) {
         Seat seat = seats.findByFlightIdAndSeatNumberIgnoreCase(flightId, seatNumber)
                 .orElseThrow(() -> ApiException.notFound("Seat", flightId + "/" + seatNumber));
-        seat.setAvailable(available);
-        log.info("Seat {} on flight {} is now {}", seatNumber, flightId, available ? "available" : "taken");
+        OffsetDateTime at = occurredAt == null ? OffsetDateTime.now() : occurredAt;
+        boolean changed = available ? seat.releaseFor(bookingReference, at) : seat.takeFor(bookingReference, at);
+        if (changed) {
+            log.info("Seat {} on flight {} is now {} (booking {}, event at {})", seatNumber, flightId,
+                    available ? "available" : "taken", bookingReference, at);
+        } else {
+            log.info("Seat {} on flight {}: {} for booking {} ignored - seat is held by {} since {}", seatNumber, flightId,
+                    available ? "release" : "take", bookingReference, seat.getHeldByBooking(), seat.getAvailabilityEventAt());
+        }
     }
 }

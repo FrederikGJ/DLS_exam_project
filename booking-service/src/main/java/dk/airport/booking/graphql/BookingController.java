@@ -4,7 +4,10 @@ import dk.airport.booking.domain.Booking;
 import dk.airport.booking.domain.Passenger;
 import dk.airport.booking.graphql.input.PassengerInput;
 import dk.airport.booking.service.BookingService;
+import dk.airport.booking.repository.OffsetLimit;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
@@ -40,8 +43,10 @@ public class BookingController {
     }
 
     @QueryMapping
-    public List<Booking> bookingsByPassenger(@Argument @NotBlank String email) {
-        return bookingService.bookingsByPassenger(email);
+    public List<Booking> bookingsByPassenger(@Argument @NotBlank String email,
+                                             @Argument @Min(1) @Max(OffsetLimit.MAX_LIMIT) Integer limit,
+                                             @Argument @Min(0) Integer offset) {
+        return bookingService.bookingsByPassenger(email, offset, limit);
     }
 
     @QueryMapping

@@ -17,6 +17,9 @@ data:
   CORS_ALLOWED_ORIGINS: "http://airport.local,http://localhost,http://localhost:8090"
   GRAPHQL_PATH: /api/bookings/graphql
   FLIGHT_SERVICE_URL: http://flight-service:8080/api/flights/graphql
+  # ticket 11: unpaid (PENDING_PAYMENT) bookings are cancelled after this, see docs/architecture.md (saga)
+  PAYMENT_TIMEOUT: 15m
+  PAYMENT_TIMEOUT_CHECK_INTERVAL_MS: "30000"
 ---
 # DEV VALUES ONLY - replace before any shared cluster.
 apiVersion: v1

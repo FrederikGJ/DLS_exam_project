@@ -1,0 +1,11 @@
+# Ticket 12: notification function (KEDA ScaledJob). Separate from k8s/kustomization.yaml, because it needs
+# KEDA installed first - without KEDA's CRDs `kubectl apply -k k8s/` would fail for everyone.
+#   helm install keda kedacore/keda --version 2.21.1 -n keda --create-namespace
+#   kubectl apply -k k8s/notifications/
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: airport
+
+resources:
+  - notification-job.yaml

@@ -15,6 +15,7 @@ Indhold:
 | `databases/`         | 5 × PostgreSQL 16 StatefulSet (1 replica, PVC 1Gi) + Service + Secret, én pr. service     |
 | `services/`          | 5 × Deployment + ClusterIP Service + ConfigMap + Secret, startup/liveness/readiness. `autoscaling.yaml`: én HorizontalPodAutoscaler pr. service (2-5 pods ved 70 % CPU), se [Autoscaling (HPA)](#autoscaling-hpa) |
 | `metrics-server/`    | Helm-values til metrics-server på kind (ikke en del af `kustomization.yaml`, installeres med Helm i `kube-system`) |
+| `notifications/`     | Serverless notifikationsfunktion: KEDA ScaledJob + TriggerAuthentication + setup-Job (egen kustomization, kræver KEDA), se [Serverless: notifikationer med KEDA](#serverless-notifikationer-med-keda) |
 | `frontend/`          | nginx Deployment + Service + ConfigMap der overskriver `js/config.js` med Ingress-stier    |
 | `tools/`             | pgAdmin (dev/demo-værktøj, ikke en del af systemet): Deployment + Service + ConfigMap + Secret |
 | `ingress.yaml`       | Én Ingress: `/` → frontend, `/api/<x>/graphql` → den enkelte service, `/pgadmin` → pgAdmin |
@@ -184,6 +185,88 @@ Målt på kind (12 kerner, 7,6 GiB til Docker):
 
 k6: ca. 39 requests/s, 100 % gyldige svar. CPU forbliver over målet ved 5 pods, fordi `maxReplicas: 5` er nået; HPA'en
 melder da `ScalingLimited: TooManyReplicas`.
+
+## Serverless: notifikationer med KEDA
+
+`notifications/` deployer en **serverless funktion**: `notification-job` sender (logger) en mail, når en booking
+bekræftes eller annulleres, og når en betaling refunderes. Det er ikke en service, der kører hele tiden, men et
+lille Java-program uden HTTP-server, som **KEDA** starter som ét Kubernetes Job pr. besked på køen `notifications`.
+Er køen tom, kører der 0 pods.
+
+| | HPA (ticket 13, backend-services) | KEDA ScaledJob (ticket 12, notification-job) |
+|---|---|---|
+| Kører | Deployments, der altid kører | Jobs, der tager én besked og afslutter |
+| Minimum | 2 pods | **0** pods |
+| Skalerer på | CPU | Antal beskeder i køen `notifications` |
+
+Delene:
+
+* **`notification-setup` (Job)** kører én gang ved deploy og opretter køen `notifications` (bundet til
+  `booking.confirmed`, `booking.cancelled`, `payment.refunded` på `airport.events`) og DLQ'en
+  `notification-job.dlq`. Uden den ville ingen oprette køen, når der kører 0 jobs.
+* **`rabbitmq-trigger-auth` (TriggerAuthentication)** giver KEDA brugernavn og kode fra den eksisterende
+  `rabbitmq-secret`.
+* **`notification-job` (ScaledJob)**: KEDA tjekker kølængden hvert 5. sekund og starter ét Job pr. ventende
+  besked (`value: "1"`), højst 5 ad gangen (`maxReplicaCount: 5`). Et Job, der fejler, har allerede flyttet sin
+  besked til DLQ'en, så det køres ikke igen (`backoffLimit: 0`). De sidste 10 færdige Jobs gemmes, så mailene kan
+  læses i loggen.
+
+Mappen er **ikke** med i `k8s/kustomization.yaml`, fordi `ScaledJob` og `TriggerAuthentication` er KEDA-CRD'er:
+uden KEDA ville `kubectl apply -k k8s/` fejle for alle.
+
+### Installation (kind)
+
+```bash
+# 1. KEDA (én gang pr. cluster). 2.21.1 er testet på kind med Kubernetes 1.37.
+helm repo add kedacore https://kedacore.github.io/charts
+helm upgrade --install keda kedacore/keda --version 2.21.1 -n keda --create-namespace --wait
+
+# 2. Image (fra repo-roden)
+docker build -t airport/notification-job:local ./notification-job
+kind load docker-image airport/notification-job:local --name airport
+
+# 3. Deploy (kræver at resten af stakken kører, se ovenfor)
+kubectl apply -k k8s/notifications/
+kubectl -n airport get scaledjob notification-job      # READY skal være True
+```
+
+Er `notification-setup` allerede kørt og skal køres igen (fx efter nyt image), så slet den først:
+`kubectl -n airport delete job notification-setup`. Et færdigt Job kan ikke opdateres.
+
+### Demo: fem bookinger giver fem jobs
+
+`scripts/notifications-demo.js` (k6) opretter og betaler fem bookinger gennem Ingress'en. Hver betaling giver et
+`booking.confirmed` → én besked på `notifications` → ét Job.
+
+```bash
+# Terminal 1: følg jobbene
+kubectl -n airport get jobs -l app.kubernetes.io/name=notification-job -w
+
+# Terminal 2 (fra repo-roden)
+k6 run scripts/notifications-demo.js
+
+# Bagefter: læs en "mail"
+kubectl -n airport logs job/<navn fra listen>
+```
+
+Målt på kind (12 kerner):
+
+| Tid efter sidste betaling | Jobs                                       | Pods          |
+|---------------------------|--------------------------------------------|---------------|
+| 0 s                       | 0                                          | 0             |
+| ~5 s                      | 5 startet (1 allerede Complete, 4 Running) | 4             |
+| ~10 s                     | 5 Complete                                 | 0             |
+
+Hvert Job tog 4-5 s fra start til slut, inkl. pod-opstart (selve programmet kører under 1 s). Køen og DLQ'en var tomme
+bagefter (`kubectl -n airport exec rabbitmq-0 -- rabbitmqctl list_queues name messages`).
+
+### Compose (task 12.6): udeladt med vilje
+
+Funktionen findes kun i Kubernetes. docker-compose har ingen KEDA og ingen måde at starte en container pr. besked;
+den samme image i en løkke ville bare være en almindelig consumer, der kører hele tiden, og dermed ikke vise
+kravet (serverless, skalering til 0). I compose findes køen `notifications` derfor ikke, og events bliver ikke routet
+dertil. Programmet kan stadig køres lokalt mod compose-RabbitMQ: `java -jar notification-job/target/notification-job.jar setup`
+og derefter `... once`.
 
 ## pgAdmin (dev/demo-værktøj)
 

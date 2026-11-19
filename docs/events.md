@@ -33,6 +33,18 @@ Hver service har én durable kø pr. interesse og én DLQ:
 | baggage-service | `baggage-service.booking-events`   | `booking.#`     | `baggage-service.dlq`  |
 | baggage-service | `baggage-service.flight-events`    | `flight.#`      | `baggage-service.dlq`  |
 | shop-service    | `shop-service.flight-events`       | `flight.#`      | `shop-service.dlq`     |
+| notification-job | `notifications`                   | `booking.confirmed`, `booking.cancelled`, `payment.refunded` | `notification-job.dlq` |
+
+`notifications` (ticket 12) adskiller sig fra de andre køer: consumeren er ikke en kørende service, men en
+**serverless funktion** (KEDA ScaledJob, se [k8s/README.md](../k8s/README.md#serverless-notifikationer-med-keda)).
+KEDA læser kølængden og starter ét Kubernetes Job pr. besked; jobbet tager én besked (`basicGet`), "sender" en mail
+(skrives i pod-loggen), ack'er og afslutter. Der bindes kun på de tre konkrete routing keys (ikke `booking.#`), så der
+ikke startes jobs for events, der ikke giver en mail. Køen oprettes af et engangs-Job (`notification-setup`), fordi
+ingen ellers erklærer den, når der kører 0 jobs. En besked, der ikke kan blive til en mail, afvises uden requeue og
+ender i `notification-job.dlq`; jobbet afslutter med exit 1 og står som Failed. Levering er at-least-once uden
+`processed_event` (funktionen er bevidst stateless), så en mail kan i sjældne tilfælde sendes to gange.
+`payment.refunded` har ingen e-mail i payloaden, så refund-mailen adresseres til bookingreferencen.
+AsyncAPI-beskrivelsen af køen tilføjes, når `docs/asyncapi.yaml` (ticket 16) er merget.
 
 > Vi bruger `#` (0..n ord) og ikke `*` (præcis 1 ord), fordi fx `flight.status.changed` har tre segmenter.
 
@@ -57,6 +69,45 @@ den tilstandsændring eventet medfører. Et event med kendt `eventId` ignoreres 
   overhaler `booking.created` fra samme service. Rækkefølge *på tværs* af producenter garanteres ikke.
 * **Observerbarhed.** Ubekræftede events kan ses i `outbox_event` (`published_at IS NULL`, `attempts`,
   `last_error`) og som gauge `outbox.pending` på `/actuator/metrics/outbox.pending`.
+
+## Ordningsgaranti og kommutative handlers
+
+**Hvad RabbitMQ garanterer:** rækkefølgen er kun bevaret pr. kø, når der er *én* consumer og ingen redelivery.
+Det holder ikke hos os:
+
+* Hver service kører 2-5 pods (HPA), og alle pods lytter på samme kø (competing consumers). To events om samme
+  booking kan derfor behandles samtidig i to pods, og den senere kan blive færdig først.
+* En besked, der fejler, prøves igen (3 forsøg med backoff). Imens kan nyere beskeder på køen blive behandlet.
+* Events om samme booking kommer fra forskellige producenter (`payment.*` fra payment-service, `booking.*` fra
+  booking-service). Rækkefølgen på tværs af producenter er aldrig garanteret.
+
+**Derfor er alle handlers, der ændrer tilstand, kommutative:** samme mængde events giver samme sluttilstand,
+uanset rækkefølge. Duplikater håndteres som før af `processed_event`.
+
+Hvert event har allerede envelope-feltet `occurredAt` (sat af producenten, når den ændring, eventet beskriver,
+committes). Det bruges som ordningsnøgle; payloads er uændrede. Et event uden `occurredAt` behandles som "nu".
+
+| Service         | Tilstand                                      | Regel                                                                                                                                                              |
+|-----------------|-----------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| baggage-service | `booking_snapshot.status` (`event_occurred_at`) | `CANCELLED` er terminal: et cancel vinder altid, og intet ændrer status tilbage. Ellers vinder det nyeste event; ældre events ignoreres.                                |
+| flight-service  | `seat.is_available` (`held_by_booking`, `availability_event_at`) | `booking.cancelled` frigiver kun sædet, hvis det er den booking, der holder det. En aflyst booking kan aldrig tage sædet igen. Et `booking.confirmed`, der er ældre end sidst anvendte event, ignoreres. |
+| booking-service | flight-snapshot `flight_status` / `gate` (`flight_status_event_at`, `gate_event_at`) | Ét tidsstempel pr. felt: et gammelt `flight.status.changed` må stadig sætte status, selv om et nyere `flight.gate.changed` er anvendt. Flight-status `CANCELLED` er terminal. |
+| booking-service | `booking.status` ved `payment.*`              | `payment.failed` på en CONFIRMED booking kan kun skyldes omvendt levering (payment-service afviser nye betalinger, når én er COMPLETED). Bookingen annulleres, og `booking.cancelled` får payment-service til at refundere: samme slutresultat som i rækkefølge. |
+
+Eksempel (flight-service, sæde 6D): A bekræftes (t1) og annulleres (t2), derefter bekræftes B (t3). Alle seks
+rækkefølger ender med sædet optaget af B, fordi A's cancel ignoreres, når B holder sædet, og A's confirm er ældre
+end B's.
+
+Kendte grænser:
+
+* Rækkefølgen bygger på producenternes ur. Pods på samme node (kind) deler ur; i et rigtigt cluster holder NTP
+  urene inden for få millisekunder, hvilket er langt mindre end tiden mellem to ændringer af samme booking.
+* To events med præcis samme `occurredAt` behandles i den rækkefølge, de ankommer (mikrosekund-opløsning, så det
+  sker reelt ikke for to forskellige ændringer).
+* Nye kolonner er `NULL` for eksisterende rækker, hvilket betyder "intet event anvendt endnu": første event vinder.
+
+Tests: `*CommutativityTest` (unit, alle permutationer) og `Commutative*IntegrationTest` (gennem RabbitMQ i omvendt
+rækkefølge) i booking-, flight- og baggage-service.
 
 ---
 
@@ -125,13 +176,13 @@ booking giver `INVALID_STATE` (i stedet for `NOT_FOUND`) ved bagageregistrering.
 
 ### `booking.confirmed`
 Samme payload som `booking.created` med `"status": "CONFIRMED"`.
-Lyttere: flight-service (sæde `is_available=false`), baggage-service (opretter/opdaterer `booking_snapshot`).
+Lyttere: flight-service (sæde `is_available=false`), baggage-service (opretter/opdaterer `booking_snapshot`), notification-job (bekræftelsesmail).
 
 ### `booking.cancelled`
 Samme payload med `"status": "CANCELLED"` og et ekstra felt `"reason"`, fx `"Flight cancelled"`
 eller `"Cancelled by passenger"` eller `"Payment failed"`.
 Lyttere: flight-service (sæde frigives), payment-service (automatisk refund hvis COMPLETED payment findes),
-baggage-service (snapshot → CANCELLED).
+baggage-service (snapshot → CANCELLED), notification-job (annulleringsmail).
 
 ### `booking.checkedin`
 Samme payload med `"status": "CHECKED_IN"`.
@@ -167,7 +218,7 @@ Lyttere: booking-service (booking → CANCELLED, publicerer `booking.cancelled`)
   "amount": 899.00, "currency": "DKK"
 }
 ```
-Lyttere: ingen (informativt; kan vises under "Min booking" via `paymentsByBooking`).
+Lyttere: notification-job (refund-mail). Vises også under "Min booking" via `paymentsByBooking`.
 
 ---
 

@@ -5,7 +5,8 @@ scalar BigDecimal
 type Query {
   airlines: [Airline!]!
   airline(id: ID!): Airline
-  flights(filter: FlightFilter): [Flight!]!
+  "Flights sorted by departure. Paginated: limit 1-100 (default 50), offset >= 0 (default 0)."
+  flights(filter: FlightFilter, limit: Int = 50, offset: Int = 0): [Flight!]!
   flight(id: ID!): Flight
   flightByNumber(flightNumber: String!, date: Date!): Flight
   availableSeats(flightId: ID!): [Seat!]!
