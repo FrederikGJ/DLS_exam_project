@@ -92,10 +92,49 @@ __pycache__/
 .venv/
 venv/
 
-# Claude Code (kept local, not shared via the repo)
+# ---------------------------------------------------------------------------
+# AI coding assistants: settings, instructions, memory and MCP config stay local
+# (they can hold tokens, personal paths and preferences) - never in the repo.
+# A pattern without "/" matches in every directory.
+# ---------------------------------------------------------------------------
+# Claude Code
 .claude/
 CLAUDE.md
-**/CLAUDE.md
+CLAUDE.local.md
+.mcp.json
+# OpenAI Codex
+.codex/
+AGENTS.md
+AGENTS.override.md
+# GitHub Copilot (only the assistant files - the rest of .github/ is CI and stays)
+.github/copilot-instructions.md
+.github/instructions/
+.github/prompts/
+.github/chatmodes/
+# Cursor
+.cursor/
+.cursorrules
+.cursorignore
+.cursorindexingignore
+# Google Gemini
+.gemini/
+GEMINI.md
+# Aider, Continue, Windsurf, Cline, Roo, Junie, Kiro, Amazon Q, opencode, Serena, Zed
+.aider*
+.continue/
+.windsurf/
+.windsurfrules
+.clinerules
+.cline/
+.roo/
+.roomodes
+.junie/
+.kiro/
+.amazonq/
+.opencode/
+opencode.json
+.serena/
+.zed/
 
 # Local planning notes (kept local, not shared via the repo)
 reqs.md
