@@ -38,12 +38,11 @@ service-READMEs: [flight](flight-service/README.md) · [booking](booking-service
 | Service           | Ansvar                                            | Port (compose) | GraphQL-endpoint                          |
 |-------------------|---------------------------------------------------|----------------|-------------------------------------------|
 | `frontend`        | SPA: afgange, book, betaling, min booking, bagage, butikker | 8080  | –                                          |
-| [`flight-service`](flight-service/README.md)   | Flyselskaber, fly, afgange, sæder (kilde til sandhed) | 8081 | `http://localhost:8081/api/flights/graphql` |
-| [`booking-service`](booking-service/README.md) | Passagerer og bookinger, orkestrerer bookingflowet | 8082    | `http://localhost:8082/api/bookings/graphql` |
-| [`payment-service`](payment-service/README.md) | Simuleret betalingsgateway, refunds               | 8083     | `http://localhost:8083/api/payments/graphql` |
-| [`baggage-service`](baggage-service/README.md) | Bagage bundet til booking, status-tracking        | 8084     | `http://localhost:8084/api/baggage/graphql` |
-| [`shop-service`](shop-service/README.md)       | Butikker + navigation (Dijkstra)                  | 8085     | `http://localhost:8085/api/shops/graphql` |
-| Keycloak          | Login (OpenID Connect), roller `PASSENGER`/`OPERATIONS` | 8180     | Admin console: http://localhost:8180/admin/ (admin/admin) |
+| `flight-service`  | Flyselskaber, fly, afgange, sæder (kilde til sandhed) | 8081       | `http://localhost:8081/api/flights/graphql` |
+| `booking-service` | Passagerer og bookinger, orkestrerer bookingflowet | 8082          | `http://localhost:8082/api/bookings/graphql` |
+| `payment-service` | Simuleret betalingsgateway, refunds               | 8083           | `http://localhost:8083/api/payments/graphql` |
+| `baggage-service` | Bagage bundet til booking, status-tracking        | 8084           | `http://localhost:8084/api/baggage/graphql` |
+| `shop-service`    | Butikker + navigation (Dijkstra) + AI-spørgsmål (Ollama)                | 8085           | `http://localhost:8085/api/shops/graphql` |
 | RabbitMQ          | Events mellem services                            | 5672 / 15672   | Management UI: http://localhost:15672 (airport/airport) |
 | PostgreSQL ×5     | `flight_db`, `booking_db`, `payment_db`, `baggage_db`, `shop_db` | 5433–5437 | – |
 
@@ -64,6 +63,18 @@ docker compose up --build
 
 Første build tager nogle minutter (Maven downloader dependencies i build-containerne). Når alle
 services melder `healthy`, åbn **http://localhost:8080**.
+
+**Med AI (valgfrit):** `askRoute` ("Spørg om vej" på *Butikker*) bruger en lokal LLM (Ollama). Den ligger i
+compose-profilen `ai`, så den normale stak starter uden:
+
+```bash
+docker compose --profile ai up --build    # som ovenfor + Ollama; første start henter modellen (~2 GB)
+```
+
+Uden profilen virker `askRoute` stadig – den svarer med søgeords-fallbacken (`aiUsed: false`).
+Standardmodellen er `qwen2.5:3b` (~2 GB download, ~2,5 GB RAM). Mangler maskinen RAM, så brug `qwen2.5:1.5b`
+(~1 GB, ~1,5 GB RAM, men svagere valg): sæt `MODEL` på `ollama` og `OLLAMA_MODEL` på `shop-service` i `docker-compose.yml`.
+Se [shop-service/README.md](shop-service/README.md) og [docs/architecture.md](docs/architecture.md#flow-e--spørg-om-vej-ai-askroute).
 
 Seed-data indlæses automatisk af Flyway ved første opstart: 3 flyselskaber, 5 fly, 10 afgange med sæder,
 2 terminaler, 15+ butikker og et navigationsnetværk med 30+ noder inkl. gates.
@@ -113,6 +124,9 @@ docker compose down -v                    # stop og slet databaser (nulstil seed
 - **Flow D – navigation:** *Butikker* → vælg "Security T2" → "Gate B12" → *Find rute* → trin-for-trin rute,
   afstand, estimeret tid, butikker undervejs og et SVG-kort med gangnetværk, nummererede trin, instruktionstekst,
   afstand pr. delstrækning og retningspile.
+- **Flow E – spørg om vej (AI):** *Butikker* → vælg "Hvor er jeg?" = "Security T2" → skriv *"Hvor kan jeg købe kaffe
+  på vej til gate B12?"* → *Spørg* → butik + rute start → butik → gate på kortet, og et mærke der viser om AI eller
+  fallbacken svarede. Kræver `--profile ai` for AI-svaret; ellers svarer fallbacken.
 
 ### Automatisk smoke-test af Flow A–D
 

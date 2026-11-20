@@ -30,6 +30,14 @@ export async function render(container, params) {
       </form>
       <p class="help">Tip: klik på et punkt på kortet for at vælge start og derefter destination.</p>
 
+      <form id="ask-form" class="row" style="margin-top:10px">
+        <div><label for="question">…eller spørg (dansk eller engelsk) – starter fra "Hvor er jeg?"</label>
+          <input id="question" maxlength="300" placeholder="fx Hvor kan jeg købe kaffe på vej til gate B12?"></div>
+        <div class="auto"><button class="btn" type="submit" id="ask-btn">Spørg</button></div>
+      </form>
+      <p class="help field-error" id="ask-hint" role="alert" hidden></p>
+      <div id="ask-result" style="margin-top:10px" hidden></div>
+
       <div style="margin-top:12px">
         <div class="map-wrap">
           <div class="map-toolbar">
@@ -71,12 +79,14 @@ export async function render(container, params) {
   const mapTextToggle = container.querySelector('#map-text');
   const routeHost = container.querySelector('#route-host');
   const shopList = container.querySelector('#shop-list');
+  const askResult = container.querySelector('#ask-result');
 
   let nodes = [];
   let edges = [];
   let shops = [];
   let route = null;
   let floor = 0;
+  let lastWasAsk = false;           // the route on screen came from askRoute (start -> shop -> destination)
 
   // ---- load nodes + walkway network (edges) + shops
   const [nodesRes, edgesRes, shopsRes] = await Promise.allSettled([shopApi.navNodes(), shopApi.navEdges(), shopApi.shops({})]);
@@ -106,13 +116,26 @@ export async function render(container, params) {
     e.preventDefault();
     busy(container.querySelector('#route-btn'), findRoute);
   });
+  container.querySelector('#ask-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    busy(container.querySelector('#ask-btn'), askRoute);
+  });
+  // Enter in the question field asks (explicit, so it works the same in every browser)
+  container.querySelector('#question').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); container.querySelector('#ask-form').requestSubmit(); }
+  });
+  container.querySelector('#question').addEventListener('input', () => askHint(null));
+  fromSel.addEventListener('change', () => { if (fromSel.value) askHint(null); });
   container.querySelector('#swap-btn').addEventListener('click', () => {
     const a = fromSel.value; fromSel.value = toSel.value; toSel.value = a;
   });
   floorSel.addEventListener('change', () => { floor = Number(floorSel.value); drawMap(); });
   mapTextToggle.addEventListener('change', drawMap);
   container.querySelector('#shop-filter').addEventListener('submit', (e) => { e.preventDefault(); searchShops(); });
-  container.querySelector('#acc-only').addEventListener('change', () => { if (route) findRoute(); });
+  container.querySelector('#acc-only').addEventListener('change', () => {
+    if (lastWasAsk) askRoute();          // keep the shop stop: ask again instead of a plain from -> to route
+    else if (route) findRoute();
+  });
 
   // ------------------------------------------------------------ helpers
   function nodeLabel(n) { return `${n.terminal} · ${n.name}${n.floor ? ` (etage ${n.floor})` : ''}`; }
@@ -202,6 +225,8 @@ export async function render(container, params) {
     const from = fromSel.value, to = toSel.value;
     if (!from || !to) { toast('Vælg både start og destination', 'error'); return; }
     if (from === to) { toast('Start og destination er den samme', 'error'); return; }
+    lastWasAsk = false;
+    askResult.hidden = true;
     const accessibleOnly = container.querySelector('#acc-only').checked;
     routeHost.innerHTML = '<div class="empty"><span class="spinner"></span> Beregner rute…</div>';
     try {
@@ -216,6 +241,53 @@ export async function render(container, params) {
       routeHost.innerHTML = `<div class="alert error">${esc(err.message)} <span class="mono small">(${esc(err.code)})</span></div>`;
       showError(err);
       drawMap();
+    }
+  }
+
+  // Inline message under the question field; `field` (if given) is highlighted until the message is cleared.
+  function askHint(text, field) {
+    const hint = container.querySelector('#ask-hint');
+    hint.textContent = text || '';
+    hint.hidden = !text;
+    fromSel.classList.toggle('invalid', !!text && field === fromSel);
+  }
+
+  // Free-text question -> askRoute (LLM or keyword fallback) -> the same route list and map as "Find rute".
+  async function askRoute() {
+    const question = container.querySelector('#question').value.trim();
+    const from = fromSel.value;
+    if (!question) { askHint('Skriv et spørgsmål.'); container.querySelector('#question').focus(); return; }
+    if (!from) {
+      askHint('Vælg først hvor du er i feltet "Hvor er jeg?" ovenfor – spørgsmålet starter derfra.', fromSel);
+      fromSel.focus(); fromSel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
+    askHint(null);
+    const accessibleOnly = container.querySelector('#acc-only').checked;
+    lastWasAsk = true;
+    askResult.hidden = false;
+    askResult.innerHTML = '<div class="empty"><span class="spinner"></span> Spørger… (AI på CPU kan tage nogle sekunder)</div>';
+    try {
+      const a = await shopApi.askRoute(question, from, accessibleOnly);
+      const who = a.aiUsed
+        ? '<span class="badge purple">Svaret af AI</span>'
+        : `<span class="badge gray">Fallback (søgeord)</span> <span class="small">${esc(a.fallbackReason || '')}</span>`;
+      const what = a.shop
+        ? `Butik: <strong>${esc(a.shop.name)}</strong> (${esc(a.shop.terminal)})${a.destination ? ` → <strong>${esc(a.destination.name)}</strong>` : ''}`
+        : a.destination ? `Ingen butik passede – rute direkte til <strong>${esc(a.destination.name)}</strong>`
+          : 'Fandt ingen butik eller destination – prøv at formulere spørgsmålet anderledes.';
+      askResult.innerHTML = `<div class="alert ${a.aiUsed ? 'info' : 'warn'}">${who}<div style="margin-top:6px">${what}</div></div>`;
+      if (!a.route) return;
+      route = a.route;
+      const steps = route.steps || [];
+      toSel.value = String(steps[steps.length - 1]?.node?.id ?? '');   // highlight the end point on the map
+      drawRoute();
+      const startFloor = steps[0]?.node?.floor;
+      if (startFloor !== undefined && startFloor !== floor) { floor = startFloor; floorSel.value = String(floor); }
+      drawMap();
+    } catch (err) {
+      askResult.innerHTML = `<div class="alert error">${esc(err.message)} <span class="mono small">(${esc(err.code)})</span></div>`;
+      showError(err);
     }
   }
 
@@ -266,8 +338,10 @@ export async function render(container, params) {
     const onFloor = id => byId.get(String(id))?.floor === floor;
     const steps = route?.steps || [];
     const pts = steps.map(s => byId.get(String(s.node.id)) || s.node);
-    const stepOf = new Map();                       // node id -> first step index on the route
-    steps.forEach((s, i) => { const k = String(s.node.id); if (!stepOf.has(k)) stepOf.set(k, i); });
+    // node id -> every step index at that node. A route via a shop can pass the same node twice
+    // (e.g. Junction T2 Central before and after the shop), and both step numbers must stay visible.
+    const stepOf = new Map();
+    steps.forEach((s, i) => { const k = String(s.node.id); stepOf.set(k, [...(stepOf.get(k) || []), i]); });
     const fromId = String(fromSel.value), toId = String(toSel.value);
 
     // ---- terminal background boxes
@@ -321,7 +395,9 @@ export async function render(container, params) {
       return `<text x="${cx.toFixed(0)}" y="${cy.toFixed(0)}" class="${cls}" text-anchor="middle">${esc(text)}</text>`;
     }
     // step markers are obstacles for every label
-    pts.forEach(n => { if (n.floor === floor) placed.push(box(px(n), py(n), 12, 12)); });
+    // half width of a step marker: a circle for one number, a pill for several ("2,4")
+    const markerHalfW = at => Math.max(11, at.map(j => j + 1).join(',').length * 3.5 + 5);
+    pts.forEach(n => { if (n.floor === floor) placed.push(box(px(n), py(n), markerHalfW(stepOf.get(String(n.id))) + 1, 12)); });
 
     // ---- route: one line per segment (with arrow head); distance labels are placed after the step labels
     let routeSvg = '';
@@ -364,15 +440,20 @@ export async function render(container, params) {
     // ---- numbered step markers + instruction text ("3. Gå 70 m til Junction Pier B")
     const stepSvg = steps.map((s, i) => {
       const n = pts[i];
-      if (n.floor !== floor || stepOf.get(String(n.id)) !== i) return '';
+      const at = stepOf.get(String(n.id));           // all steps at this node, e.g. [1, 3]
+      if (n.floor !== floor || at[0] !== i) return '';   // one marker per node, drawn at its first step
       const x = px(n), y = py(n);
-      const fill = i === 0 ? ROUTE_COLOR.start : i === steps.length - 1 ? ROUTE_COLOR.end : ROUTE_COLOR.mid;
-      let g = `<circle cx="${x}" cy="${y}" r="11" fill="${fill}" stroke="#fff" stroke-width="2"/>` +
-              `<text x="${x}" y="${y + 4}" class="step-n" text-anchor="middle">${i + 1}</text>`;
+      const fill = at.includes(steps.length - 1) ? ROUTE_COLOR.end : at.includes(0) ? ROUTE_COLOR.start : ROUTE_COLOR.mid;
+      const num = at.map(j => j + 1).join(',');      // "2,4"
+      const hw = markerHalfW(at);
+      let g = `<rect x="${x - hw}" y="${y - 11}" width="${hw * 2}" height="22" rx="11" fill="${fill}" stroke="#fff" stroke-width="2"/>` +
+              `<text x="${x}" y="${y + 4}" class="step-n" text-anchor="middle">${num}</text>`;
       if (showText) {
-        // try above, below, right, left, then further above/below
-        g += placeText(x, y, `${i + 1}. ${s.instruction}`, 'step-label', hw => [
-          [x, y - 18], [x, y + 28], [x + 18 + hw, y + 4], [x - 18 - hw, y + 4], [x, y - 34], [x, y + 44]]);
+        // one text per step at this node; try above, below, right, left, then further above/below
+        for (const j of at) {
+          g += placeText(x, y, `${j + 1}. ${steps[j].instruction}`, 'step-label', w => [
+            [x, y - 18], [x, y + 28], [x + hw + 7 + w, y + 4], [x - hw - 7 - w, y + 4], [x, y - 34], [x, y + 44]]);
+        }
       }
       return `<g class="step">${g}</g>`;
     }).join('');
@@ -411,7 +492,7 @@ export async function render(container, params) {
 
     mapEl.querySelectorAll('g.node').forEach(g => g.addEventListener('click', () => {
       const id = g.dataset.id;
-      if (!fromSel.value || (fromSel.value && toSel.value)) { fromSel.value = id; toSel.value = ''; toast(`Start: ${nodeLabel(byId.get(id))}`, 'info', null, 2500); }
+      if (!fromSel.value || (fromSel.value && toSel.value)) { fromSel.value = id; toSel.value = ''; askHint(null); toast(`Start: ${nodeLabel(byId.get(id))}`, 'info', null, 2500); }
       else { toSel.value = id; findRoute(); }
       drawMap();
     }));

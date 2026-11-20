@@ -19,9 +19,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.context.annotation.Import;
 import org.springframework.graphql.test.tester.GraphQlTester;
-import org.springframework.graphql.test.tester.HttpGraphQlTester;
-import org.springframework.http.HttpHeaders;
-import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -46,10 +44,10 @@ import static org.mockito.Mockito.doThrow;
  * Flyway seed, shop queries/mutations, Dijkstra routing via GraphQL and idempotent event consumption.
  * Requests go over HTTP through the security filter chain; mutations carry a test token from {@link TestTokens}.
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@AutoConfigureHttpGraphQlTester
-@Import(TestTokens.class)
-@Testcontainers
+@Testcontainers          // declared first: JUnit then closes the Spring context before it stops the containers
+@SpringBootTest
+@AutoConfigureGraphQlTester
+@DirtiesContext          // close the context after the class, so the outbox relay never polls a stopped database
 class ShopServiceIntegrationTest {
 
     @Container

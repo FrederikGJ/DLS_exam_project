@@ -1,0 +1,102 @@
+# Ollama (local LLM, CPU only) with the model stored on a PVC, so it is only downloaded once.
+# Model: qwen2.5:3b (~2 GB on disk, ~2.5 GB RAM while loaded). Keep MODEL in sync with OLLAMA_MODEL
+# in shop-service-config. Low-RAM option: qwen2.5:1.5b (~1.5 GB RAM; requests 1536Mi / limits 3Gi are enough).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ollama-data
+  labels:
+    app.kubernetes.io/name: ollama
+    app.kubernetes.io/part-of: airport
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+  labels:
+    app.kubernetes.io/name: ollama
+    app.kubernetes.io/part-of: airport
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ollama
+  ports:
+    - name: http
+      port: 11434
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama
+  labels:
+    app.kubernetes.io/name: ollama
+    app.kubernetes.io/part-of: airport
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # ReadWriteOnce PVC: the old pod must release the volume first
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ollama
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ollama
+        app.kubernetes.io/part-of: airport
+    spec:
+      containers:
+        - name: ollama
+          image: ollama/ollama:0.34.0
+          # Start the server, pull the model once (no-op when it is already on the PVC), keep serving.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              ollama serve &
+              pid=$!
+              trap 'kill $pid' TERM INT          # sh as PID 1 ignores SIGTERM: forward it, so stop is instant
+              until ollama list >/dev/null 2>&1; do sleep 1; done
+              ollama pull "$MODEL"
+              wait $pid
+          env:
+            - name: MODEL
+              value: qwen2.5:3b
+            - name: OLLAMA_KEEP_ALIVE
+              value: 30m
+          ports:
+            - name: http
+              containerPort: 11434
+          volumeMounts:
+            - name: data
+              mountPath: /root/.ollama
+          # Ready only when the model has been downloaded. Up to 10 min for the first pull.
+          startupProbe:
+            exec:
+              command: ["/bin/sh", "-c", "ollama show \"$MODEL\" >/dev/null"]
+            periodSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "ollama show \"$MODEL\" >/dev/null"]
+            periodSeconds: 15
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 500m
+              memory: 3Gi
+            limits:
+              cpu: "4"
+              memory: 4Gi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: ollama-data
