@@ -3,6 +3,8 @@ scalar Date
 scalar BigDecimal
 
 type Query {
+  "Booking, payment and baggage read from the booking_overview projection."
+  bookingOverview(reference: String!): BookingOverview
   booking(id: ID!): Booking
   bookingByReference(reference: String!): Booking
   bookingsByPassenger(email: String!): [Booking!]!
@@ -44,6 +46,60 @@ type Booking {
   currency: String!
   status: BookingStatus!
   createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type BookingOverview {
+  booking: BookingOverviewDetails!
+  latestPaymentStatus: String
+  baggageCount: Int!
+  payments: [OverviewPayment!]!
+  baggage: [OverviewBaggage!]!
+}
+
+type BookingOverviewDetails {
+  id: ID!
+  bookingReference: String!
+  passenger: OverviewPassenger!
+  flightId: ID!
+  flightNumber: String!
+  departureTime: DateTime!
+  gate: String
+  flightStatus: String
+  seatNumber: String!
+  price: BigDecimal!
+  currency: String!
+  status: BookingStatus!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type OverviewPassenger {
+  id: ID!
+  firstName: String!
+  lastName: String!
+  email: String!
+  passportNumber: String!
+  dateOfBirth: Date
+}
+
+type OverviewPayment {
+  paymentId: ID!
+  status: String!
+  amount: BigDecimal
+  currency: String
+  cardLast4: String
+  failureReason: String
+  createdAt: DateTime
+  statusAt: DateTime!
+}
+
+type OverviewBaggage {
+  tagNumber: String!
+  status: String!
+  type: String
+  weightKg: BigDecimal
+  lastLocation: String
   updatedAt: DateTime!
 }
 

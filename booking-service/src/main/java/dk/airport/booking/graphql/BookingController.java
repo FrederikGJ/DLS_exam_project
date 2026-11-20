@@ -5,7 +5,8 @@ import dk.airport.booking.domain.Booking;
 import dk.airport.booking.domain.ErrorCode;
 import dk.airport.booking.domain.Passenger;
 import dk.airport.booking.graphql.input.PassengerInput;
-import dk.airport.booking.service.BookingService;
+import dk.airport.booking.query.BookingQueryService;
+import dk.airport.booking.service.BookingCommandService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -34,10 +35,12 @@ import java.util.List;
 @Validated
 public class BookingController {
 
-    private final BookingService bookingService;
+    private final BookingCommandService commands;
+    private final BookingQueryService queries;
 
-    public BookingController(BookingService bookingService) {
-        this.bookingService = bookingService;
+    public BookingController(BookingCommandService commands, BookingQueryService queries) {
+        this.commands = commands;
+        this.queries = queries;
     }
 
     // ---------------------------------------------------------- queries
@@ -45,13 +48,13 @@ public class BookingController {
     @QueryMapping
     @PreAuthorize("hasAnyRole('PASSENGER', 'OPERATIONS')")
     public Booking booking(@Argument Long id, Authentication authentication) {
-        return bookingService.booking(id).map(b -> requireOwner(b, authentication)).orElse(null);
+        return queries.booking(id).map(b -> requireOwner(b, authentication)).orElse(null);
     }
 
     @QueryMapping
     @PreAuthorize("hasAnyRole('PASSENGER', 'OPERATIONS')")
     public Booking bookingByReference(@Argument @NotBlank String reference, Authentication authentication) {
-        return bookingService.bookingByReference(reference).map(b -> requireOwner(b, authentication)).orElse(null);
+        return queries.bookingByReference(reference).map(b -> requireOwner(b, authentication)).orElse(null);
     }
 
     /**
@@ -62,13 +65,13 @@ public class BookingController {
     @PreAuthorize("hasAnyRole('PASSENGER', 'OPERATIONS')")
     public List<Booking> bookingsByPassenger(@Argument @NotBlank String email, Authentication authentication) {
         requireOwnEmail(email, authentication, "You can only list bookings for your own e-mail address");
-        return bookingService.bookingsByPassenger(email);
+        return queries.bookingsByPassenger(email);
     }
 
     @QueryMapping
     @PreAuthorize("hasAnyRole('PASSENGER', 'OPERATIONS')")
     public Passenger passenger(@Argument Long id, Authentication authentication) {
-        return bookingService.passenger(id)
+        return queries.passenger(id)
                 .map(p -> {
                     requireOwnEmail(p.getEmail(), authentication, "You can only see your own passenger data");
                     return p;
@@ -80,7 +83,7 @@ public class BookingController {
 
     @SchemaMapping(typeName = "Passenger")
     public List<Booking> bookings(Passenger passenger) {
-        return bookingService.bookingsByPassengerId(passenger.getId());
+        return queries.bookingsByPassengerId(passenger.getId());
     }
 
     // ---------------------------------------------------------- mutations
@@ -94,21 +97,21 @@ public class BookingController {
             @Argument @Valid PassengerInput passenger,
             Authentication authentication) {
         requireOwnEmail(passenger.email(), authentication, "Passengers can only book with their own e-mail address");
-        return bookingService.createBooking(flightId, seatNumber, passenger);
+        return commands.createBooking(flightId, seatNumber, passenger);
     }
 
     @MutationMapping
     @PreAuthorize("hasAnyRole('PASSENGER', 'OPERATIONS')")
     public Booking cancelBooking(@Argument @NotBlank String reference, Authentication authentication) {
-        requireOwner(bookingService.requireBooking(reference), authentication);
-        return bookingService.cancelBooking(reference);
+        requireOwner(commands.requireBooking(reference), authentication);
+        return commands.cancelBooking(reference);
     }
 
     @MutationMapping
     @PreAuthorize("hasAnyRole('PASSENGER', 'OPERATIONS')")
     public Booking checkIn(@Argument @NotBlank String reference, Authentication authentication) {
-        requireOwner(bookingService.requireBooking(reference), authentication);
-        return bookingService.checkIn(reference);
+        requireOwner(commands.requireBooking(reference), authentication);
+        return commands.checkIn(reference);
     }
 
     // ---------------------------------------------------------- helpers

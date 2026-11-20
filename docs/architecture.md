@@ -11,7 +11,7 @@ flowchart LR
   FE -- GraphQL /api/flights/graphql --> FS[flight-service]
   FE -- GraphQL /api/bookings/graphql --> BS[booking-service]
   FE -- GraphQL /api/payments/graphql --> PS[payment-service]
-  FE -- GraphQL /api/baggage/graphql --> BG[baggage-service]
+  FE -- REST v1 og GraphQL --> BG[baggage-service]
   FE -- GraphQL /api/shops/graphql --> SS[shop-service]
 
   BS -. GraphQL: pris + sæde .-> FS
@@ -33,7 +33,7 @@ flowchart LR
   [Frontend]  --GraphQL-->  [Flight Service]   ---> flight_db
               --GraphQL-->  [Booking Service]  ---> booking_db   --GraphQL--> Flight Service (pris/sæde)
               --GraphQL-->  [Payment Service]  ---> payment_db
-              --GraphQL-->  [Baggage Service]  ---> baggage_db
+              --REST/GraphQL--> [Baggage Service]  ---> baggage_db
               --GraphQL-->  [Shop Service]     ---> shop_db
 
   Alle backend-services <--events--> [RabbitMQ: topic exchange "airport.events"]
@@ -42,7 +42,7 @@ flowchart LR
 Regler der overholdes:
 
 * Én PostgreSQL-database pr. service. Ingen service læser i en anden services database.
-* Synkront: frontend → service via GraphQL over HTTP (Spring for GraphQL). Kun `/actuator/health` er REST.
+* Synkront: frontend → service via GraphQL over HTTP (Spring for GraphQL) og REST v1 for bagage.
 * Asynkront: service → service via events på RabbitMQ (se [events.md](events.md)).
 * Services cacher snapshots fra events (fx booking gemmer flightnummer, afgangstid, gate og flystatus;
   baggage gemmer `booking_snapshot`). Kilden til sandhed er altid den ejende service.
@@ -65,6 +65,101 @@ kopier af strukturen):
 
 Skema og seed-data styres af Flyway (`V1__init.sql`, `V2__seed.sql`, `V{n}__outbox.sql`); Hibernate kører med
 `ddl-auto=validate`.
+
+### API-versionering
+
+REST-kontrakten har major-versionen i stien `/api/baggage/v1`. Bagudkompatible tilføjelser, fx et valgfrit felt,
+kan leveres i v1. En breaking change, fx et omdøbt eller fjernet svarfelt, får en ny sti under
+`/api/baggage/v2`. v1 kører parallelt, mens klienterne migrerer. `/api/baggage/v3/api-docs` er stien til
+OpenAPI-dokumentet. Forretnings-API'ets version fremgår af de dokumenterede operationer.
+
+GraphQL beholder sin eksisterende endpoint-sti. Skemaet får nye felter eller operationer, og en forgænger
+markeres med `@deprecated(reason: "...")` med en henvisning til erstatningen.
+
+REST og GraphQL kalder begge `BaggageService` og bruger samme data, regler og fejlkoder. REST sender
+koden som `code` i `application/problem+json` med en HTTP-status, fx `400` for `VALIDATION_ERROR`,
+`404` for `NOT_FOUND` og `409` for `INVALID_STATE`, `BAGGAGE_LIMIT_EXCEEDED` og `CONFLICT`.
+Keycloak-rollerne er fælles. API'erne kan bruges på den samme bookingreference og det samme bagagetag.
+
+### CQRS i booking-service
+
+**Min booking** er en læsetung visning. Før skulle klienten hente booking, betalinger og bagage fra tre
+services. Nu beder den kun booking-service om `bookingOverview(reference)`. Queryen læser én række i
+`booking_overview` via bookingreferencen. Rækken indeholder booking og passager, senest observerede
+betalingsstatus, antal unikke bagagetags og de betalings- og bagagelinjer, som siden viser.
+
+`BookingCommandService` håndterer kommandoer og domæneændringer. `BookingQueryService` håndterer læsninger.
+Den almindelige booking-API har stadig sine queries, og de øvrige sider kan fortsat bruge service-API'erne.
+GraphQL-opslaget kræver login. En passager har adgang til egne oversigter, og `OPERATIONS` kan slå flere op.
+
+- Bookingændringer kopieres til projektionen i samme databasetransaktion som kommandoen.
+- `payment.completed`, `payment.failed`, `payment.refunded`, `baggage.registered` og `baggage.status.changed`
+  opdaterer projektionen via RabbitMQ. Behandlede event-id'er registreres i samme transaktion som ændringerne.
+  Betalinger identificeres med betalings-id og bagage med tag. En statusændring øger derfor ikke bagagetallet for et kendt tag.
+- Betalings- og bagageoplysninger er eventual consistent. Siden kan kortvarigt vise en ældre status, mens events er på vej.
+  Flyway fylder eksisterende bookinger og passagerer fra bookingdatabasen. Historiske betalings- og bagagelinjer
+  kræver genafspilning af events fra deres kildeservices for at blive vist fuldt ud.
+
+Læsemodellen er afledte data. Det gør det muligt at flytte eller replikere den og skalere læsninger uafhængigt
+af kommandoerne senere. I den nuværende deployment bruger begge sider samme PostgreSQL-database i booking-service.
+
+### Logging og monitoring
+
+Alle fem backendservices skriver JSON-logs i Compose og Kubernetes. Micrometer Tracing med OpenTelemetry
+sætter `traceId` og `spanId` i logkonteksten for HTTP-requests og RabbitMQ-events. Frontenden bruger samme
+W3C-trace til oprettelse, betaling og bagageregistrering for en booking i samme browsersession. Hvert kald
+har sit eget span. Booking-service bruger Spring Boots instrumenterede `RestClient.Builder`, så opslag
+på sædet i flight-service også får trace-konteksten.
+
+En outbox-række gemmer `traceparent` sammen med eventet. Den planlagte relay sender den gemte header på
+RabbitMQ, også ved retries. Lytterens Micrometer-observation genoptager samme trace, og events, som
+modtageren producerer, får den videre med i deres outbox. Logs uden en aktiv eller gemt sporingskontekst,
+fx opstartslogs, har ingen trace-id. Der eksporteres ingen spans til en separat trace-backend.
+
+Prometheus scraper `/actuator/prometheus` på alle fem services og RabbitMQs køspecifikke metrics på
+`/metrics/detailed?family=queue_coarse_metrics`. Grafana-dashboardet **Airport** samler følgende målinger.
+
+- `max by (application) (outbox_pending)` for events, der venter på brokerens bekræftelse. Maksimum undgår
+  at tælle samme outbox flere gange, når en service har flere replikaer.
+- DLQ-dybde pr. kø fra RabbitMQs `rabbitmq_detailed_queue_messages`.
+- HTTP-latens som p95 pr. service fra request-histogrammer, eksklusive Actuator-kald.
+- JVM-heap pr. service og status for Prometheus-scrapet.
+
+Alloy sender podlogs i `airport`-namespacet til Loki. Compose-udgaven bruger Docker-daemonens socket til at
+læse projektets containerlogs. Loki bevarer loglinjen og indekserer app som label. Trace-id søges i
+JSON-feltet, så hver trace kan findes uden at danne en separat logstrøm.
+
+#### Event-metrics og alarmer
+
+`events_published_total` tæller beskeder, som RabbitMQ har bekræftet. `events_consumed_total` grupperer
+behandlingsforsøg efter service, eventtype og udfald (`processed`, `duplicate` eller `failed`). Hvert
+fejlet forsøg tælles, også når et senere retry lykkes. Ukendte eventtyper samles under `unknown`.
+
+Grafana viser også eventrater, fejlede forsøg, CPU og aktive alarmer. Prometheus bruger samme regelfil i
+Compose og Kubernetes. Alarmerne kan ses på [Prometheus Alerts](http://localhost:9090/alerts) i Compose.
+
+| Alarm | Udløses ved |
+|---|---|
+| `ServiceDown` | En service kan ikke scrapes i 1 minut |
+| `OutboxBacklog` | Mere end 20 ventende events i samme service i 2 minutter |
+| `MessagesDeadLettered` | Beskeder i en DLQ i 1 minut |
+| `EventHandlingFailing` | Fejlede eventforsøg inden for det seneste 5-minutters vindue i 2 minutter |
+| `HighServerErrorRate` | Over 5 % HTTP-svar med 5xx i 5 minutter |
+
+#### Find en fejl fra booking til bagage
+
+1. Åbn Grafana **Explore**, vælg **Loki**, og find bookingreferencen med
+   `{app="booking-service"} |= "BOOKINGREF"`. Åbn en relevant linje, og kopier `traceId`.
+2. Søg på ID'et i dashboardets trace-felt eller i Explore med
+   `{app=~".+-service"} | json | traceId = "TRACE_ID"`. Du kan følge bookingen, sædet i flight-service,
+   betalingen og bagagen i tidsrækkefølge. Brug `eventId` til at sammenligne den samme RabbitMQ-besked på tværs
+   af relay og modtager.
+3. Stiger outbox, så tjek relayets publish-fejl og RabbitMQ. Stiger en DLQ, så tjek modtagerens fejl for det
+   pågældende event. Brug p95 og JVM-heap til at se, om en enkelt service har langsomme requests eller høj hukommelsesbrug.
+
+Fra Git Bash kan du køre `TRACE_BOOKING=1 bash scripts/e2e-smoke.sh` mod en opdateret Compose-stak.
+Scriptet opretter og betaler en booking, registrerer bagage og kontrollerer samme trace-id i JSON-logs fra
+booking-, flight-, payment- og baggage-service.
 
 ### GraphQL-fejl
 
@@ -151,10 +246,13 @@ sequenceDiagram
 
 ### Flow B – Bagage
 
-1. `registerBaggage(reference, 23, CHECKED)` → baggage-service tjekker `booking_snapshot.status ∈ {CONFIRMED, CHECKED_IN}`,
-   max 3 CHECKED pr. booking og max 32 kg → tag `BAG-XXXXXXXX`, event `baggage.registered`.
-2. `updateBaggageStatus(tag, LOADED, "Belt 4")` → event `baggage.status.changed`.
-3. Frontend viser bagage under "Min booking" (`baggageByBooking`).
+1. **Bagage** henter bookingstatus med GraphQL. `POST /api/baggage/v1/baggage` registrerer bagagen.
+   Baggage-service tjekker snapshottet for `CONFIRMED` eller `CHECKED_IN`, maks. tre stykker `CHECKED` og maks. 32 kg
+   pr. stykke. Svaret indeholder et tag, og servicen publicerer `baggage.registered`.
+2. En bruger med rollen `OPERATIONS` opdaterer status med `PATCH /api/baggage/v1/baggage/{tag}/status`.
+   En ændring udløser `baggage.status.changed`.
+3. **Bagage** henter listen med `GET /api/baggage/v1/bookings/{ref}/baggage`. Opslag på et enkelt tag bruger GraphQL.
+   **Min booking** bruger booking-services samlede GraphQL-read model, som opdateres fra bagage- og betalingsevents.
 
 ### Flow C – Aflysning
 

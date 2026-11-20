@@ -1,0 +1,30 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: airport
+
+resources:
+  - rbac.yaml
+  - prometheus.yaml
+  - loki.yaml
+  - alloy.yaml
+  - grafana.yaml
+
+configMapGenerator:
+  - name: prometheus-config
+    files:
+      - config/prometheus.yml
+      - config/alerts.yml
+  - name: loki-config
+    files:
+      - config/loki.yaml
+  - name: alloy-config
+    files:
+      - config.alloy=config/k8s.alloy
+  - name: grafana-provisioning
+    files:
+      - datasources.yaml=config/grafana-datasources.yaml
+      - dashboards.yaml=config/grafana-dashboards.yaml
+  - name: grafana-dashboards
+    files:
+      - config/airport-dashboard.json

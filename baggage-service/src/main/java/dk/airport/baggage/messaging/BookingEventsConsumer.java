@@ -20,10 +20,12 @@ public class BookingEventsConsumer {
 
     private static final Logger log = LoggerFactory.getLogger(BookingEventsConsumer.class);
 
+    private final EventMetrics metrics;
     private final ObjectMapper objectMapper;
     private final BookingEventHandler handler;
 
-    public BookingEventsConsumer(ObjectMapper objectMapper, BookingEventHandler handler) {
+    public BookingEventsConsumer(ObjectMapper objectMapper, BookingEventHandler handler, EventMetrics metrics) {
+        this.metrics = metrics;
         this.objectMapper = objectMapper;
         this.handler = handler;
     }
@@ -33,14 +35,22 @@ public class BookingEventsConsumer {
         EventEnvelope envelope;
         try {
             envelope = objectMapper.readValue(message.getBody(), EventEnvelope.class);
+            if (envelope == null) {
+                throw new IOException("Missing event envelope");
+            }
         } catch (IOException e) {
+            metrics.consumed(EventMetrics.UNREADABLE, EventMetrics.FAILED);
             throw new UncheckedIOException("Malformed event envelope", e);
         }
         MDC.put("eventId", envelope.eventId());
         MDC.put("eventType", envelope.eventType());
         try {
             log.info("Received event {} eventId={}", envelope.eventType(), envelope.eventId());
-            handler.handle(envelope);
+            boolean processed = handler.handle(envelope);
+            metrics.consumed(envelope.eventType(), processed ? EventMetrics.PROCESSED : EventMetrics.DUPLICATE);
+        } catch (RuntimeException e) {
+            metrics.consumed(envelope.eventType(), EventMetrics.FAILED);
+            throw e;
         } finally {
             MDC.remove("eventId");
             MDC.remove("eventType");

@@ -5,6 +5,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.persistence.EntityManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageDeliveryMode;
@@ -20,6 +21,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Moves rows from {@code outbox_event} to RabbitMQ.
@@ -47,15 +49,17 @@ public class OutboxRelay {
     private final RabbitTemplate rabbitTemplate;
     private final EntityManager entityManager;
     private final OutboxProperties props;
+    private final EventMetrics metrics;
     private final String exchange;
 
     public OutboxRelay(OutboxEventRepository outbox, RabbitTemplate rabbitTemplate, EntityManager entityManager,
-                       OutboxProperties props, MeterRegistry meterRegistry,
+                       OutboxProperties props, MeterRegistry meterRegistry, EventMetrics metrics,
                        @Value("${app.messaging.exchange}") String exchange) {
         this.outbox = outbox;
         this.rabbitTemplate = rabbitTemplate;
         this.entityManager = entityManager;
         this.props = props;
+        this.metrics = metrics;
         this.exchange = exchange;
         Gauge.builder("outbox.pending", outbox, OutboxEventRepository::countByPublishedAtIsNull)
                 .description("Events written to the outbox but not yet confirmed by RabbitMQ")
@@ -84,7 +88,8 @@ public class OutboxRelay {
             OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
             for (OutboxEvent event : batch) {
                 event.markPublished(now);
-                log.info("Published event {} eventId={}", event.getEventType(), event.getEventId());
+                metrics.published(event.getEventType());
+                logPublished(event);
             }
         } catch (AmqpException ex) {
             batch.forEach(event -> event.recordFailure(ex.getMessage()));
@@ -121,6 +126,26 @@ public class OutboxRelay {
         return Boolean.TRUE.equals(locked);
     }
 
+    private static void logPublished(OutboxEvent event) {
+        String traceparent = event.getTraceparent();
+        if (traceparent == null) {
+            log.info("Published event {} eventId={}", event.getEventType(), event.getEventId());
+            return;
+        }
+        Map<String, String> previous = MDC.getCopyOfContextMap();
+        try {
+            MDC.put("traceId", traceparent.substring(3, 35));
+            MDC.put("spanId", traceparent.substring(36, 52));
+            log.info("Published event {} eventId={}", event.getEventType(), event.getEventId());
+        } finally {
+            if (previous == null) {
+                MDC.clear();
+            } else {
+                MDC.setContextMap(previous);
+            }
+        }
+    }
+
     /** Same AMQP properties the old direct publisher used, so consumers see no difference. */
     private static Message toMessage(OutboxEvent event) {
         MessageProperties properties = new MessageProperties();
@@ -129,6 +154,9 @@ public class OutboxRelay {
         properties.setDeliveryMode(MessageDeliveryMode.PERSISTENT);
         properties.setMessageId(event.getEventId());
         properties.setType(event.getEventType());
+        if (event.getTraceparent() != null) {
+            properties.setHeader("traceparent", event.getTraceparent());
+        }
         properties.setTimestamp(Date.from(event.getCreatedAt().toInstant()));
         return new Message(event.getPayload().getBytes(StandardCharsets.UTF_8), properties);
     }

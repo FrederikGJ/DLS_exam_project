@@ -23,8 +23,13 @@ resources:
   - ingress.yaml
   # pgAdmin (dev/demo, no login of its own) is deliberately NOT here - opt in with `kubectl apply -k k8s/tools/`
 
-# The Keycloak realm (roles, client, test users) is imported from the same JSON file docker-compose.yml mounts.
+# Both generated ConfigMaps use the same files docker-compose.yml mounts:
+#   rabbitmq-plugins - enables rabbitmq_prometheus (scraped by k8s/observability)
+#   keycloak-realm   - the Keycloak realm (roles, client, test users)
 configMapGenerator:
+  - name: rabbitmq-plugins
+    files:
+      - rabbitmq/enabled_plugins
   - name: keycloak-realm
     files:
       - keycloak/realm-airport.json
