@@ -171,6 +171,9 @@ services:
       OIDC_ISSUER_URI: http://localhost:8180/realms/airport
       JWK_SET_URI: http://keycloak:8080/realms/airport/protocol/openid-connect/certs
       FLIGHT_SERVICE_URL: http://flight-service:8080/api/flights/graphql
+      # ticket 11: unpaid bookings are cancelled after this. Shorten for a demo: PAYMENT_TIMEOUT=1m docker compose up -d
+      PAYMENT_TIMEOUT: ${PAYMENT_TIMEOUT:-15m}
+      PAYMENT_TIMEOUT_CHECK_INTERVAL_MS: ${PAYMENT_TIMEOUT_CHECK_INTERVAL_MS:-30000}
     ports: ["8082:8080"]
     depends_on:
       booking-db: { condition: service_healthy }

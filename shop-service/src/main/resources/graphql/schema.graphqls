@@ -1,5 +1,6 @@
 type Query {
-  shops(filter: ShopFilter): [Shop!]!
+  "Shops sorted by terminal and name. Paginated: limit 1-100 (default 50), offset >= 0 (default 0)."
+  shops(filter: ShopFilter, limit: Int = 50, offset: Int = 0): [Shop!]!
   shop(id: ID!): Shop
   "Free text search in name, category and description"
   searchShops(text: String!): [Shop!]!

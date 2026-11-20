@@ -18,6 +18,7 @@ resources:
   - services/payment-service.yaml
   - services/baggage-service.yaml
   - services/shop-service.yaml
+  - services/autoscaling.yaml   # HPA: 2-5 pods per backend service at 70 % CPU (needs metrics-server, see README)
   - frontend/frontend.yaml
   - keycloak/keycloak.yaml
   - ingress.yaml

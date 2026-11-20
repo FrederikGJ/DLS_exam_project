@@ -45,7 +45,8 @@ public class BookingEventHandler {
                         passengerName(p.path("passenger")),
                         p.path("flightNumber").asText(),
                         p.hasNonNull("flightId") ? p.get("flightId").asLong() : null,
-                        status);
+                        status,
+                        envelope.occurredAt());   // orders the events, ticket 10 (docs/events.md)
             }
             default -> log.debug("Ignoring event type {}", envelope.eventType());
         }

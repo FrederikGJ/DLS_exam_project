@@ -62,7 +62,7 @@ metadata:
     app.kubernetes.io/name: payment-service
     app.kubernetes.io/part-of: airport
 spec:
-  replicas: 2
+  # no replicas: field - the HorizontalPodAutoscaler in autoscaling.yaml owns the count (2-5)
   selector:
     matchLabels:
       app.kubernetes.io/name: payment-service
@@ -96,7 +96,7 @@ spec:
               path: /actuator/health/liveness
               port: http
             periodSeconds: 5
-            failureThreshold: 30
+            failureThreshold: 60   # up to 5 min: 10+ JVMs starting at once (or new HPA pods under load) share the node CPU
           livenessProbe:
             httpGet:
               path: /actuator/health/liveness
@@ -114,7 +114,7 @@ spec:
           resources:
             requests:
               cpu: 250m
-              memory: 512Mi
+              memory: 384Mi    # measured on kind: ~270-290Mi idle, up to ~335Mi under load (ticket 13). Limit stays 1Gi, so the heap (75 % of the limit) is unchanged
             limits:
               cpu: 1000m
               memory: 1Gi

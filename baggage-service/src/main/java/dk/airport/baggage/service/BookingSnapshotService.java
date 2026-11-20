@@ -7,6 +7,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.OffsetDateTime;
 import java.util.LinkedHashSet;
 import java.util.Set;
 
@@ -25,14 +26,23 @@ public class BookingSnapshotService {
     @Transactional
     public BookingSnapshot upsert(String reference, String passengerName, String flightNumber, Long flightId,
                                   String status) {
+        return upsert(reference, passengerName, flightNumber, flightId, status, OffsetDateTime.now());
+    }
+
+    /** Applies a booking event in any order (ticket 10): see {@link BookingSnapshot#update}. */
+    @Transactional
+    public BookingSnapshot upsert(String reference, String passengerName, String flightNumber, Long flightId,
+                                  String status, OffsetDateTime occurredAt) {
         String ref = reference.trim().toUpperCase();
+        OffsetDateTime at = occurredAt == null ? OffsetDateTime.now() : occurredAt;
         BookingSnapshot snapshot = snapshots.findById(ref)
                 .map(existing -> {
-                    existing.update(passengerName, flightNumber, flightId, status);
+                    existing.update(passengerName, flightNumber, flightId, status, at);
                     return existing;
                 })
-                .orElseGet(() -> new BookingSnapshot(ref, passengerName, flightNumber, flightId, status));
-        log.info("Booking snapshot {} -> {}", ref, status);
+                .orElseGet(() -> new BookingSnapshot(ref, passengerName, flightNumber, flightId, status, at));
+        log.info("Booking snapshot {}: event {} (occurredAt {}) -> status now {}",
+                ref, status, at, snapshot.getStatus());
         return snapshots.save(snapshot);
     }
 

@@ -5,9 +5,12 @@ import dk.airport.shop.ai.AskRouteService;
 import dk.airport.shop.domain.*;
 import dk.airport.shop.graphql.input.ShopFilter;
 import dk.airport.shop.graphql.input.ShopInput;
+import dk.airport.shop.repository.OffsetLimit;
 import dk.airport.shop.service.RouteService;
 import dk.airport.shop.service.ShopService;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import org.springframework.graphql.data.method.annotation.Argument;
@@ -37,8 +40,10 @@ public class ShopController {
     // ---------------------------------------------------------- queries
 
     @QueryMapping
-    public List<Shop> shops(@Argument ShopFilter filter) {
-        return shopService.shops(filter);
+    public List<Shop> shops(@Argument ShopFilter filter,
+                            @Argument @Min(1) @Max(OffsetLimit.MAX_LIMIT) Integer limit,
+                            @Argument @Min(0) Integer offset) {
+        return shopService.shops(filter, offset, limit);
     }
 
     @QueryMapping

@@ -104,6 +104,7 @@ jobs:
     env:
       KUBECONFORM_VERSION: v0.8.0
       KUBERNETES_VERSION: 1.36.0   # kind v0.32 node image; kubeconform fetches the matching API schemas
+      CRD_SCHEMAS: https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
     steps:
       - uses: actions/checkout@v7
 
@@ -117,13 +118,15 @@ jobs:
 
       - name: Render and validate every kustomization under k8s/
         # The default stack (k8s/) and the opt-in dev tools (k8s/tools/) alike: every directory with a
-        # kustomization.yaml is built on its own.
+        # kustomization.yaml is built on its own. Custom resources (KEDA's ScaledJob and TriggerAuthentication in
+        # k8s/notifications/) are validated against the schemas in the datreeio CRDs catalog.
         run: |
           failed=0
           for dir in $(find k8s -name kustomization.yaml -printf '%h\n' | sort); do
             echo "::group::$dir"
             kubectl kustomize "$dir" \
               | kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" -schema-location default \
+                  -schema-location "$CRD_SCHEMAS" \
               || failed=1
             echo "::endgroup::"
           done

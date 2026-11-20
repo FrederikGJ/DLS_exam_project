@@ -7,7 +7,8 @@ type Query {
   bookingOverview(reference: String!): BookingOverview
   booking(id: ID!): Booking
   bookingByReference(reference: String!): Booking
-  bookingsByPassenger(email: String!): [Booking!]!
+  "Newest first. Paginated: limit 1-100 (default 50), offset >= 0 (default 0)."
+  bookingsByPassenger(email: String!, limit: Int = 50, offset: Int = 0): [Booking!]!
   passenger(id: ID!): Passenger
 }
 

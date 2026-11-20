@@ -6,8 +6,11 @@ import dk.airport.booking.domain.ErrorCode;
 import dk.airport.booking.domain.Passenger;
 import dk.airport.booking.graphql.input.PassengerInput;
 import dk.airport.booking.query.BookingQueryService;
+import dk.airport.booking.repository.OffsetLimit;
 import dk.airport.booking.service.BookingCommandService;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
@@ -63,9 +66,12 @@ public class BookingController {
      */
     @QueryMapping
     @PreAuthorize("hasAnyRole('PASSENGER', 'OPERATIONS')")
-    public List<Booking> bookingsByPassenger(@Argument @NotBlank String email, Authentication authentication) {
+    public List<Booking> bookingsByPassenger(@Argument @NotBlank String email,
+                                             @Argument @Min(1) @Max(OffsetLimit.MAX_LIMIT) Integer limit,
+                                             @Argument @Min(0) Integer offset,
+                                             Authentication authentication) {
         requireOwnEmail(email, authentication, "You can only list bookings for your own e-mail address");
-        return queries.bookingsByPassenger(email);
+        return queries.bookingsByPassenger(email, offset, limit);
     }
 
     @QueryMapping

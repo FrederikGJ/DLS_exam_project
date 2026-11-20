@@ -57,12 +57,13 @@ public class IncomingEventHandler {
             case PAYMENT_REFUNDED -> projector.paymentObserved(envelope, "REFUNDED");
             case BAGGAGE_REGISTERED -> projector.baggageObserved(envelope, true);
             case BAGGAGE_STATUS_CHANGED -> projector.baggageObserved(envelope, false);
-            case FLIGHT_CANCELLED -> commands.onFlightCancelled(p.path("flightId").asLong());
+            // occurredAt from the envelope orders the flight events (ticket 10, see docs/events.md)
+            case FLIGHT_CANCELLED -> commands.onFlightCancelled(p.path("flightId").asLong(), envelope.occurredAt());
             case FLIGHT_STATUS_CHANGED -> commands.onFlightSnapshotChanged(p.path("flightId").asLong(),
                     p.hasNonNull("newStatus") ? p.get("newStatus").asText() : null,
-                    p.hasNonNull("gate") ? p.get("gate").asText() : null);
+                    p.hasNonNull("gate") ? p.get("gate").asText() : null, envelope.occurredAt());
             case FLIGHT_GATE_CHANGED -> commands.onFlightSnapshotChanged(p.path("flightId").asLong(),
-                    null, p.hasNonNull("newGate") ? p.get("newGate").asText() : null);
+                    null, p.hasNonNull("newGate") ? p.get("newGate").asText() : null, envelope.occurredAt());
             default -> log.debug("Ignoring event type {}", envelope.eventType());
         }
         processedEvents.save(new ProcessedEvent(envelope.eventId(), envelope.eventType()));

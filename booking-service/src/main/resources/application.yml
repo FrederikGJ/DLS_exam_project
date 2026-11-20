@@ -95,6 +95,9 @@ app:
     confirm-timeout-ms: 5000
     retention: 7d                       # published rows older than this are deleted
     cleanup-interval-ms: 3600000
+  saga:                                 # ticket 11: compensations in the booking/payment saga (docs/architecture.md)
+    payment-timeout: ${PAYMENT_TIMEOUT:15m}                                 # PENDING_PAYMENT older than this -> CANCELLED
+    payment-timeout-check-interval-ms: ${PAYMENT_TIMEOUT_CHECK_INTERVAL_MS:30000}
   flight-service:
     url: ${FLIGHT_SERVICE_URL:http://localhost:8081/api/flights/graphql}
     timeout: ${FLIGHT_SERVICE_TIMEOUT:5s}

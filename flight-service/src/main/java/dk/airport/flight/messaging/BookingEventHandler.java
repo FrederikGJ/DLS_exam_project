@@ -35,11 +35,14 @@ public class BookingEventHandler {
         }
         JsonNode p = envelope.payload();
         switch (envelope.eventType()) {
+            // bookingReference + occurredAt make the handler commutative (ticket 10, docs/events.md)
             case BOOKING_CONFIRMED -> flightService.setSeatAvailability(
-                    p.path("flightId").asLong(), p.path("seatNumber").asText(), false);
+                    p.path("flightId").asLong(), p.path("seatNumber").asText(),
+                    p.path("bookingReference").asText(), false, envelope.occurredAt());
             case BOOKING_CANCELLED -> {
                 if (p.hasNonNull("flightId") && p.hasNonNull("seatNumber")) {
-                    flightService.setSeatAvailability(p.path("flightId").asLong(), p.path("seatNumber").asText(), true);
+                    flightService.setSeatAvailability(p.path("flightId").asLong(), p.path("seatNumber").asText(),
+                            p.path("bookingReference").asText(), true, envelope.occurredAt());
                 }
             }
             default -> log.debug("Ignoring event type {}", envelope.eventType());

@@ -3,7 +3,9 @@ package dk.airport.booking.query;
 import dk.airport.booking.domain.Booking;
 import dk.airport.booking.domain.Passenger;
 import dk.airport.booking.repository.BookingRepository;
+import dk.airport.booking.repository.OffsetLimit;
 import dk.airport.booking.repository.PassengerRepository;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -40,6 +42,11 @@ public class BookingQueryService {
 
     public List<Booking> bookingsByPassenger(String email) {
         return bookings.findByPassengerEmail(email.trim());
+    }
+
+    /** One page of the passenger's bookings, newest first. {@code null} offset/limit = defaults (0 / 50). */
+    public List<Booking> bookingsByPassenger(String email, Integer offset, Integer limit) {
+        return bookings.findByPassengerEmail(email.trim(), OffsetLimit.of(offset, limit, Sort.unsorted()));
     }
 
     public List<Booking> bookingsByPassengerId(Long passengerId) {

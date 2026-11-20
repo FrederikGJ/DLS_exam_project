@@ -328,7 +328,8 @@ Keycloak (login) ligger bag Ingress'en på `/auth`. pgAdmin (dev/demo-værktøj 
 standardstakken; den tilvælges på et lokalt cluster med `kubectl apply -k k8s/tools/` (se [k8s/README.md](k8s/README.md)).
 
 Manifests er verificeret på et **kind**-cluster (17/17 pods Ready, alle flows grønne gennem Ingress). På kind starter
-`scripts/kind-up.sh` hele stakken med én kommando (tilvalg: `--build`, `--ai`, `--observability`, `--tools`). Kort version for
+`scripts/kind-up.sh` hele stakken med én kommando (tilvalg: `--build`, `--ai`, `--observability`, `--tools`,
+`--notifications`; kræver Helm til metrics-server og KEDA). Kort version for
 minikube – se
 [k8s/README.md](k8s/README.md) for detaljer og kind-alternativet:
 

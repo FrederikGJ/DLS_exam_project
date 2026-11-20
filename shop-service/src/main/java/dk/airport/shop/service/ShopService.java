@@ -5,6 +5,7 @@ import dk.airport.shop.graphql.input.ShopFilter;
 import dk.airport.shop.graphql.input.ShopInput;
 import dk.airport.shop.repository.NavEdgeRepository;
 import dk.airport.shop.repository.NavNodeRepository;
+import dk.airport.shop.repository.OffsetLimit;
 import dk.airport.shop.repository.ShopRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,6 +44,15 @@ public class ShopService {
     // ------------------------------------------------------------ shops
 
     public List<Shop> shops(ShopFilter filter) {
+        return shops(filter, null, null);
+    }
+
+    /**
+     * Ticket 17.1: one page of shops, sorted by terminal and name. {@code null} offset/limit = defaults (0 / 50).
+     * Paging happens in the database, except with {@code openNow}: opening hours are evaluated in Java, so then the
+     * matching shops are filtered first and the page is cut from that list (shops are few; see docs/architecture.md).
+     */
+    public List<Shop> shops(ShopFilter filter, Integer offset, Integer limit) {
         Specification<Shop> spec = Specification.where(null);
         if (filter != null) {
             if (filter.terminal() != null && !filter.terminal().isBlank()) {
@@ -53,13 +63,18 @@ public class ShopService {
                 spec = spec.and((root, q, cb) -> cb.equal(root.get("category"), filter.category()));
             }
         }
-        List<Shop> result = shops.findAll(spec, Sort.by("terminal", "name"));
-        if (filter != null && filter.openNow() != null) {
-            boolean wantOpen = filter.openNow();
-            LocalTime now = LocalTime.now(Clock.system(zone));
-            result = result.stream().filter(s -> OpeningHours.isOpen(s.getOpeningHours(), now) == wantOpen).toList();
+        Sort sort = Sort.by("terminal", "name", "id");   // id as tie-breaker keeps pages stable
+        OffsetLimit page = OffsetLimit.of(offset, limit, sort);
+        if (filter == null || filter.openNow() == null) {
+            return shops.findAll(spec, page).getContent();
         }
-        return result;
+        boolean wantOpen = filter.openNow();
+        LocalTime now = LocalTime.now(Clock.system(zone));
+        return shops.findAll(spec, sort).stream()
+                .filter(s -> OpeningHours.isOpen(s.getOpeningHours(), now) == wantOpen)
+                .skip(page.offset())
+                .limit(page.limit())
+                .toList();
     }
 
     public Optional<Shop> shop(Long id) {
