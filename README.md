@@ -327,7 +327,8 @@ Secret pr. backend-service, StatefulSet + PVC + Service pr. database, RabbitMQ S
 Keycloak (login) ligger bag Ingress'en på `/auth`. pgAdmin (dev/demo-værktøj uden login) er **ikke** med i
 standardstakken; den tilvælges på et lokalt cluster med `kubectl apply -k k8s/tools/` (se [k8s/README.md](k8s/README.md)).
 
-Manifests er verificeret på et **kind**-cluster (17/17 pods Ready, alle flows grønne gennem Ingress). Kort version for
+Manifests er verificeret på et **kind**-cluster (17/17 pods Ready, alle flows grønne gennem Ingress). På kind starter
+`scripts/kind-up.sh` hele stakken med én kommando (tilvalg: `--build`, `--ai`, `--observability`, `--tools`). Kort version for
 minikube – se
 [k8s/README.md](k8s/README.md) for detaljer og kind-alternativet:
 
@@ -399,6 +400,7 @@ Alle services konfigureres via environment variables. Defaults i `application.ym
   k8s/                     kustomization.yaml, namespace.yaml, rabbitmq/, databases/, services/, frontend/, keycloak/ (+ realm-airport.json), ingress.yaml
                            tools/ (pgAdmin, opt-in: kubectl apply -k k8s/tools/)
   scripts/e2e-smoke.sh     end-to-end smoke-test af Flow A-D mod en kørende compose-stak
+  scripts/kind-up.sh       starter hele stakken på et lokalt kind-cluster med én kommando (se k8s/README.md)
   scripts/check-asyncapi.sh  tjekker, at alle events og køer i koden står i docs/asyncapi.yaml (CI-job contracts)
   system-tests/            Maven-modul: systemtest med de byggede images (mvn -Psystem verify)
 ```
