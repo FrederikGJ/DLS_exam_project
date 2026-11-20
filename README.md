@@ -26,7 +26,7 @@ service-READMEs: [flight](flight-service/README.md) · [booking](booking-service
 |---------------------|-----------------------------------------------------------------------|
 | Frontend            | Vanilla JavaScript, HTML, CSS – serveret af nginx (ingen frameworks)  |
 | Backend             | Java 21, Spring Boot 3.5 (Maven)                                       |
-| API                 | GraphQL (Spring for GraphQL) – kun `/actuator/health` er REST         |
+| API                 | GraphQL (Spring for GraphQL) og versioneret REST i baggage-service         |
 | Database            | PostgreSQL 16 – én database pr. service, migrationer med Flyway       |
 | Message broker      | RabbitMQ (Spring AMQP) – topic exchange `airport.events`              |
 | Containerisering    | Docker, multi-stage builds (maven → eclipse-temurin JRE)              |
@@ -52,6 +52,28 @@ og health-endpoints på `/actuator/health/liveness` og `/actuator/health/readine
 **Hver service har sin egen README** (linket i tabellen), bygget over samme skabelon,
 [docs/service-readme-template.md](docs/service-readme-template.md): ansvar og data, endpoints med et kørt eksempel,
 forretningsregler, events ind og ud, konfiguration (env-vars), kør lokalt, tests, drift og designvalg.
+
+### Bagage-API v1
+
+| Metode | Endpoint | Rolle |
+|--------|----------|-------|
+| GET | `/api/baggage/v1/bookings/{ref}/baggage` | `PASSENGER` eller `OPERATIONS` |
+| POST | `/api/baggage/v1/baggage` | `PASSENGER` eller `OPERATIONS` |
+| PATCH | `/api/baggage/v1/baggage/{tag}/status` | `OPERATIONS` |
+
+[Swagger UI](http://localhost:8084/api/baggage/swagger-ui.html) og
+[OpenAPI JSON](http://localhost:8084/api/baggage/v3/api-docs) er tilgængelige i Docker Compose.
+Bag Kubernetes Ingress bruges samme stier på Ingress-adressen. Vælg **Authorize** i Swagger UI og indsæt et
+Keycloak-access-token for at kalde API'et.
+
+I Docker Compose kan du logge ind som `anna` (PASSENGER) eller `ops` (OPERATIONS), med samme navn som adgangskode. Brug `anna@example.com` på bookingen, hvis du tester **Min booking** som Anna.
+Ved lokal Kubernetes-test er Keycloaks issuer sat til `http://localhost:8090/auth/realms/airport` af Ticket 2-konfigurationen.
+
+På **Bagage** hentes bookingstatus og registreres bagage med GraphQL (registreringen bærer en idempotency-nøgle),
+mens liste og statusskift bruger REST.
+Søg på den samme reference under **Min booking** for at se booking, betaling og bagage fra ét
+`bookingOverview`-kald. Se [API-versionering](docs/architecture.md#api-versionering) og
+[CQRS i booking-service](docs/architecture.md#cqrs-i-booking-service).
 
 ## Kør lokalt med Docker
 
@@ -280,6 +302,22 @@ docker compose build && trivy image --severity HIGH,CRITICAL --ignore-unfixed --
 docker compose up -d --wait && ./scripts/e2e-smoke.sh && docker compose down -v
 cd system-tests && mvn -Psystem verify
 ```
+
+## Observability
+
+Start Prometheus, Grafana, Loki og Alloy lokalt med observability-profilen.
+
+```bash
+docker compose --profile observability up -d --build
+```
+
+Åbn [Grafana](http://localhost:3000) og log ind med `admin` / `admin` ved første lokale opstart.
+Dashboardet **Airport** indeholder metrics og logopslag pr. trace-id.
+[Prometheus](http://localhost:9090/targets) viser scrape-targets.
+
+I Kubernetes startes appen først med `kubectl apply -k k8s`. Tilføj monitoring med
+`kubectl apply -k k8s/observability` og åbn Grafana med `kubectl -n airport port-forward svc/grafana 3000:3000`. Se
+[logging og fejlsøgning](docs/architecture.md#logging-og-monitoring) for trace-opslag og flowverifikation.
 
 ## Kubernetes
 

@@ -3,6 +3,7 @@ package dk.airport.baggage;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dk.airport.baggage.domain.Baggage;
 import dk.airport.baggage.domain.BaggageStatus;
+import dk.airport.baggage.domain.BookingSnapshot;
 import dk.airport.baggage.messaging.EventEnvelope;
 import dk.airport.baggage.messaging.EventPublisher;
 import dk.airport.baggage.messaging.OutboxEvent;
@@ -13,9 +14,9 @@ import dk.airport.baggage.repository.BookingSnapshotRepository;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.springframework.amqp.AmqpException;
@@ -26,13 +27,16 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.graphql.tester.AutoConfigureHttpGraphQlTester;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.context.annotation.Import;
 import org.springframework.graphql.test.tester.GraphQlTester;
 import org.springframework.graphql.test.tester.HttpGraphQlTester;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
+import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.containers.RabbitMQContainer;
@@ -54,6 +58,16 @@ import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
 
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.options;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.redirectedUrl;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
 /**
  * End-to-end test against real PostgreSQL + RabbitMQ (Testcontainers): Flyway migrations, GraphQL,
  * booking/flight event consumption (idempotent) and publishing of baggage.* events.
@@ -62,6 +76,7 @@ import static org.mockito.Mockito.doThrow;
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureHttpGraphQlTester
+@AutoConfigureMockMvc
 @Import(TestTokens.class)
 @Testcontainers
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -87,6 +102,8 @@ class BaggageServiceIntegrationTest {
 
     /** Anonymous client - enough for public queries. */
     @Autowired HttpGraphQlTester graphQlTester;
+    /** MockMvc for the REST API v1 (same security filter chain, no real port needed). */
+    @Autowired MockMvc mvc;
     /** Same client with a PASSENGER (anna) / OPERATIONS (ops) token. */
     GraphQlTester asPassenger;
     GraphQlTester asOperations;
@@ -340,6 +357,112 @@ class BaggageServiceIntegrationTest {
     }
 
     // ------------------------------------------------------------------ outbox guarantees
+
+    @Test
+    void restRegistrationListAndStatusShareDataWithGraphQl() throws Exception {
+        String ref = "REST01";
+        snapshotRepository.save(new BookingSnapshot(ref, "Anna Jensen", "DY1234", 2L, "CONFIRMED"));
+        String body = """
+                {"bookingReference":"REST01","weightKg":23,"type":"CHECKED"}
+                """;
+        String registration = mvc.perform(post("/api/baggage/v1/baggage")
+                        .header(HttpHeaders.AUTHORIZATION, TestTokens.passenger())
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.status").value("REGISTERED"))
+                .andReturn().getResponse().getContentAsString();
+        String tag = objectMapper.readTree(registration).path("tagNumber").asText();
+
+        mvc.perform(get("/api/baggage/v1/bookings/{ref}/baggage", ref)
+                        .header(HttpHeaders.AUTHORIZATION, TestTokens.passenger()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(1))
+                .andExpect(jsonPath("$[0].tagNumber").value(tag));
+
+        mvc.perform(patch("/api/baggage/v1/baggage/{tag}/status", tag)
+                        .header(HttpHeaders.AUTHORIZATION, TestTokens.operations())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"status":"LOADED","location":"Belt 4"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("LOADED"))
+                .andExpect(jsonPath("$.lastLocation").value("Belt 4"));
+
+        asPassenger.document("query($tag: String!) { baggage(tagNumber: $tag) { status } }")
+                .variable("tag", tag).execute()
+                .path("baggage.status").entity(String.class).isEqualTo("LOADED");
+    }
+
+    @Test
+    void restErrorsExposeGraphQlCodes() throws Exception {
+        String registration = "/api/baggage/v1/baggage";
+        String statusPath = registration + "/{tag}/status";
+        mvc.perform(get("/api/baggage/v1/bookings/REST02/baggage"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.code").value("UNAUTHORIZED"));
+        mvc.perform(get("/api/baggage/v1/bookings/REST02/baggage")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer invalid"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code").value("UNAUTHORIZED"));
+        mvc.perform(patch(statusPath, "BAG-UNKNOWN")
+                        .header(HttpHeaders.AUTHORIZATION, TestTokens.passenger())
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"status\":\"LOADED\"}"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("FORBIDDEN"));
+        mvc.perform(post(registration)
+                        .header(HttpHeaders.AUTHORIZATION, TestTokens.passenger())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"bookingReference":"REST02","weightKg":32.01,"type":"CHECKED"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"));
+        mvc.perform(post(registration)
+                        .header(HttpHeaders.AUTHORIZATION, TestTokens.passenger())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"bookingReference":"REST02","weightKg":23,"type":"CHECKED"}
+                                """))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("NOT_FOUND"));
+        mvc.perform(patch(statusPath, "BAG-UNKNOWN")
+                        .header(HttpHeaders.AUTHORIZATION, TestTokens.operations())
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"status\":\"unknown\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"));
+        mvc.perform(patch(statusPath, "BAG-UNKNOWN")
+                        .header(HttpHeaders.AUTHORIZATION, TestTokens.operations())
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"status\":\"LOADED\"}"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("NOT_FOUND"));
+    }
+
+    @Test
+    void restAllowsBrowserPatchAndPublishesOpenApiUnderIngressPrefix() throws Exception {
+        mvc.perform(options("/api/baggage/v1/baggage/BAG-EXAMPLE/status")
+                        .header(HttpHeaders.ORIGIN, "http://localhost:8080")
+                        .header(HttpHeaders.ACCESS_CONTROL_REQUEST_METHOD, "PATCH")
+                        .header(HttpHeaders.ACCESS_CONTROL_REQUEST_HEADERS, "authorization,content-type"))
+                .andExpect(status().isOk())
+                .andExpect(header().string(HttpHeaders.ACCESS_CONTROL_ALLOW_ORIGIN, "http://localhost:8080"));
+
+        mvc.perform(get("/api/baggage/v3/api-docs"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.paths['/api/baggage/v1/bookings/{ref}/baggage'].get").exists())
+                .andExpect(jsonPath("$.paths['/api/baggage/v1/baggage'].post").exists())
+                .andExpect(jsonPath("$.paths['/api/baggage/v1/baggage/{tag}/status'].patch").exists())
+                .andExpect(jsonPath("$.components.securitySchemes.bearerAuth.scheme").value("bearer"));
+        mvc.perform(get("/api/baggage/swagger-ui.html"))
+                .andExpect(status().is3xxRedirection())
+                .andExpect(redirectedUrl("/api/baggage/swagger-ui/index.html"));
+        mvc.perform(get("/api/baggage/swagger-ui/index.html")).andExpect(status().isOk());
+        mvc.perform(get("/api/baggage/swagger-ui/swagger-initializer.js")).andExpect(status().isOk());
+        mvc.perform(get("/api/baggage/v3/api-docs/swagger-config"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.url").value("/api/baggage/v3/api-docs"));
+    }
 
     @Test
     void publishOutsideTransactionIsRejected() {

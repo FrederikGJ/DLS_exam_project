@@ -68,6 +68,10 @@ spec:
       app.kubernetes.io/name: payment-service
   template:
     metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /actuator/prometheus
       labels:
         app.kubernetes.io/name: payment-service
         app.kubernetes.io/part-of: airport

@@ -2,14 +2,20 @@ package dk.airport.shop.messaging;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.tracing.Span;
+import io.micrometer.tracing.Tracer;
+import io.micrometer.tracing.propagation.Propagator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -28,12 +34,17 @@ public class EventPublisher {
     private final OutboxEventRepository outbox;
     private final ObjectMapper objectMapper;
     private final String producer;
+    private final ObjectProvider<Tracer> tracer;
+    private final ObjectProvider<Propagator> propagator;
 
     public EventPublisher(OutboxEventRepository outbox, ObjectMapper objectMapper,
-                          @Value("${app.messaging.producer}") String producer) {
+                          @Value("${app.messaging.producer}") String producer,
+                          ObjectProvider<Tracer> tracer, ObjectProvider<Propagator> propagator) {
         this.outbox = outbox;
         this.objectMapper = objectMapper;
         this.producer = producer;
+        this.tracer = tracer;
+        this.propagator = propagator;
     }
 
     public EventEnvelope publish(String eventType, Object payload) {
@@ -50,11 +61,24 @@ public class EventPublisher {
                 objectMapper.valueToTree(payload));
         try {
             String json = objectMapper.writeValueAsString(envelope);
-            outbox.save(new OutboxEvent(envelope.eventId(), eventType, json, envelope.occurredAt()));
+            outbox.save(new OutboxEvent(envelope.eventId(), eventType, json, envelope.occurredAt(),
+                    currentTraceparent()));
             log.info("Queued event {} eventId={} in outbox", eventType, envelope.eventId());
             return envelope;
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("Could not serialize event " + eventType, e);
         }
+    }
+
+    private String currentTraceparent() {
+        Tracer currentTracer = tracer.getIfAvailable();
+        Span span = currentTracer == null ? null : currentTracer.currentSpan();
+        Propagator currentPropagator = propagator.getIfAvailable();
+        if (span == null || currentPropagator == null) {
+            return null;
+        }
+        Map<String, String> headers = new HashMap<>();
+        currentPropagator.inject(span.context(), headers, Map::put);
+        return headers.get("traceparent");
     }
 }

@@ -1,5 +1,8 @@
 package dk.airport.baggage.config;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import dk.airport.baggage.rest.BaggageRestController;
+import org.springframework.http.HttpMethod;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -28,8 +31,9 @@ import java.util.List;
  * mutations, so the decision is taken per operation in the controller (method security), not per URL. A request
  * without a token is anonymous there and a guarded operation then fails with {@code UNAUTHORIZED}; a token with
  * the wrong role gives {@code FORBIDDEN} (mapped in GraphQlExceptionResolver). An invalid or expired token is
- * rejected with HTTP 401 before the request reaches GraphQL. Health probes and GraphiQL (dev only) are public;
- * the remaining actuator endpoints require OPERATIONS.
+ * rejected with HTTP 401 before the request reaches GraphQL. Health probes, the Prometheus scrape endpoint
+ * (/actuator/prometheus, scraped without a token) and GraphiQL (dev only) are public; the remaining actuator
+ * endpoints require OPERATIONS.
  *
  * <p>CORS is handled here (Spring Security's CorsFilter runs before authentication, so preflight requests never
  * need a token) from the same {@code CORS_ALLOWED_ORIGINS} variable as before.
@@ -41,21 +45,38 @@ public class SecurityConfig {
 
     @Bean
     SecurityFilterChain securityFilterChain(HttpSecurity http, CorsConfigurationSource corsConfigurationSource,
-                                            @Value("${spring.graphql.path}") String graphqlPath) throws Exception {
+                                            @Value("${spring.graphql.path}") String graphqlPath,
+                                            ObjectMapper objectMapper) throws Exception {
         JwtAuthenticationConverter jwtConverter = new JwtAuthenticationConverter();
         jwtConverter.setJwtGrantedAuthoritiesConverter(new KeycloakRoleConverter());
         jwtConverter.setPrincipalClaimName("preferred_username");   // Authentication.getName() -> "anna"/"ops"
+
+        ProblemAuthHandlers problems = new ProblemAuthHandlers(objectMapper);
+        String rest = BaggageRestController.BASE_PATH;
 
         http
                 .csrf(AbstractHttpConfigurer::disable)              // stateless bearer-token API, no cookies
                 .cors(cors -> cors.configurationSource(corsConfigurationSource))
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/info").permitAll()
+                        .requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/info",
+                                "/actuator/prometheus").permitAll()
                         .requestMatchers(graphqlPath).permitAll()       // per-operation checks via @PreAuthorize
                         .requestMatchers("/graphiql", "/graphiql/**").permitAll()
+                        .requestMatchers("/api/baggage/v3/api-docs", "/api/baggage/v3/api-docs/**",
+                                "/api/baggage/v3/api-docs.yaml",
+                                "/api/baggage/swagger-ui.html", "/api/baggage/swagger-ui/**").permitAll()
+                        .requestMatchers(HttpMethod.GET, rest + "/bookings/*/baggage")
+                                .hasAnyRole("PASSENGER", "OPERATIONS")
+                        .requestMatchers(HttpMethod.POST, rest + "/baggage").hasAnyRole("PASSENGER", "OPERATIONS")
+                        .requestMatchers(HttpMethod.PATCH, rest + "/baggage/*/status").hasRole("OPERATIONS")
                         .anyRequest().hasRole("OPERATIONS"))
-                .oauth2ResourceServer(oauth2 -> oauth2.jwt(jwt -> jwt.jwtAuthenticationConverter(jwtConverter)));
+                .exceptionHandling(errors -> errors
+                        .defaultAuthenticationEntryPointFor(problems, problems.restRequests())
+                        .defaultAccessDeniedHandlerFor(problems, problems.restRequests()))
+                .oauth2ResourceServer(oauth2 -> oauth2
+                        .jwt(jwt -> jwt.jwtAuthenticationConverter(jwtConverter))
+                        .authenticationEntryPoint(problems));
         return http.build();
     }
 
@@ -64,7 +85,7 @@ public class SecurityConfig {
     CorsConfigurationSource corsConfigurationSource(@Value("${app.cors.allowed-origins}") List<String> origins) {
         CorsConfiguration config = new CorsConfiguration();
         config.setAllowedOrigins(origins);
-        config.setAllowedMethods(List.of("GET", "POST", "OPTIONS"));
+        config.setAllowedMethods(List.of("GET", "POST", "PATCH", "OPTIONS"));
         config.setAllowedHeaders(List.of("*"));
         config.setMaxAge(3600L);
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();

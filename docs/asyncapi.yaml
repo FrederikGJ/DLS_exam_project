@@ -320,6 +320,27 @@ channels:
           autoDelete: false
           vhost: /
         bindingVersion: 0.3.0
+  bookingServiceBaggageEventsQueue:
+    address: booking-service.baggage-events
+    title: Kø booking-service.baggage-events
+    description: 'Durable kø ejet af booking-service, bundet til `airport.events` med `baggage.#`. Queue-argumenter: `x-dead-letter-exchange:
+      airport.events.dlx`, `x-dead-letter-routing-key: booking-service`. Fodrer kun CQRS-read-modellen `booking_overview`
+      (ticket 7); selve bookingen ændres ikke.'
+    messages:
+      BaggageRegistered:
+        $ref: '#/components/messages/BaggageRegistered'
+      BaggageStatusChanged:
+        $ref: '#/components/messages/BaggageStatusChanged'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: booking-service.baggage-events
+          durable: true
+          exclusive: false
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
   bookingServiceFlightEventsQueue:
     address: booking-service.flight-events
     title: Kø booking-service.flight-events
@@ -785,12 +806,32 @@ operations:
       $ref: '#/channels/bookingServicePaymentEventsQueue'
     title: booking-service forbruger booking-service.payment-events
     summary: payment.completed bekræfter en PENDING_PAYMENT-booking (→ booking.confirmed); payment.failed aflyser den (→ booking.cancelled
-      med årsagen). payment.refunded ignoreres.
+      med årsagen). Alle tre, også payment.refunded, opdaterer betalingslisten i read-modellen `booking_overview`.
     description: 'Idempotent: eventId registreres i processed_event i samme transaktion som ændringen, så et duplikat ignoreres.
       Fejler handleren, prøves beskeden 3 gange (backoff 500 ms, ×2, maks. 3 s) og afvises derefter til booking-service.dlq.'
     messages:
     - $ref: '#/channels/bookingServicePaymentEventsQueue/messages/PaymentCompleted'
     - $ref: '#/channels/bookingServicePaymentEventsQueue/messages/PaymentFailed'
+    - $ref: '#/channels/bookingServicePaymentEventsQueue/messages/PaymentRefunded'
+    tags:
+    - name: booking-service
+    bindings:
+      amqp:
+        ack: true
+        bindingVersion: 0.3.0
+  bookingServiceReceivesBaggageEvents:
+    action: receive
+    channel:
+      $ref: '#/channels/bookingServiceBaggageEventsQueue'
+    title: booking-service forbruger booking-service.baggage-events
+    summary: baggage.registered og baggage.status.changed opdaterer bagagelisten i read-modellen `booking_overview` (CQRS,
+      ticket 7). Ingen events publiceres.
+    description: 'Idempotent: eventId registreres i processed_event i samme transaktion som ændringen, så et duplikat ignoreres.
+      Kommutativ: en ældre observation (occurredAt) overskriver ikke en nyere. Fejler handleren, prøves beskeden 3 gange
+      (backoff 500 ms, ×2, maks. 3 s) og afvises derefter til booking-service.dlq.'
+    messages:
+    - $ref: '#/channels/bookingServiceBaggageEventsQueue/messages/BaggageRegistered'
+    - $ref: '#/channels/bookingServiceBaggageEventsQueue/messages/BaggageStatusChanged'
     tags:
     - name: booking-service
     bindings:
