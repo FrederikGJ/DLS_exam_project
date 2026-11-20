@@ -60,6 +60,11 @@ management:
 
 app:
   timezone: ${APP_TIMEZONE:Europe/Copenhagen}
+  ai:                                   # askRoute: Ollama /api/chat (see ai/OllamaClient)
+    enabled: ${AI_ENABLED:true}         # false -> always the keyword fallback
+    url: ${OLLAMA_URL:http://localhost:11434}
+    model: ${OLLAMA_MODEL:qwen2.5:3b}
+    timeout: ${OLLAMA_TIMEOUT:30s}      # read timeout; the first question after a model load on CPU is slow
   messaging:
     exchange: airport.events
     dead-letter-exchange: airport.events.dlx

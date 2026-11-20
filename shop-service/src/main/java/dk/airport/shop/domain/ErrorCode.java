@@ -6,5 +6,6 @@ public enum ErrorCode {
     VALIDATION_ERROR,
     ROUTE_NOT_FOUND,
     CONFLICT,
+    UPSTREAM_UNAVAILABLE,
     INTERNAL_ERROR
 }

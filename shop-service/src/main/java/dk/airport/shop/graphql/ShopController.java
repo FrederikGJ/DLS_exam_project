@@ -1,5 +1,7 @@
 package dk.airport.shop.graphql;
 
+import dk.airport.shop.ai.AskRouteAnswer;
+import dk.airport.shop.ai.AskRouteService;
 import dk.airport.shop.domain.*;
 import dk.airport.shop.graphql.input.ShopFilter;
 import dk.airport.shop.graphql.input.ShopInput;
@@ -7,6 +9,7 @@ import dk.airport.shop.service.RouteService;
 import dk.airport.shop.service.ShopService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
 import org.springframework.graphql.data.method.annotation.Argument;
 import org.springframework.graphql.data.method.annotation.MutationMapping;
 import org.springframework.graphql.data.method.annotation.QueryMapping;
@@ -22,10 +25,12 @@ public class ShopController {
 
     private final ShopService shopService;
     private final RouteService routeService;
+    private final AskRouteService askRouteService;
 
-    public ShopController(ShopService shopService, RouteService routeService) {
+    public ShopController(ShopService shopService, RouteService routeService, AskRouteService askRouteService) {
         this.shopService = shopService;
         this.routeService = routeService;
+        this.askRouteService = askRouteService;
     }
 
     // ---------------------------------------------------------- queries
@@ -58,6 +63,13 @@ public class ShopController {
     @QueryMapping
     public Route route(@Argument Long fromNodeId, @Argument Long toNodeId, @Argument Boolean accessibleOnly) {
         return routeService.route(fromNodeId, toNodeId, Boolean.TRUE.equals(accessibleOnly));
+    }
+
+    /** Max 300 characters: enough for a question, and keeps the prompt (and the CPU time) small. */
+    @QueryMapping
+    public AskRouteAnswer askRoute(@Argument @NotBlank @Size(max = 300) String question, @Argument Long fromNodeId,
+                                   @Argument Boolean accessibleOnly) {
+        return askRouteService.askRoute(question, fromNodeId, Boolean.TRUE.equals(accessibleOnly));
     }
 
     // ---------------------------------------------------------- nested fields

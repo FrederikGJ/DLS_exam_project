@@ -171,10 +171,51 @@ services:
       DB_URL: jdbc:postgresql://shop-db:5432/shop_db
       DB_USERNAME: shop
       DB_PASSWORD: shop
+      # askRoute (AI). No depends_on on ollama on purpose: without the `ai` profile the call fails fast
+      # and askRoute answers with the keyword fallback.
+      AI_ENABLED: "true"
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_MODEL: qwen2.5:3b
+      OLLAMA_TIMEOUT: 30s
     ports: ["8085:8080"]
     depends_on:
       shop-db: { condition: service_healthy }
       rabbitmq: { condition: service_healthy }
+
+  # ------------------------------------------------------------ AI (optional)
+  # Local LLM for shop-service's askRoute query. Only started with the `ai` profile:
+  #     docker compose --profile ai up --build
+  # shop-service deliberately has NO depends_on on it: without Ollama, askRoute answers with the
+  # keyword fallback (aiUsed=false). CPU only - no GPU needed. The first start pulls the model
+  # (~2 GB for qwen2.5:3b, ~2.5 GB RAM) into the ollama-data volume; later starts reuse it.
+  # Low on RAM? Use qwen2.5:1.5b (~1 GB, ~1.5 GB RAM, weaker answers) in MODEL and OLLAMA_MODEL.
+  ollama:
+    image: ollama/ollama:0.34.0
+    profiles: [ai]
+    restart: unless-stopped
+    environment:
+      MODEL: qwen2.5:3b              # keep in sync with OLLAMA_MODEL on shop-service
+      OLLAMA_KEEP_ALIVE: 30m         # keep the model in RAM between questions
+    # Start the server, pull the model once (no-op when it is already in the volume), keep serving.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ollama serve &
+        pid=$$!
+        trap 'kill $$pid' TERM INT          # sh as PID 1 ignores SIGTERM: forward it, so stop is instant
+        until ollama list >/dev/null 2>&1; do sleep 1; done
+        ollama pull "$$MODEL"
+        wait $$pid
+    ports: ["11434:11434"]
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      # healthy once the model is downloaded (the image has no curl/wget, so use the ollama CLI)
+      test: ["CMD-SHELL", "ollama show \"$$MODEL\" >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 10s
 
   # -------------------------------------------------------------- frontend
   frontend:
@@ -196,3 +237,4 @@ volumes:
   payment-db-data:
   baggage-db-data:
   shop-db-data:
+  ollama-data:

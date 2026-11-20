@@ -16,6 +16,12 @@ data:
   # be allowed explicitly. Keep this in sync with hostPort in k8s/kind-config.yaml.
   CORS_ALLOWED_ORIGINS: "http://airport.local,http://localhost,http://localhost:8090"
   GRAPHQL_PATH: /api/shops/graphql
+  # askRoute (AI). Ollama is opt-in (kubectl apply -k k8s/ai). When it is not deployed the call fails fast
+  # and askRoute answers with the keyword fallback.
+  AI_ENABLED: "true"
+  OLLAMA_URL: http://ollama:11434
+  OLLAMA_MODEL: qwen2.5:3b
+  OLLAMA_TIMEOUT: 30s
 
 ---
 # DEV VALUES ONLY - replace before any shared cluster.

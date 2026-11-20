@@ -183,4 +183,19 @@ export const shopApi = {
         shopsAlongRoute { ${SHOP_FIELDS} }
       }
     }`, { from: fromNodeId, to: toNodeId, acc: accessibleOnly }, 'shop-service').then(d => d.route),
+
+  // AI: "hvor kan jeg købe kaffe på vej til gate B12?" -> shop + destination + route (aiUsed / fallbackReason)
+  askRoute: (question, fromNodeId, accessibleOnly = false) => gql(cfg.SHOP_URL, `
+    query($q: String!, $from: ID!, $acc: Boolean) {
+      askRoute(question: $q, fromNodeId: $from, accessibleOnly: $acc) {
+        aiUsed fallbackReason
+        shop { ${SHOP_FIELDS} }
+        destination { ${NODE_FIELDS} }
+        route {
+          totalDistanceM estimatedMinutes
+          steps { instruction distance node { ${NODE_FIELDS} } }
+          shopsAlongRoute { ${SHOP_FIELDS} }
+        }
+      }
+    }`, { q: question, from: fromNodeId, acc: accessibleOnly }, 'shop-service').then(d => d.askRoute),
 };
