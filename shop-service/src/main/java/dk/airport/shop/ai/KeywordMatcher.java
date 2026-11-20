@@ -75,7 +75,8 @@ public final class KeywordMatcher {
 
     static int score(List<String> words, Shop shop) {
         List<String> name = words(shop.getName().toLowerCase(Locale.ROOT));
-        List<String> description = words(shop.getDescription() == null ? "" : shop.getDescription().toLowerCase(Locale.ROOT));
+        List<String> description =
+                words(shop.getDescription() == null ? "" : shop.getDescription().toLowerCase(Locale.ROOT));
         int score = 0;
         for (String w : words) {
             if (w.length() >= MIN_WORD && name.stream().anyMatch(n -> n.startsWith(w))) {

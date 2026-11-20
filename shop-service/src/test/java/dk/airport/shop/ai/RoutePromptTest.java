@@ -31,7 +31,8 @@ class RoutePromptTest {
     final Shop joeT2 = shop(12, "Joe & The Juice", ShopCategory.FOOD, "T2", "Juice og kaffe.");
 
     RoutePrompt prompt() {
-        return new RoutePrompt(List.of(starbucks, joeT1, joeT2), List.of(securityT2, gateB12, entranceT2, junction, elevator));
+        return new RoutePrompt(List.of(starbucks, joeT1, joeT2),
+                List.of(securityT2, gateB12, entranceT2, junction, elevator));
     }
 
     @Test
@@ -46,7 +47,8 @@ class RoutePromptTest {
 
     @Test
     void noneMeansNoShopAndNoDestination() {
-        RoutePrompt.Choice c = prompt().parse("{\"need\":\"toilet\",\"shop\":\"NONE\",\"destination\":\"NONE\"}", mapper);
+        RoutePrompt.Choice c =
+                prompt().parse("{\"need\":\"toilet\",\"shop\":\"NONE\",\"destination\":\"NONE\"}", mapper);
 
         assertThat(c.shop()).isNull();
         assertThat(c.destination()).isNull();
@@ -106,7 +108,8 @@ class RoutePromptTest {
 
     @Test
     void onlyGatesSecurityAndEntrancesAreDestinations() {
-        assertThat(prompt().destinations()).containsExactly(securityT2, gateB12, entranceT2);   // no junction, no elevator
+        // no junction, no elevator
+        assertThat(prompt().destinations()).containsExactly(securityT2, gateB12, entranceT2);
     }
 
     @Test

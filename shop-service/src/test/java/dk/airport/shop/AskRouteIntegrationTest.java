@@ -149,7 +149,8 @@ class AskRouteIntegrationTest {
         GraphQlTester.Response r = ask("kaffe", nodeId("Security T2"));
 
         r.path("askRoute.aiUsed").entity(Boolean.class).isEqualTo(false);
-        r.path("askRoute.fallbackReason").entity(String.class).satisfies(reason -> assertThat(reason).startsWith("AI utilgængelig"));
+        r.path("askRoute.fallbackReason").entity(String.class)
+                .satisfies(reason -> assertThat(reason).startsWith("AI utilgængelig"));
         r.path("askRoute.shop.name").entity(String.class).isEqualTo("Starbucks");
     }
 
@@ -160,7 +161,8 @@ class AskRouteIntegrationTest {
         GraphQlTester.Response r = ask("I need a pharmacy", nodeId("Security T1"));
 
         r.path("askRoute.aiUsed").entity(Boolean.class).isEqualTo(false);
-        r.path("askRoute.fallbackReason").entity(String.class).satisfies(reason -> assertThat(reason).startsWith("AI utilgængelig"));
+        r.path("askRoute.fallbackReason").entity(String.class)
+                .satisfies(reason -> assertThat(reason).startsWith("AI utilgængelig"));
         r.path("askRoute.shop.name").entity(String.class).isEqualTo("Apoteket");
     }
 
@@ -171,7 +173,8 @@ class AskRouteIntegrationTest {
         GraphQlTester.Response r = ask("kaffe", nodeId("Security T2"));
 
         r.path("askRoute.aiUsed").entity(Boolean.class).isEqualTo(false);
-        r.path("askRoute.fallbackReason").entity(String.class).satisfies(reason -> assertThat(reason).contains("ukendt butik"));
+        r.path("askRoute.fallbackReason").entity(String.class)
+                .satisfies(reason -> assertThat(reason).contains("ukendt butik"));
         r.path("askRoute.shop.name").entity(String.class).isEqualTo("Starbucks");   // the fallback's choice
     }
 
@@ -182,7 +185,8 @@ class AskRouteIntegrationTest {
         GraphQlTester.Response r = ask("kaffe", nodeId("Security T2"));
 
         r.path("askRoute.aiUsed").entity(Boolean.class).isEqualTo(false);
-        r.path("askRoute.fallbackReason").entity(String.class).satisfies(reason -> assertThat(reason).contains("empty answer"));
+        r.path("askRoute.fallbackReason").entity(String.class)
+                .satisfies(reason -> assertThat(reason).contains("empty answer"));
         r.path("askRoute.shop.name").entity(String.class).isEqualTo("Starbucks");
     }
 
@@ -207,14 +211,17 @@ class AskRouteIntegrationTest {
         long from = nodeId("Security T2");
         for (String question : List.of("   ", "x".repeat(301))) {
             graphQlTester.document(ASK).variable("q", question).variable("from", from).execute()
-                    .errors().satisfy(errors -> assertThat(errors.get(0).getExtensions()).containsEntry("code", "VALIDATION_ERROR"));
+                    .errors().satisfy(errors ->
+                            assertThat(errors.get(0).getExtensions()).containsEntry("code", "VALIDATION_ERROR"));
         }
         assertThat(ollama.getAllServeEvents()).isEmpty();
     }
 
     @Test
     void routeViaIsTheTwoLegsJoinedAtTheShop() {
-        long from = nodeId("Security T2"), shop = nodeId("Starbucks T2"), to = nodeId("Gate B12");
+        long from = nodeId("Security T2");
+        long shop = nodeId("Starbucks T2");
+        long to = nodeId("Gate B12");
         Route toShop = routeService.route(from, shop, false);
         Route toGate = routeService.route(shop, to, false);
 
@@ -235,7 +242,8 @@ class AskRouteIntegrationTest {
 
     @Test
     void routeViaWithoutADestinationEndsAtTheShop() {
-        long from = nodeId("Security T2"), shop = nodeId("Starbucks T2");
+        long from = nodeId("Security T2");
+        long shop = nodeId("Starbucks T2");
 
         Route via = routeService.routeVia(from, shop, null, false);
 
@@ -251,7 +259,8 @@ class AskRouteIntegrationTest {
         modelAnswers("{\"need\":\"coffee\",\"shop\":\"Starbucks (T2)\",\"destination\":\"NONE\"}");
 
         graphQlTester.document(ASK).variable("q", "kaffe").variable("from", 999999).execute()
-                .errors().satisfy(errors -> assertThat(errors.get(0).getExtensions()).containsEntry("code", "NOT_FOUND"));
+                .errors().satisfy(errors ->
+                        assertThat(errors.get(0).getExtensions()).containsEntry("code", "NOT_FOUND"));
         assertThat(ollama.getAllServeEvents()).isEmpty();             // checked before the LLM is asked
     }
 
@@ -260,7 +269,8 @@ class AskRouteIntegrationTest {
     }
 
     private GraphQlTester.Response ask(String question, long from, boolean accessibleOnly) {
-        return graphQlTester.document(ASK).variable("q", question).variable("from", from).variable("acc", accessibleOnly).execute();
+        return graphQlTester.document(ASK).variable("q", question).variable("from", from)
+                .variable("acc", accessibleOnly).execute();
     }
 
     private long nodeId(String name) {

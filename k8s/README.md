@@ -14,10 +14,12 @@ Indhold:
 | `rabbitmq/`          | StatefulSet + Service (5672/15672) + Secret                                               |
 | `databases/`         | 5 × PostgreSQL 16 StatefulSet (1 replica, PVC 1Gi) + Service + Secret, én pr. service     |
 | `services/`          | 5 × Deployment (2 replicas) + ClusterIP Service + ConfigMap + Secret, liveness/readiness. 2 replicas er ok for outbox-relayet: en Postgres advisory lock sikrer, at kun én pod ad gangen sender events |
-| `frontend/`          | nginx Deployment + Service + ConfigMap der overskriver `js/config.js` med Ingress-stier    |
-| `tools/`             | pgAdmin (dev/demo-værktøj, ikke en del af systemet): Deployment + Service + ConfigMap + Secret |
+| `frontend/`          | nginx Deployment + Service + ConfigMap der overskriver `js/config.js` med Ingress-stier og Keycloak-URL |
+| `keycloak/`          | Keycloak 26 (login, roller): Deployment + Service + Secret + `realm-airport.json` (bliver til ConfigMap `keycloak-realm` via `configMapGenerator`) – se [Keycloak (login)](#keycloak-login) |
+| `tools/`             | pgAdmin (dev/demo-værktøj uden login, **ikke** med i `kubectl apply -k k8s/`): egen kustomization med Deployment + Service + ConfigMap + Secret + egen Ingress på `/pgadmin` – se [pgAdmin](#pgadmin-devdemo-værktøj) |
 | `ai/`                | **Opt-in**, ikke med i `kubectl apply -k k8s/`: Ollama (lokal LLM til shop-service' `askRoute`) – Deployment (1 replica) + PVC 5Gi + Service, egen `kustomization.yaml` |
-| `ingress.yaml`       | Én Ingress: `/` → frontend, `/api/<x>/graphql` → den enkelte service, `/pgadmin` → pgAdmin |
+| `observability/`     | **Opt-in**, ikke med i `kubectl apply -k k8s/`: Prometheus, Grafana, Loki og Alloy (logs, metrics, alarmer) – egen `kustomization.yaml`, se [docs/architecture.md](../docs/architecture.md#logging-og-monitoring) |
+| `ingress.yaml`       | Én Ingress: `/` → frontend, `/api/<x>/graphql` → den enkelte service, `/auth` → Keycloak  |
 
 Secrets indeholder **dev-værdier** (fx `flight/flight`, Keycloak-admin `admin/admin`, testbrugerne `anna/anna` og
 `ops/ops`). Skift dem før brug i et delt cluster.

@@ -38,11 +38,12 @@ service-READMEs: [flight](flight-service/README.md) · [booking](booking-service
 | Service           | Ansvar                                            | Port (compose) | GraphQL-endpoint                          |
 |-------------------|---------------------------------------------------|----------------|-------------------------------------------|
 | `frontend`        | SPA: afgange, book, betaling, min booking, bagage, butikker | 8080  | –                                          |
-| `flight-service`  | Flyselskaber, fly, afgange, sæder (kilde til sandhed) | 8081       | `http://localhost:8081/api/flights/graphql` |
-| `booking-service` | Passagerer og bookinger, orkestrerer bookingflowet | 8082          | `http://localhost:8082/api/bookings/graphql` |
-| `payment-service` | Simuleret betalingsgateway, refunds               | 8083           | `http://localhost:8083/api/payments/graphql` |
-| `baggage-service` | Bagage bundet til booking, status-tracking        | 8084           | `http://localhost:8084/api/baggage/graphql` |
-| `shop-service`    | Butikker + navigation (Dijkstra) + AI-spørgsmål (Ollama)                | 8085           | `http://localhost:8085/api/shops/graphql` |
+| [`flight-service`](flight-service/README.md)   | Flyselskaber, fly, afgange, sæder (kilde til sandhed) | 8081 | `http://localhost:8081/api/flights/graphql` |
+| [`booking-service`](booking-service/README.md) | Passagerer og bookinger, orkestrerer bookingflowet, CQRS-oversigt (`bookingOverview`) | 8082 | `http://localhost:8082/api/bookings/graphql` |
+| [`payment-service`](payment-service/README.md) | Simuleret betalingsgateway, refunds               | 8083     | `http://localhost:8083/api/payments/graphql` |
+| [`baggage-service`](baggage-service/README.md) | Bagage bundet til booking, status-tracking (GraphQL + REST v1) | 8084 | `http://localhost:8084/api/baggage/graphql` |
+| [`shop-service`](shop-service/README.md)       | Butikker + navigation (Dijkstra) + AI-spørgsmål (Ollama) | 8085 | `http://localhost:8085/api/shops/graphql` |
+| Keycloak          | Login (OpenID Connect), roller `PASSENGER`/`OPERATIONS` | 8180     | Admin console: http://localhost:8180/admin/ (admin/admin) |
 | RabbitMQ          | Events mellem services                            | 5672 / 15672   | Management UI: http://localhost:15672 (airport/airport) |
 | PostgreSQL ×5     | `flight_db`, `booking_db`, `payment_db`, `baggage_db`, `shop_db` | 5433–5437 | – |
 
@@ -222,10 +223,10 @@ cd shop-service    && mvn test
 | Service         | Unit tests                                     | Integrationstest dækker                                                 |
 |-----------------|------------------------------------------------|-------------------------------------------------------------------------|
 | flight-service  | `PricingService`, `SeatGenerator`              | seed, filtre, `booking.confirmed` → sæde optaget (idempotent), aflysning publicerer events, validering, outbox (rollback, relay-retry, publish uden transaktion) |
-| booking-service | bookingreference, tilstandsovergange           | createBooking → `payment.completed` → CONFIRMED, SEAT_TAKEN, `flight.cancelled` |
+| booking-service | bookingreference, tilstandsovergange           | createBooking → `payment.completed` → CONFIRMED, SEAT_TAKEN, `flight.cancelled`, `bookingOverview` (CQRS) opdateres af payment- og baggage-events, også i forkert rækkefølge |
 | payment-service | `PaymentSimulator` (0000, udløbet kort)        | pay → COMPLETED/FAILED events, refund ved `booking.cancelled`, kortnummer gemmes ikke |
-| baggage-service | `BaggageRules` (3 stk., 32 kg), tag-format     | snapshot via events, register/limit, statusopdatering, RETURN_DESK ved aflysning, idempotency key på `registerBaggage` (samme nøgle → én bagage) |
-| shop-service    | `Dijkstra`, `OpeningHours`                     | rute Security T2 → Gate B12, accessibleOnly, søgning, CRUD, idempotens, tombstone ved `deleteShop` (væk fra alle queries og ruter, rækken findes stadig), idempotency key på `createShop` |
+| baggage-service | `BaggageRules` (3 stk., 32 kg), tag-format     | snapshot via events, register/limit, statusopdatering, RETURN_DESK ved aflysning, idempotency key på `registerBaggage` (samme nøgle → én bagage), REST v1 (liste, registrering, status, fejl som problem+json, OpenAPI) |
+| shop-service    | `Dijkstra`, `OpeningHours`, `KeywordMatcher`, `RoutePrompt`, `AskRouteService` | rute Security T2 → Gate B12, accessibleOnly, søgning, CRUD, idempotens, tombstone ved `deleteShop` (væk fra alle queries og ruter, rækken findes stadig), idempotency key på `createShop`, `askRoute` med WireMock som Ollama (AI-svar og alle fallbacks) |
 
 ### Systemtest: services der samarbejder i containere
 

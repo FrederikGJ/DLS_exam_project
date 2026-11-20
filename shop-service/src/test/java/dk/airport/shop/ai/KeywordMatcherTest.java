@@ -35,20 +35,24 @@ class KeywordMatcherTest {
 
     @Test
     void englishQuestionAndCategoryWords() {
-        assertThat(KeywordMatcher.match("I need a pharmacy", SECURITY_T1, SHOPS, DESTINATIONS).shop()).isEqualTo(APOTEKET);
-        assertThat(KeywordMatcher.match("where can I buy books", SECURITY_T2, SHOPS, DESTINATIONS).shop()).isEqualTo(WHSMITH_T2);
+        assertThat(KeywordMatcher.match("I need a pharmacy", SECURITY_T1, SHOPS, DESTINATIONS).shop())
+                .isEqualTo(APOTEKET);
+        assertThat(KeywordMatcher.match("where can I buy books", SECURITY_T2, SHOPS, DESTINATIONS).shop())
+                .isEqualTo(WHSMITH_T2);
     }
 
     @Test
     void shopNameInTheQuestionWins() {
         // "apotek" starts the name "Apoteket"; "starbucks" is the name itself
         assertThat(KeywordMatcher.match("apotek tak", SECURITY_T2, SHOPS, DESTINATIONS).shop()).isEqualTo(APOTEKET);
-        assertThat(KeywordMatcher.match("Starbucks please", SECURITY_T1, SHOPS, DESTINATIONS).shop()).isEqualTo(STARBUCKS_T2);
+        assertThat(KeywordMatcher.match("Starbucks please", SECURITY_T1, SHOPS, DESTINATIONS).shop())
+                .isEqualTo(STARBUCKS_T2);
     }
 
     @Test
     void noMatchGivesNoShopButStillFindsTheDestination() {
-        KeywordMatcher.Match m = KeywordMatcher.match("hvor er toilettet ved gate B12", SECURITY_T2, SHOPS, DESTINATIONS);
+        KeywordMatcher.Match m =
+                KeywordMatcher.match("hvor er toilettet ved gate B12", SECURITY_T2, SHOPS, DESTINATIONS);
         assertThat(m.shop()).isNull();
         assertThat(m.destination()).isEqualTo(GATE_B12);
         assertThat(KeywordMatcher.match("", SECURITY_T2, SHOPS, DESTINATIONS).shop()).isNull();

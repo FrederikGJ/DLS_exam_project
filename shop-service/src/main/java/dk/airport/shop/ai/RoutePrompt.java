@@ -32,9 +32,12 @@ public class RoutePrompt {
     public static final String NONE = "NONE";
 
     /** Node types a passenger can name as a destination (junctions, elevators and shop nodes are left out). */
-    public static final Set<NodeType> DESTINATION_TYPES = EnumSet.of(NodeType.GATE, NodeType.SECURITY, NodeType.ENTRANCE);
+    public static final Set<NodeType> DESTINATION_TYPES =
+            EnumSet.of(NodeType.GATE, NodeType.SECURITY, NodeType.ENTRANCE);
 
-    /** label -> shop, e.g. "Starbucks (T2)". Terminal in the label because the same name can exist in both terminals. */
+    /**
+     * label -> shop, e.g. "Starbucks (T2)". Terminal in the label because the same name can exist in both terminals.
+     */
     private final Map<String, Shop> shops = new LinkedHashMap<>();
     /** label -> node, e.g. "Gate B12". */
     private final Map<String, NavNode> destinations = new LinkedHashMap<>();

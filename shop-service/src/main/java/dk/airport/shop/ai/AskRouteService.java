@@ -64,7 +64,8 @@ public class AskRouteService {
                         prompt.schema()), mapper);
                 if (choice.shop() != null) {
                     log.info("askRoute answered by AI: need='{}', shop='{}', destination='{}'", choice.need(),
-                            choice.shop().getName(), choice.destination() == null ? "-" : choice.destination().getName());
+                            choice.shop().getName(),
+                            choice.destination() == null ? "-" : choice.destination().getName());
                     return answer(from, choice.shop(), choice.destination(), accessibleOnly, true, null);
                 }
                 fallbackReason = "AI fandt ingen passende butik";

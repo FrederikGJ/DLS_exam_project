@@ -211,7 +211,8 @@ class AskRouteServiceTest {
     void schemaIsAClosedListOfNamesPlusNone() {
         RoutePrompt prompt = new RoutePrompt(List.of(starbucks, whsmith), List.of(securityT2, gateB12));
         @SuppressWarnings("unchecked")
-        Map<String, Map<String, Object>> properties = (Map<String, Map<String, Object>>) prompt.schema().get("properties");
+        Map<String, Map<String, Object>> properties =
+                (Map<String, Map<String, Object>>) prompt.schema().get("properties");
 
         assertThat(properties.get("shop").get("enum")).isEqualTo(List.of("Starbucks (T2)", "WHSmith (T2)", "NONE"));
         assertThat(properties.get("destination").get("enum")).isEqualTo(List.of("Security T2", "Gate B12", "NONE"));
