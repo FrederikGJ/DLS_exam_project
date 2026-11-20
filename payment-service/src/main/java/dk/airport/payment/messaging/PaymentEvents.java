@@ -13,7 +13,8 @@ public final class PaymentEvents {
 
     private PaymentEvents() {}
 
-    public record Completed(Long paymentId, String bookingReference, BigDecimal amount, String currency, String cardLast4) {}
+    public record Completed(Long paymentId, String bookingReference, BigDecimal amount, String currency,
+                            String cardLast4) {}
 
     public record Failed(Long paymentId, String bookingReference, BigDecimal amount, String currency, String cardLast4,
                          String failureReason) {}
@@ -25,7 +26,8 @@ public final class PaymentEvents {
     }
 
     public static Failed failed(Payment p) {
-        return new Failed(p.getId(), p.getBookingReference(), p.getAmount(), p.getCurrency(), p.getCardLast4(), p.getFailureReason());
+        return new Failed(p.getId(), p.getBookingReference(), p.getAmount(), p.getCurrency(), p.getCardLast4(),
+                p.getFailureReason());
     }
 
     public static Refunded refunded(Payment p) {

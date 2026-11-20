@@ -9,6 +9,8 @@
 #   8084  baggage-service    -> http://localhost:8084/api/baggage/graphql
 #   8085  shop-service       -> http://localhost:8085/api/shops/graphql
 #   15672 RabbitMQ management UI (airport / airport)
+#   8180  Keycloak (login): admin console http://localhost:8180/admin/ (admin / admin),
+#         realm `airport` with test users anna/anna (PASSENGER) and ops/ops (OPERATIONS)
 #   5433-5437 the five PostgreSQL instances (only for debugging with psql)
 #
 # Credentials below are DEV DEFAULTS ONLY. In Kubernetes they come from Secrets.
@@ -17,11 +19,16 @@ x-service-defaults: &service-defaults
   restart: unless-stopped
   environment: &service-env
     SPRING_PROFILES_ACTIVE: dev
+    LOGGING_STRUCTURED_FORMAT_CONSOLE: logstash
     RABBITMQ_HOST: rabbitmq
     RABBITMQ_PORT: "5672"
     RABBITMQ_USERNAME: airport
     RABBITMQ_PASSWORD: airport
     CORS_ALLOWED_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
+    # JWT validation (see the keycloak service): issuer = the browser-facing URL tokens are issued for,
+    # JWKS = where this container fetches the signing keys. Public read queries need no token.
+    OIDC_ISSUER_URI: http://localhost:8180/realms/airport
+    JWK_SET_URI: http://keycloak:8080/realms/airport/protocol/openid-connect/certs
     JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=75.0
   healthcheck:
     test: ["CMD", "wget", "-qO-", "http://localhost:8080/actuator/health/readiness"]
@@ -57,6 +64,40 @@ services:
       retries: 10
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
+      - ./k8s/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+
+  # Keycloak = the OpenID Connect provider (login, roles). Dev mode with an embedded H2 database and the realm
+  # imported from k8s/keycloak/realm-airport.json on every start (single source for compose and Kubernetes).
+  # KC_HOSTNAME pins every URL Keycloak publishes: a token says iss=http://localhost:8180/realms/airport no matter
+  # whether it was requested from the browser (localhost:8180) or from inside the compose network (keycloak:8080),
+  # and the discovery document always advertises the localhost:8180 endpoints. The services verify exactly that
+  # issuer string (OIDC_ISSUER_URI) and fetch the signing keys over the internal URL (JWK_SET_URI) without using
+  # discovery, so neither side needs to reach the other's address. See k8s/README.md "Keycloak (login)".
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.3
+    command: ["start-dev", "--import-realm"]
+    restart: unless-stopped
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HOSTNAME: http://localhost:8180
+      KC_HEALTH_ENABLED: "true"
+      KC_HTTP_MANAGEMENT_RELATIVE_PATH: /
+    ports: ["8180:8080"]
+    volumes:
+      - ./k8s/keycloak/realm-airport.json:/opt/keycloak/data/import/realm-airport.json:ro
+    healthcheck:
+      # The image has neither curl nor wget; bash's /dev/tcp against the management port (9000) does the job.
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000
+          && printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3
+          && grep -q '"status": "UP"' <&3
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
 
   flight-db:
     <<: *postgres-defaults
@@ -127,6 +168,8 @@ services:
       DB_URL: jdbc:postgresql://booking-db:5432/booking_db
       DB_USERNAME: booking
       DB_PASSWORD: booking
+      OIDC_ISSUER_URI: http://localhost:8180/realms/airport
+      JWK_SET_URI: http://keycloak:8080/realms/airport/protocol/openid-connect/certs
       FLIGHT_SERVICE_URL: http://flight-service:8080/api/flights/graphql
       # ticket 11: unpaid bookings are cancelled after this. Shorten for a demo: PAYMENT_TIMEOUT=1m docker compose up -d
       PAYMENT_TIMEOUT: ${PAYMENT_TIMEOUT:-15m}
@@ -160,6 +203,8 @@ services:
       DB_URL: jdbc:postgresql://baggage-db:5432/baggage_db
       DB_USERNAME: baggage
       DB_PASSWORD: baggage
+      OIDC_ISSUER_URI: http://localhost:8180/realms/airport
+      JWK_SET_URI: http://keycloak:8080/realms/airport/protocol/openid-connect/certs
     ports: ["8084:8080"]
     depends_on:
       baggage-db: { condition: service_healthy }
@@ -174,10 +219,51 @@ services:
       DB_URL: jdbc:postgresql://shop-db:5432/shop_db
       DB_USERNAME: shop
       DB_PASSWORD: shop
+      # askRoute (AI). No depends_on on ollama on purpose: without the `ai` profile the call fails fast
+      # and askRoute answers with the keyword fallback.
+      AI_ENABLED: "true"
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_MODEL: qwen2.5:3b
+      OLLAMA_TIMEOUT: 30s
     ports: ["8085:8080"]
     depends_on:
       shop-db: { condition: service_healthy }
       rabbitmq: { condition: service_healthy }
+
+  # ------------------------------------------------------------ AI (optional)
+  # Local LLM for shop-service's askRoute query. Only started with the `ai` profile:
+  #     docker compose --profile ai up --build
+  # shop-service deliberately has NO depends_on on it: without Ollama, askRoute answers with the
+  # keyword fallback (aiUsed=false). CPU only - no GPU needed. The first start pulls the model
+  # (~2 GB for qwen2.5:3b, ~2.5 GB RAM) into the ollama-data volume; later starts reuse it.
+  # Low on RAM? Use qwen2.5:1.5b (~1 GB, ~1.5 GB RAM, weaker answers) in MODEL and OLLAMA_MODEL.
+  ollama:
+    image: ollama/ollama:0.34.0
+    profiles: [ai]
+    restart: unless-stopped
+    environment:
+      MODEL: qwen2.5:3b              # keep in sync with OLLAMA_MODEL on shop-service
+      OLLAMA_KEEP_ALIVE: 30m         # keep the model in RAM between questions
+    # Start the server, pull the model once (no-op when it is already in the volume), keep serving.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ollama serve &
+        pid=$$!
+        trap 'kill $$pid' TERM INT          # sh as PID 1 ignores SIGTERM: forward it, so stop is instant
+        until ollama list >/dev/null 2>&1; do sleep 1; done
+        ollama pull "$$MODEL"
+        wait $$pid
+    ports: ["11434:11434"]
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      # healthy once the model is downloaded (the image has no curl/wget, so use the ollama CLI)
+      test: ["CMD-SHELL", "ollama show \"$$MODEL\" >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 10s
 
   # -------------------------------------------------------------- frontend
   frontend:
@@ -186,11 +272,62 @@ services:
     restart: unless-stopped
     ports: ["8080:80"]
     depends_on:
-      - flight-service
-      - booking-service
-      - payment-service
-      - baggage-service
-      - shop-service
+      flight-service: { condition: service_started }
+      booking-service: { condition: service_started }
+      payment-service: { condition: service_started }
+      baggage-service: { condition: service_started }
+      shop-service: { condition: service_started }
+      keycloak: { condition: service_healthy }
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles: [observability]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=24h
+    ports: ["127.0.0.1:9090:9090"]
+    volumes:
+      - ./k8s/observability/config/compose-prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./k8s/observability/config/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+
+  loki:
+    image: grafana/loki:3.5.3
+    profiles: [observability]
+    command: [-config.file=/etc/loki/loki.yaml]
+    volumes:
+      - ./k8s/observability/config/loki.yaml:/etc/loki/loki.yaml:ro
+      - loki-data:/loki
+
+  alloy:
+    image: grafana/alloy:v1.10.0
+    profiles: [observability]
+    user: "0:0"
+    command: [run, /etc/alloy/config.alloy, --storage.path=/var/lib/alloy/data, --disable-reporting]
+    environment:
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-dls_exam_project}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./k8s/observability/config/compose.alloy:/etc/alloy/config.alloy:ro
+      - alloy-data:/var/lib/alloy/data
+    depends_on: [loki]
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    profiles: [observability]
+    ports: ["127.0.0.1:3000:3000"]
+    environment:
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/airport-dashboard.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+    volumes:
+      - ./k8s/observability/config/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro
+      - ./k8s/observability/config/grafana-dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml:ro
+      - ./k8s/observability/config/airport-dashboard.json:/var/lib/grafana/dashboards/airport-dashboard.json:ro
+      - grafana-data:/var/lib/grafana
+    depends_on: [prometheus, loki]
 
 volumes:
   rabbitmq-data:
@@ -199,3 +336,8 @@ volumes:
   payment-db-data:
   baggage-db-data:
   shop-db-data:
+  ollama-data:
+  prometheus-data:
+  grafana-data:
+  loki-data:
+  alloy-data:

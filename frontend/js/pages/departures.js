@@ -1,5 +1,6 @@
-// Afgange: list of flights with filters + optional operations panel (status/gate).
+// Afgange: list of flights with filters + operations panel (status/gate) for users with the OPERATIONS role.
 import { flightApi } from '../api.js';
+import { hasRole } from '../auth.js';
 import { esc, formatDateTime, badge, toast, showError, busy, qs } from '../app.js';
 
 const STATUSES = ['SCHEDULED', 'BOARDING', 'DEPARTED', 'DELAYED', 'CANCELLED'];
@@ -11,7 +12,7 @@ export async function render(container, params) {
         <h1>Afgange</h1>
         <p class="lead">Alle afgange fra CPH. Vælg et fly for at booke en plads.</p>
       </div>
-      <label class="check"><input type="checkbox" id="ops-toggle"> Vis operations-panel</label>
+      ${hasRole('OPERATIONS') ? '<label class="check"><input type="checkbox" id="ops-toggle"> Vis operations-panel</label>' : ''}
     </div>
 
     <div class="card">
@@ -59,7 +60,7 @@ export async function render(container, params) {
   }
 
   function draw() {
-    const ops = opsToggle.checked;
+    const ops = !!(opsToggle && opsToggle.checked);   // the toggle only exists for OPERATIONS users
     if (!flights.length) {
       tableHost.innerHTML = '<div class="empty">Ingen afgange matcher filteret.</div>';
       return;
@@ -137,7 +138,7 @@ export async function render(container, params) {
   form.addEventListener('submit', (e) => { e.preventDefault(); load(); });
   container.querySelector('#reset-btn').addEventListener('click', () => { form.reset(); load(); });
   container.querySelector('#refresh-btn').addEventListener('click', load);
-  opsToggle.addEventListener('change', draw);
+  if (opsToggle) opsToggle.addEventListener('change', draw);
 
   await load();
 }

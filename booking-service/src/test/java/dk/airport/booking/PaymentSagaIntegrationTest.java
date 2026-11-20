@@ -9,7 +9,7 @@ import dk.airport.booking.messaging.OutboxEventRepository;
 import dk.airport.booking.messaging.ProcessedEventRepository;
 import dk.airport.booking.repository.BookingRepository;
 import dk.airport.booking.repository.PassengerRepository;
-import dk.airport.booking.service.BookingService;
+import dk.airport.booking.service.BookingCommandService;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
@@ -36,8 +36,8 @@ import static org.awaitility.Awaitility.await;
  * The payment timeout is 3 s here (15 min in the real config) and checked every 500 ms.
  */
 @SpringBootTest(properties = {
-        "app.saga.payment-timeout=3s",
-        "app.saga.payment-timeout-check-interval-ms=500"
+    "app.saga.payment-timeout=3s",
+    "app.saga.payment-timeout-check-interval-ms=500"
 })
 @Testcontainers
 class PaymentSagaIntegrationTest {
@@ -63,7 +63,7 @@ class PaymentSagaIntegrationTest {
 
         await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
                 assertThat(status("SAGA01")).isEqualTo(BookingStatus.CANCELLED));
-        assertThat(cancelledEventsWithReason("SAGA01", BookingService.PAYMENT_TIMEOUT_REASON)).isEqualTo(1);
+        assertThat(cancelledEventsWithReason("SAGA01", BookingCommandService.PAYMENT_TIMEOUT_REASON)).isEqualTo(1);
     }
 
     @Test
@@ -74,7 +74,7 @@ class PaymentSagaIntegrationTest {
 
         Thread.sleep(4500);   // longer than the timeout: the job only touches PENDING_PAYMENT bookings
         assertThat(status("SAGA02")).isEqualTo(BookingStatus.CONFIRMED);
-        assertThat(cancelledEventsWithReason("SAGA02", BookingService.PAYMENT_TIMEOUT_REASON)).isZero();
+        assertThat(cancelledEventsWithReason("SAGA02", BookingCommandService.PAYMENT_TIMEOUT_REASON)).isZero();
     }
 
     @Test
@@ -87,13 +87,14 @@ class PaymentSagaIntegrationTest {
         awaitProcessed(paymentCompleted("SAGA03"));
 
         assertThat(status("SAGA03")).isEqualTo(BookingStatus.CANCELLED);
-        assertThat(cancelledEventsWithReason("SAGA03", BookingService.LATE_PAYMENT_REASON)).isEqualTo(1);
+        assertThat(cancelledEventsWithReason("SAGA03", BookingCommandService.LATE_PAYMENT_REASON)).isEqualTo(1);
     }
 
     // ------------------------------------------------------------ helpers
 
     private void saveBooking(String ref, String seat) {
-        Passenger p = passengers.save(new Passenger("Anna", "Jensen", ref.toLowerCase() + "@example.com", "P1234567", null));
+        Passenger p = passengers.save(
+                new Passenger("Anna", "Jensen", ref.toLowerCase() + "@example.com", "P1234567", null));
         bookings.save(new Booking(ref, p, 201L, "SK1501", OffsetDateTime.now().plusDays(1), "A12", "SCHEDULED",
                 seat, new BigDecimal("899.00"), "DKK"));
     }
@@ -112,7 +113,8 @@ class PaymentSagaIntegrationTest {
                         throw new IllegalStateException(ex);
                     }
                 })
-                .filter(p -> ref.equals(p.path("bookingReference").asText()) && reason.equals(p.path("reason").asText()))
+                .filter(p -> ref.equals(p.path("bookingReference").asText())
+                        && reason.equals(p.path("reason").asText()))
                 .count();
     }
 
@@ -123,7 +125,8 @@ class PaymentSagaIntegrationTest {
                         "amount", 899.00, "currency", "DKK", "cardLast4", "4242")));
         MessageProperties props = new MessageProperties();
         props.setContentType(MessageProperties.CONTENT_TYPE_JSON);
-        rabbitTemplate.send("airport.events", "payment.completed", new Message(objectMapper.writeValueAsBytes(env), props));
+        rabbitTemplate.send("airport.events", "payment.completed",
+                new Message(objectMapper.writeValueAsBytes(env), props));
         return eventId;
     }
 

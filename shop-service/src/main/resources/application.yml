@@ -19,9 +19,13 @@ spring:
     port: ${RABBITMQ_PORT:5672}
     username: ${RABBITMQ_USERNAME:airport}
     password: ${RABBITMQ_PASSWORD:airport}
+    template:
+      # The relay sends the original traceparent from the outbox row.
+      observation-enabled: false
     publisher-confirm-type: simple      # OutboxRelay waits for broker confirms before marking rows as sent
     listener:
       simple:
+        observation-enabled: true
         acknowledge-mode: auto
         default-requeue-rejected: false     # after retries -> reject -> dead-letter queue
         retry:
@@ -35,20 +39,35 @@ spring:
     graphiql:
       enabled: true
       path: /graphiql
-    cors:
-      allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:8080}
-      allowed-methods: GET,POST,OPTIONS
-      allowed-headers: "*"
-      max-age: 3600
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Keycloak (see k8s/README.md "Keycloak (login)"): a token is accepted when its signature matches a key
+          # from JWK_SET_URI (an address the service can reach) and its `iss` claim equals OIDC_ISSUER_URI (the
+          # browser-facing address the token was issued for). Both are set, so Spring never calls OIDC discovery.
+          issuer-uri: ${OIDC_ISSUER_URI:http://localhost:8180/realms/airport}
+          jwk-set-uri: ${JWK_SET_URI:http://localhost:8180/realms/airport/protocol/openid-connect/certs}
 
 server:
   port: ${SERVER_PORT:8080}
 
 management:
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLING_PROBABILITY:1.0}
+    propagation:
+      type: w3c
   endpoints:
     web:
       exposure:
-        include: health,info,metrics   # metrics: outbox.pending (unpublished events)
+        include: health,info,metrics,prometheus   # metrics: outbox.pending (unpublished events)
   endpoint:
     health:
       probes:
@@ -59,7 +78,14 @@ management:
           include: readinessState,db,rabbit
 
 app:
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:8080}   # comma separated, see config/SecurityConfig
   timezone: ${APP_TIMEZONE:Europe/Copenhagen}
+  ai:                                   # askRoute: Ollama /api/chat (see ai/OllamaClient)
+    enabled: ${AI_ENABLED:true}         # false -> always the keyword fallback
+    url: ${OLLAMA_URL:http://localhost:11434}
+    model: ${OLLAMA_MODEL:qwen2.5:3b}
+    timeout: ${OLLAMA_TIMEOUT:30s}      # read timeout; the first question after a model load on CPU is slow
   messaging:
     exchange: airport.events
     dead-letter-exchange: airport.events.dlx

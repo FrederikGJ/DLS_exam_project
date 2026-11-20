@@ -53,7 +53,8 @@ public class Seat {
     /**
      * booking.confirmed: the booking takes the seat. Ignored when
      * <ul>
-     *   <li>the same booking already released the seat (its booking.cancelled arrived first - CANCELLED is terminal), or</li>
+     *   <li>the same booking already released the seat (its booking.cancelled arrived first - CANCELLED is
+     *       terminal), or</li>
      *   <li>the event is older than the last one applied (another booking took the seat later).</li>
      * </ul>
      * @return true if the seat changed

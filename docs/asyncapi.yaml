@@ -1,0 +1,1876 @@
+# AsyncAPI 3.1 - the event contract of the airport system (ticket 16).
+# One RabbitMQ topic exchange, airport.events; routing key = event name. For each event: a channel (routing key),
+# a message (envelope + payload schema + example) and a send operation for its producer; for each consumer queue: a
+# channel (queue, binding pattern, dead-letter arguments, every event the binding routes there) and a receive operation
+# listing the events the service acts on; for each dead-letter queue: a channel without operations (no consumer).
+# Prose version with the reasoning: docs/events.md. Checked by scripts/check-asyncapi.sh (every event name and queue
+# declared in the code must be a channel address here) and by the AsyncAPI CLI (validate --fail-severity=warn).
+asyncapi: 3.1.0
+id: urn:dk:airport:events
+info:
+  title: Airport events
+  version: 1.0.0
+  description: |-
+    Den asynkrone kontrakt mellem services i lufthavnssystemet: alle events går over én RabbitMQ topic exchange, `airport.events`, med eventnavnet som routing key.
+
+    * **Envelope:** alle beskeder er JSON med `eventId`, `eventType`, `occurredAt`, `producer` og en eventspecifik `payload`. AMQP-egenskaber: `content-type: application/json`, `content-encoding: UTF-8`, `message-id = eventId`, `type = eventType`, `timestamp` og persistent levering.
+    * **Levering:** transactional outbox + publisher confirms hos producenten (at-least-once, rækkefølge pr. producent); idempotente consumers (`processed_event`), 3 forsøg med backoff og derefter dead-letter queue pr. service. Rækkefølge på tværs af producenter garanteres ikke.
+    * **Køer:** én durable kø pr. service og interesse, bundet med `<domæne>.#` (`#` = 0..n ord, fordi fx `flight.status.changed` har tre segmenter). Alle events, der matcher bindingen, lander i køen; servicen registrerer dem, den ikke reagerer på, i `processed_event` og ignorerer dem.
+
+    Læsevenlig udgave med begrundelser: docs/events.md.
+  tags:
+  - name: flight-service
+    description: Fly, sæder og gates (kilde til sandhed).
+  - name: booking-service
+    description: Bookinger og passagerer.
+  - name: payment-service
+    description: Simulerede kortbetalinger og refunderinger.
+  - name: baggage-service
+    description: Bagage bundet til bookinger.
+  - name: shop-service
+    description: Butikker og navigation; publicerer ingen events.
+  externalDocs:
+    description: docs/events.md – eventkontrakten i prosa
+    url: https://github.com/FrederikGJ/DLS_exam_project/blob/main/docs/events.md
+defaultContentType: application/json
+servers:
+  compose:
+    host: localhost:5672
+    protocol: amqp
+    protocolVersion: 0-9-1
+    title: RabbitMQ i docker compose
+    description: '`docker compose up` – management UI på http://localhost:15672 (dev-bruger airport/airport).'
+    security:
+    - $ref: '#/components/securitySchemes/rabbitUser'
+  kubernetes:
+    host: rabbitmq.airport.svc.cluster.local:5672
+    protocol: amqp
+    protocolVersion: 0-9-1
+    title: RabbitMQ i Kubernetes
+    description: StatefulSet `rabbitmq` i namespace `airport` (k8s/rabbitmq); credentials fra Secret `rabbitmq-secret`.
+    security:
+    - $ref: '#/components/securitySchemes/rabbitUser'
+channels:
+  flightCreated:
+    address: flight.created
+    title: flight.created på airport.events
+    description: Routing key `flight.created` på topic exchange `airport.events`. Publiceres af flight-service.
+    messages:
+      FlightCreated:
+        $ref: '#/components/messages/FlightCreated'
+    bindings:
+      amqp:
+        is: routingKey
+        exchange:
+          name: airport.events
+          type: topic
+          durable: true
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
+  flightStatusChanged:
+    address: flight.status.changed
+    title: flight.status.changed på airport.events
+    description: Routing key `flight.status.changed` på topic exchange `airport.events`. Publiceres af flight-service.
+    messages:
+      FlightStatusChanged:
+        $ref: '#/components/messages/FlightStatusChanged'
+    bindings:
+      amqp:
+        is: routingKey
+        exchange:
+          name: airport.events
+          type: topic
+          durable: true
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
+  flightGateChanged:
+    address: flight.gate.changed
+    title: flight.gate.changed på airport.events
+    description: Routing key `flight.gate.changed` på topic exchange `airport.events`. Publiceres af flight-service.
+    messages:
+      FlightGateChanged:
+        $ref: '#/components/messages/FlightGateChanged'
+    bindings:
+      amqp:
+        is: routingKey
+        exchange:
+          name: airport.events
+          type: topic
+          durable: true
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
+  flightCancelled:
+    address: flight.cancelled
+    title: flight.cancelled på airport.events
+    description: Routing key `flight.cancelled` på topic exchange `airport.events`. Publiceres af flight-service.
+    messages:
+      FlightCancelled:
+        $ref: '#/components/messages/FlightCancelled'
+    bindings:
+      amqp:
+        is: routingKey
+        exchange:
+          name: airport.events
+          type: topic
+          durable: true
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
+  bookingCreated:
+    address: booking.created
+    title: booking.created på airport.events
+    description: Routing key `booking.created` på topic exchange `airport.events`. Publiceres af booking-service.
+    messages:
+      BookingCreated:
+        $ref: '#/components/messages/BookingCreated'
+    bindings:
+      amqp:
+        is: routingKey
+        exchange:
+          name: airport.events
+          type: topic
+          durable: true
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
+  bookingConfirmed:
+    address: booking.confirmed
+    title: booking.confirmed på airport.events
+    description: Routing key `booking.confirmed` på topic exchange `airport.events`. Publiceres af booking-service.
+    messages:
+      BookingConfirmed:
+        $ref: '#/components/messages/BookingConfirmed'
+    bindings:
+      amqp:
+        is: routingKey
+        exchange:
+          name: airport.events
+          type: topic
+          durable: true
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
+  bookingCancelled:
+    address: booking.cancelled
+    title: booking.cancelled på airport.events
+    description: Routing key `booking.cancelled` på topic exchange `airport.events`. Publiceres af booking-service.
+    messages:
+      BookingCancelled:
+        $ref: '#/components/messages/BookingCancelled'
+    bindings:
+      amqp:
+        is: routingKey
+        exchange:
+          name: airport.events
+          type: topic
+          durable: true
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
+  bookingCheckedIn:
+    address: booking.checkedin
+    title: booking.checkedin på airport.events
+    description: Routing key `booking.checkedin` på topic exchange `airport.events`. Publiceres af booking-service.
+    messages:
+      BookingCheckedIn:
+        $ref: '#/components/messages/BookingCheckedIn'
+    bindings:
+      amqp:
+        is: routingKey
+        exchange:
+          name: airport.events
+          type: topic
+          durable: true
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
+  paymentCompleted:
+    address: payment.completed
+    title: payment.completed på airport.events
+    description: Routing key `payment.completed` på topic exchange `airport.events`. Publiceres af payment-service.
+    messages:
+      PaymentCompleted:
+        $ref: '#/components/messages/PaymentCompleted'
+    bindings:
+      amqp:
+        is: routingKey
+        exchange:
+          name: airport.events
+          type: topic
+          durable: true
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
+  paymentFailed:
+    address: payment.failed
+    title: payment.failed på airport.events
+    description: Routing key `payment.failed` på topic exchange `airport.events`. Publiceres af payment-service.
+    messages:
+      PaymentFailed:
+        $ref: '#/components/messages/PaymentFailed'
+    bindings:
+      amqp:
+        is: routingKey
+        exchange:
+          name: airport.events
+          type: topic
+          durable: true
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
+  paymentRefunded:
+    address: payment.refunded
+    title: payment.refunded på airport.events
+    description: Routing key `payment.refunded` på topic exchange `airport.events`. Publiceres af payment-service.
+    messages:
+      PaymentRefunded:
+        $ref: '#/components/messages/PaymentRefunded'
+    bindings:
+      amqp:
+        is: routingKey
+        exchange:
+          name: airport.events
+          type: topic
+          durable: true
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
+  baggageRegistered:
+    address: baggage.registered
+    title: baggage.registered på airport.events
+    description: Routing key `baggage.registered` på topic exchange `airport.events`. Publiceres af baggage-service.
+    messages:
+      BaggageRegistered:
+        $ref: '#/components/messages/BaggageRegistered'
+    bindings:
+      amqp:
+        is: routingKey
+        exchange:
+          name: airport.events
+          type: topic
+          durable: true
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
+  baggageStatusChanged:
+    address: baggage.status.changed
+    title: baggage.status.changed på airport.events
+    description: Routing key `baggage.status.changed` på topic exchange `airport.events`. Publiceres af baggage-service.
+    messages:
+      BaggageStatusChanged:
+        $ref: '#/components/messages/BaggageStatusChanged'
+    bindings:
+      amqp:
+        is: routingKey
+        exchange:
+          name: airport.events
+          type: topic
+          durable: true
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
+  flightServiceBookingEventsQueue:
+    address: flight-service.booking-events
+    title: Kø flight-service.booking-events
+    description: 'Durable kø ejet af flight-service, bundet til `airport.events` med `booking.#`. Queue-argumenter: `x-dead-letter-exchange:
+      airport.events.dlx`, `x-dead-letter-routing-key: flight-service`. Indeholder alle events, bindingen matcher; receive-operationen
+      viser dem, flight-service reagerer på.'
+    messages:
+      BookingCreated:
+        $ref: '#/components/messages/BookingCreated'
+      BookingConfirmed:
+        $ref: '#/components/messages/BookingConfirmed'
+      BookingCancelled:
+        $ref: '#/components/messages/BookingCancelled'
+      BookingCheckedIn:
+        $ref: '#/components/messages/BookingCheckedIn'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: flight-service.booking-events
+          durable: true
+          exclusive: false
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
+  bookingServicePaymentEventsQueue:
+    address: booking-service.payment-events
+    title: Kø booking-service.payment-events
+    description: 'Durable kø ejet af booking-service, bundet til `airport.events` med `payment.#`. Queue-argumenter: `x-dead-letter-exchange:
+      airport.events.dlx`, `x-dead-letter-routing-key: booking-service`. Indeholder alle events, bindingen matcher; receive-operationen
+      viser dem, booking-service reagerer på.'
+    messages:
+      PaymentCompleted:
+        $ref: '#/components/messages/PaymentCompleted'
+      PaymentFailed:
+        $ref: '#/components/messages/PaymentFailed'
+      PaymentRefunded:
+        $ref: '#/components/messages/PaymentRefunded'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: booking-service.payment-events
+          durable: true
+          exclusive: false
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
+  bookingServiceBaggageEventsQueue:
+    address: booking-service.baggage-events
+    title: Kø booking-service.baggage-events
+    description: 'Durable kø ejet af booking-service, bundet til `airport.events` med `baggage.#`. Queue-argumenter: `x-dead-letter-exchange:
+      airport.events.dlx`, `x-dead-letter-routing-key: booking-service`. Fodrer kun CQRS-read-modellen `booking_overview`
+      (ticket 7); selve bookingen ændres ikke.'
+    messages:
+      BaggageRegistered:
+        $ref: '#/components/messages/BaggageRegistered'
+      BaggageStatusChanged:
+        $ref: '#/components/messages/BaggageStatusChanged'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: booking-service.baggage-events
+          durable: true
+          exclusive: false
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
+  bookingServiceFlightEventsQueue:
+    address: booking-service.flight-events
+    title: Kø booking-service.flight-events
+    description: 'Durable kø ejet af booking-service, bundet til `airport.events` med `flight.#`. Queue-argumenter: `x-dead-letter-exchange:
+      airport.events.dlx`, `x-dead-letter-routing-key: booking-service`. Indeholder alle events, bindingen matcher; receive-operationen
+      viser dem, booking-service reagerer på.'
+    messages:
+      FlightCreated:
+        $ref: '#/components/messages/FlightCreated'
+      FlightStatusChanged:
+        $ref: '#/components/messages/FlightStatusChanged'
+      FlightGateChanged:
+        $ref: '#/components/messages/FlightGateChanged'
+      FlightCancelled:
+        $ref: '#/components/messages/FlightCancelled'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: booking-service.flight-events
+          durable: true
+          exclusive: false
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
+  paymentServiceBookingEventsQueue:
+    address: payment-service.booking-events
+    title: Kø payment-service.booking-events
+    description: 'Durable kø ejet af payment-service, bundet til `airport.events` med `booking.#`. Queue-argumenter: `x-dead-letter-exchange:
+      airport.events.dlx`, `x-dead-letter-routing-key: payment-service`. Indeholder alle events, bindingen matcher; receive-operationen
+      viser dem, payment-service reagerer på.'
+    messages:
+      BookingCreated:
+        $ref: '#/components/messages/BookingCreated'
+      BookingConfirmed:
+        $ref: '#/components/messages/BookingConfirmed'
+      BookingCancelled:
+        $ref: '#/components/messages/BookingCancelled'
+      BookingCheckedIn:
+        $ref: '#/components/messages/BookingCheckedIn'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: payment-service.booking-events
+          durable: true
+          exclusive: false
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
+  baggageServiceBookingEventsQueue:
+    address: baggage-service.booking-events
+    title: Kø baggage-service.booking-events
+    description: 'Durable kø ejet af baggage-service, bundet til `airport.events` med `booking.#`. Queue-argumenter: `x-dead-letter-exchange:
+      airport.events.dlx`, `x-dead-letter-routing-key: baggage-service`. Indeholder alle events, bindingen matcher; receive-operationen
+      viser dem, baggage-service reagerer på.'
+    messages:
+      BookingCreated:
+        $ref: '#/components/messages/BookingCreated'
+      BookingConfirmed:
+        $ref: '#/components/messages/BookingConfirmed'
+      BookingCancelled:
+        $ref: '#/components/messages/BookingCancelled'
+      BookingCheckedIn:
+        $ref: '#/components/messages/BookingCheckedIn'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: baggage-service.booking-events
+          durable: true
+          exclusive: false
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
+  baggageServiceFlightEventsQueue:
+    address: baggage-service.flight-events
+    title: Kø baggage-service.flight-events
+    description: 'Durable kø ejet af baggage-service, bundet til `airport.events` med `flight.#`. Queue-argumenter: `x-dead-letter-exchange:
+      airport.events.dlx`, `x-dead-letter-routing-key: baggage-service`. Indeholder alle events, bindingen matcher; receive-operationen
+      viser dem, baggage-service reagerer på.'
+    messages:
+      FlightCreated:
+        $ref: '#/components/messages/FlightCreated'
+      FlightStatusChanged:
+        $ref: '#/components/messages/FlightStatusChanged'
+      FlightGateChanged:
+        $ref: '#/components/messages/FlightGateChanged'
+      FlightCancelled:
+        $ref: '#/components/messages/FlightCancelled'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: baggage-service.flight-events
+          durable: true
+          exclusive: false
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
+  shopServiceFlightEventsQueue:
+    address: shop-service.flight-events
+    title: Kø shop-service.flight-events
+    description: 'Durable kø ejet af shop-service, bundet til `airport.events` med `flight.#`. Queue-argumenter: `x-dead-letter-exchange:
+      airport.events.dlx`, `x-dead-letter-routing-key: shop-service`. Indeholder alle events, bindingen matcher; receive-operationen
+      viser dem, shop-service reagerer på.'
+    messages:
+      FlightCreated:
+        $ref: '#/components/messages/FlightCreated'
+      FlightStatusChanged:
+        $ref: '#/components/messages/FlightStatusChanged'
+      FlightGateChanged:
+        $ref: '#/components/messages/FlightGateChanged'
+      FlightCancelled:
+        $ref: '#/components/messages/FlightCancelled'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: shop-service.flight-events
+          durable: true
+          exclusive: false
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
+  flightServiceDlq:
+    address: flight-service.dlq
+    title: Dead-letter queue flight-service.dlq
+    description: 'Beskeder, som flight-service har afvist efter 3 forsøg (også beskeder, der ikke kan læses), flyttet af RabbitMQ
+      via direct exchange `airport.events.dlx` med routing key `flight-service`. Beskeden er uændret og har RabbitMQs `x-death`-header.
+      Ingen consumer: inspiceres og behandles manuelt (fx i management UI).'
+    messages:
+      AnyEvent:
+        $ref: '#/components/messages/DeadLetteredEvent'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: flight-service.dlq
+          durable: true
+          exclusive: false
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
+  bookingServiceDlq:
+    address: booking-service.dlq
+    title: Dead-letter queue booking-service.dlq
+    description: 'Beskeder, som booking-service har afvist efter 3 forsøg (også beskeder, der ikke kan læses), flyttet af
+      RabbitMQ via direct exchange `airport.events.dlx` med routing key `booking-service`. Beskeden er uændret og har RabbitMQs
+      `x-death`-header. Ingen consumer: inspiceres og behandles manuelt (fx i management UI).'
+    messages:
+      AnyEvent:
+        $ref: '#/components/messages/DeadLetteredEvent'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: booking-service.dlq
+          durable: true
+          exclusive: false
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
+  paymentServiceDlq:
+    address: payment-service.dlq
+    title: Dead-letter queue payment-service.dlq
+    description: 'Beskeder, som payment-service har afvist efter 3 forsøg (også beskeder, der ikke kan læses), flyttet af
+      RabbitMQ via direct exchange `airport.events.dlx` med routing key `payment-service`. Beskeden er uændret og har RabbitMQs
+      `x-death`-header. Ingen consumer: inspiceres og behandles manuelt (fx i management UI).'
+    messages:
+      AnyEvent:
+        $ref: '#/components/messages/DeadLetteredEvent'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: payment-service.dlq
+          durable: true
+          exclusive: false
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
+  baggageServiceDlq:
+    address: baggage-service.dlq
+    title: Dead-letter queue baggage-service.dlq
+    description: 'Beskeder, som baggage-service har afvist efter 3 forsøg (også beskeder, der ikke kan læses), flyttet af
+      RabbitMQ via direct exchange `airport.events.dlx` med routing key `baggage-service`. Beskeden er uændret og har RabbitMQs
+      `x-death`-header. Ingen consumer: inspiceres og behandles manuelt (fx i management UI).'
+    messages:
+      AnyEvent:
+        $ref: '#/components/messages/DeadLetteredEvent'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: baggage-service.dlq
+          durable: true
+          exclusive: false
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
+  shopServiceDlq:
+    address: shop-service.dlq
+    title: Dead-letter queue shop-service.dlq
+    description: 'Beskeder, som shop-service har afvist efter 3 forsøg (også beskeder, der ikke kan læses), flyttet af RabbitMQ
+      via direct exchange `airport.events.dlx` med routing key `shop-service`. Beskeden er uændret og har RabbitMQs `x-death`-header.
+      Ingen consumer: inspiceres og behandles manuelt (fx i management UI).'
+    messages:
+      AnyEvent:
+        $ref: '#/components/messages/DeadLetteredEvent'
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: shop-service.dlq
+          durable: true
+          exclusive: false
+          autoDelete: false
+          vhost: /
+        bindingVersion: 0.3.0
+operations:
+  flightServicePublishesFlightCreated:
+    action: send
+    channel:
+      $ref: '#/channels/flightCreated'
+    title: flight-service publicerer flight.created
+    summary: 'Via transactional outbox: skrives i outbox_event i samme transaktion som ændringen og sendes af OutboxRelay
+      med publisher confirms (at-least-once).'
+    messages:
+    - $ref: '#/channels/flightCreated/messages/FlightCreated'
+    tags:
+    - name: flight-service
+    bindings:
+      amqp:
+        deliveryMode: 2
+        mandatory: false
+        timestamp: true
+        bindingVersion: 0.3.0
+  flightServicePublishesFlightStatusChanged:
+    action: send
+    channel:
+      $ref: '#/channels/flightStatusChanged'
+    title: flight-service publicerer flight.status.changed
+    summary: 'Via transactional outbox: skrives i outbox_event i samme transaktion som ændringen og sendes af OutboxRelay
+      med publisher confirms (at-least-once).'
+    messages:
+    - $ref: '#/channels/flightStatusChanged/messages/FlightStatusChanged'
+    tags:
+    - name: flight-service
+    bindings:
+      amqp:
+        deliveryMode: 2
+        mandatory: false
+        timestamp: true
+        bindingVersion: 0.3.0
+  flightServicePublishesFlightGateChanged:
+    action: send
+    channel:
+      $ref: '#/channels/flightGateChanged'
+    title: flight-service publicerer flight.gate.changed
+    summary: 'Via transactional outbox: skrives i outbox_event i samme transaktion som ændringen og sendes af OutboxRelay
+      med publisher confirms (at-least-once).'
+    messages:
+    - $ref: '#/channels/flightGateChanged/messages/FlightGateChanged'
+    tags:
+    - name: flight-service
+    bindings:
+      amqp:
+        deliveryMode: 2
+        mandatory: false
+        timestamp: true
+        bindingVersion: 0.3.0
+  flightServicePublishesFlightCancelled:
+    action: send
+    channel:
+      $ref: '#/channels/flightCancelled'
+    title: flight-service publicerer flight.cancelled
+    summary: 'Via transactional outbox: skrives i outbox_event i samme transaktion som ændringen og sendes af OutboxRelay
+      med publisher confirms (at-least-once).'
+    messages:
+    - $ref: '#/channels/flightCancelled/messages/FlightCancelled'
+    tags:
+    - name: flight-service
+    bindings:
+      amqp:
+        deliveryMode: 2
+        mandatory: false
+        timestamp: true
+        bindingVersion: 0.3.0
+  bookingServicePublishesBookingCreated:
+    action: send
+    channel:
+      $ref: '#/channels/bookingCreated'
+    title: booking-service publicerer booking.created
+    summary: 'Via transactional outbox: skrives i outbox_event i samme transaktion som ændringen og sendes af OutboxRelay
+      med publisher confirms (at-least-once).'
+    messages:
+    - $ref: '#/channels/bookingCreated/messages/BookingCreated'
+    tags:
+    - name: booking-service
+    bindings:
+      amqp:
+        deliveryMode: 2
+        mandatory: false
+        timestamp: true
+        bindingVersion: 0.3.0
+  bookingServicePublishesBookingConfirmed:
+    action: send
+    channel:
+      $ref: '#/channels/bookingConfirmed'
+    title: booking-service publicerer booking.confirmed
+    summary: 'Via transactional outbox: skrives i outbox_event i samme transaktion som ændringen og sendes af OutboxRelay
+      med publisher confirms (at-least-once).'
+    messages:
+    - $ref: '#/channels/bookingConfirmed/messages/BookingConfirmed'
+    tags:
+    - name: booking-service
+    bindings:
+      amqp:
+        deliveryMode: 2
+        mandatory: false
+        timestamp: true
+        bindingVersion: 0.3.0
+  bookingServicePublishesBookingCancelled:
+    action: send
+    channel:
+      $ref: '#/channels/bookingCancelled'
+    title: booking-service publicerer booking.cancelled
+    summary: 'Via transactional outbox: skrives i outbox_event i samme transaktion som ændringen og sendes af OutboxRelay
+      med publisher confirms (at-least-once).'
+    messages:
+    - $ref: '#/channels/bookingCancelled/messages/BookingCancelled'
+    tags:
+    - name: booking-service
+    bindings:
+      amqp:
+        deliveryMode: 2
+        mandatory: false
+        timestamp: true
+        bindingVersion: 0.3.0
+  bookingServicePublishesBookingCheckedIn:
+    action: send
+    channel:
+      $ref: '#/channels/bookingCheckedIn'
+    title: booking-service publicerer booking.checkedin
+    summary: 'Via transactional outbox: skrives i outbox_event i samme transaktion som ændringen og sendes af OutboxRelay
+      med publisher confirms (at-least-once).'
+    messages:
+    - $ref: '#/channels/bookingCheckedIn/messages/BookingCheckedIn'
+    tags:
+    - name: booking-service
+    bindings:
+      amqp:
+        deliveryMode: 2
+        mandatory: false
+        timestamp: true
+        bindingVersion: 0.3.0
+  paymentServicePublishesPaymentCompleted:
+    action: send
+    channel:
+      $ref: '#/channels/paymentCompleted'
+    title: payment-service publicerer payment.completed
+    summary: 'Via transactional outbox: skrives i outbox_event i samme transaktion som ændringen og sendes af OutboxRelay
+      med publisher confirms (at-least-once).'
+    messages:
+    - $ref: '#/channels/paymentCompleted/messages/PaymentCompleted'
+    tags:
+    - name: payment-service
+    bindings:
+      amqp:
+        deliveryMode: 2
+        mandatory: false
+        timestamp: true
+        bindingVersion: 0.3.0
+  paymentServicePublishesPaymentFailed:
+    action: send
+    channel:
+      $ref: '#/channels/paymentFailed'
+    title: payment-service publicerer payment.failed
+    summary: 'Via transactional outbox: skrives i outbox_event i samme transaktion som ændringen og sendes af OutboxRelay
+      med publisher confirms (at-least-once).'
+    messages:
+    - $ref: '#/channels/paymentFailed/messages/PaymentFailed'
+    tags:
+    - name: payment-service
+    bindings:
+      amqp:
+        deliveryMode: 2
+        mandatory: false
+        timestamp: true
+        bindingVersion: 0.3.0
+  paymentServicePublishesPaymentRefunded:
+    action: send
+    channel:
+      $ref: '#/channels/paymentRefunded'
+    title: payment-service publicerer payment.refunded
+    summary: 'Via transactional outbox: skrives i outbox_event i samme transaktion som ændringen og sendes af OutboxRelay
+      med publisher confirms (at-least-once).'
+    messages:
+    - $ref: '#/channels/paymentRefunded/messages/PaymentRefunded'
+    tags:
+    - name: payment-service
+    bindings:
+      amqp:
+        deliveryMode: 2
+        mandatory: false
+        timestamp: true
+        bindingVersion: 0.3.0
+  baggageServicePublishesBaggageRegistered:
+    action: send
+    channel:
+      $ref: '#/channels/baggageRegistered'
+    title: baggage-service publicerer baggage.registered
+    summary: 'Via transactional outbox: skrives i outbox_event i samme transaktion som ændringen og sendes af OutboxRelay
+      med publisher confirms (at-least-once).'
+    messages:
+    - $ref: '#/channels/baggageRegistered/messages/BaggageRegistered'
+    tags:
+    - name: baggage-service
+    bindings:
+      amqp:
+        deliveryMode: 2
+        mandatory: false
+        timestamp: true
+        bindingVersion: 0.3.0
+  baggageServicePublishesBaggageStatusChanged:
+    action: send
+    channel:
+      $ref: '#/channels/baggageStatusChanged'
+    title: baggage-service publicerer baggage.status.changed
+    summary: 'Via transactional outbox: skrives i outbox_event i samme transaktion som ændringen og sendes af OutboxRelay
+      med publisher confirms (at-least-once).'
+    messages:
+    - $ref: '#/channels/baggageStatusChanged/messages/BaggageStatusChanged'
+    tags:
+    - name: baggage-service
+    bindings:
+      amqp:
+        deliveryMode: 2
+        mandatory: false
+        timestamp: true
+        bindingVersion: 0.3.0
+  flightServiceReceivesBookingEvents:
+    action: receive
+    channel:
+      $ref: '#/channels/flightServiceBookingEventsQueue'
+    title: flight-service forbruger flight-service.booking-events
+    summary: booking.confirmed markerer sædet optaget; booking.cancelled frigiver det.
+    description: 'Idempotent: eventId registreres i processed_event i samme transaktion som ændringen, så et duplikat ignoreres.
+      Fejler handleren, prøves beskeden 3 gange (backoff 500 ms, ×2, maks. 3 s) og afvises derefter til flight-service.dlq.'
+    messages:
+    - $ref: '#/channels/flightServiceBookingEventsQueue/messages/BookingConfirmed'
+    - $ref: '#/channels/flightServiceBookingEventsQueue/messages/BookingCancelled'
+    tags:
+    - name: flight-service
+    bindings:
+      amqp:
+        ack: true
+        bindingVersion: 0.3.0
+  bookingServiceReceivesPaymentEvents:
+    action: receive
+    channel:
+      $ref: '#/channels/bookingServicePaymentEventsQueue'
+    title: booking-service forbruger booking-service.payment-events
+    summary: payment.completed bekræfter en PENDING_PAYMENT-booking (→ booking.confirmed); payment.failed aflyser den (→ booking.cancelled
+      med årsagen). Alle tre, også payment.refunded, opdaterer betalingslisten i read-modellen `booking_overview`.
+    description: 'Idempotent: eventId registreres i processed_event i samme transaktion som ændringen, så et duplikat ignoreres.
+      Fejler handleren, prøves beskeden 3 gange (backoff 500 ms, ×2, maks. 3 s) og afvises derefter til booking-service.dlq.'
+    messages:
+    - $ref: '#/channels/bookingServicePaymentEventsQueue/messages/PaymentCompleted'
+    - $ref: '#/channels/bookingServicePaymentEventsQueue/messages/PaymentFailed'
+    - $ref: '#/channels/bookingServicePaymentEventsQueue/messages/PaymentRefunded'
+    tags:
+    - name: booking-service
+    bindings:
+      amqp:
+        ack: true
+        bindingVersion: 0.3.0
+  bookingServiceReceivesBaggageEvents:
+    action: receive
+    channel:
+      $ref: '#/channels/bookingServiceBaggageEventsQueue'
+    title: booking-service forbruger booking-service.baggage-events
+    summary: baggage.registered og baggage.status.changed opdaterer bagagelisten i read-modellen `booking_overview` (CQRS,
+      ticket 7). Ingen events publiceres.
+    description: 'Idempotent: eventId registreres i processed_event i samme transaktion som ændringen, så et duplikat ignoreres.
+      Kommutativ: en ældre observation (occurredAt) overskriver ikke en nyere. Fejler handleren, prøves beskeden 3 gange
+      (backoff 500 ms, ×2, maks. 3 s) og afvises derefter til booking-service.dlq.'
+    messages:
+    - $ref: '#/channels/bookingServiceBaggageEventsQueue/messages/BaggageRegistered'
+    - $ref: '#/channels/bookingServiceBaggageEventsQueue/messages/BaggageStatusChanged'
+    tags:
+    - name: booking-service
+    bindings:
+      amqp:
+        ack: true
+        bindingVersion: 0.3.0
+  bookingServiceReceivesFlightEvents:
+    action: receive
+    channel:
+      $ref: '#/channels/bookingServiceFlightEventsQueue'
+    title: booking-service forbruger booking-service.flight-events
+    summary: flight.status.changed og flight.gate.changed opdaterer flysnapshot (status/gate) på bookingerne; flight.cancelled
+      aflyser alle aktive bookinger på flyet (→ booking.cancelled). flight.created ignoreres.
+    description: 'Idempotent: eventId registreres i processed_event i samme transaktion som ændringen, så et duplikat ignoreres.
+      Fejler handleren, prøves beskeden 3 gange (backoff 500 ms, ×2, maks. 3 s) og afvises derefter til booking-service.dlq.'
+    messages:
+    - $ref: '#/channels/bookingServiceFlightEventsQueue/messages/FlightStatusChanged'
+    - $ref: '#/channels/bookingServiceFlightEventsQueue/messages/FlightGateChanged'
+    - $ref: '#/channels/bookingServiceFlightEventsQueue/messages/FlightCancelled'
+    tags:
+    - name: booking-service
+    bindings:
+      amqp:
+        ack: true
+        bindingVersion: 0.3.0
+  paymentServiceReceivesBookingEvents:
+    action: receive
+    channel:
+      $ref: '#/channels/paymentServiceBookingEventsQueue'
+    title: payment-service forbruger payment-service.booking-events
+    summary: booking.cancelled refunderer alle gennemførte betalinger på bookingen (→ payment.refunded). Øvrige booking-events
+      ignoreres.
+    description: 'Idempotent: eventId registreres i processed_event i samme transaktion som ændringen, så et duplikat ignoreres.
+      Fejler handleren, prøves beskeden 3 gange (backoff 500 ms, ×2, maks. 3 s) og afvises derefter til payment-service.dlq.'
+    messages:
+    - $ref: '#/channels/paymentServiceBookingEventsQueue/messages/BookingCancelled'
+    tags:
+    - name: payment-service
+    bindings:
+      amqp:
+        ack: true
+        bindingVersion: 0.3.0
+  baggageServiceReceivesBookingEvents:
+    action: receive
+    channel:
+      $ref: '#/channels/baggageServiceBookingEventsQueue'
+    title: baggage-service forbruger baggage-service.booking-events
+    summary: Alle fire booking-events opdaterer booking_snapshot, som registrering af bagage valideres mod.
+    description: 'Idempotent: eventId registreres i processed_event i samme transaktion som ændringen, så et duplikat ignoreres.
+      Fejler handleren, prøves beskeden 3 gange (backoff 500 ms, ×2, maks. 3 s) og afvises derefter til baggage-service.dlq.'
+    messages:
+    - $ref: '#/channels/baggageServiceBookingEventsQueue/messages/BookingCreated'
+    - $ref: '#/channels/baggageServiceBookingEventsQueue/messages/BookingConfirmed'
+    - $ref: '#/channels/baggageServiceBookingEventsQueue/messages/BookingCancelled'
+    - $ref: '#/channels/baggageServiceBookingEventsQueue/messages/BookingCheckedIn'
+    tags:
+    - name: baggage-service
+    bindings:
+      amqp:
+        ack: true
+        bindingVersion: 0.3.0
+  baggageServiceReceivesFlightEvents:
+    action: receive
+    channel:
+      $ref: '#/channels/baggageServiceFlightEventsQueue'
+    title: baggage-service forbruger baggage-service.flight-events
+    summary: flight.cancelled sender flyets bagage til RETURN_DESK (→ baggage.status.changed) og sætter booking_snapshot til
+      CANCELLED. Øvrige flight-events ignoreres.
+    description: 'Idempotent: eventId registreres i processed_event i samme transaktion som ændringen, så et duplikat ignoreres.
+      Fejler handleren, prøves beskeden 3 gange (backoff 500 ms, ×2, maks. 3 s) og afvises derefter til baggage-service.dlq.'
+    messages:
+    - $ref: '#/channels/baggageServiceFlightEventsQueue/messages/FlightCancelled'
+    tags:
+    - name: baggage-service
+    bindings:
+      amqp:
+        ack: true
+        bindingVersion: 0.3.0
+  shopServiceReceivesFlightEvents:
+    action: receive
+    channel:
+      $ref: '#/channels/shopServiceFlightEventsQueue'
+    title: shop-service forbruger shop-service.flight-events
+    summary: flight.gate.changed logges (ingen tilstandsændring). Øvrige flight-events ignoreres.
+    description: 'Idempotent: eventId registreres i processed_event i samme transaktion som ændringen, så et duplikat ignoreres.
+      Fejler handleren, prøves beskeden 3 gange (backoff 500 ms, ×2, maks. 3 s) og afvises derefter til shop-service.dlq.'
+    messages:
+    - $ref: '#/channels/shopServiceFlightEventsQueue/messages/FlightGateChanged'
+    tags:
+    - name: shop-service
+    bindings:
+      amqp:
+        ack: true
+        bindingVersion: 0.3.0
+components:
+  schemas:
+    EventEnvelope:
+      type: object
+      description: Fælles envelope for alle events på airport.events (identisk record `EventEnvelope` i hver service). Kun
+        `payload` er eventspecifik.
+      required:
+      - eventId
+      - eventType
+      - occurredAt
+      - producer
+      - payload
+      properties:
+        eventId:
+          type: string
+          format: uuid
+          description: UUID. Dedup-nøgle for consumers (`processed_event`); samme værdi som AMQP-egenskaben message-id.
+        eventType:
+          type: string
+          description: Eventnavnet = routing key, fx `booking.confirmed`.
+        occurredAt:
+          type: string
+          format: date-time
+          description: Hvornår eventet blev skrevet til outboxen (producentens ur, UTC).
+        producer:
+          type: string
+          enum:
+          - flight-service
+          - booking-service
+          - payment-service
+          - baggage-service
+          description: Servicen, der publicerede eventet (`app.messaging.producer`).
+        payload:
+          type: object
+          description: Eventspecifikke data – se det enkelte message.
+    FlightStatus:
+      type: string
+      enum:
+      - SCHEDULED
+      - BOARDING
+      - DEPARTED
+      - DELAYED
+      - CANCELLED
+    BookingStatus:
+      type: string
+      enum:
+      - PENDING_PAYMENT
+      - CONFIRMED
+      - CANCELLED
+      - CHECKED_IN
+    BaggageType:
+      type: string
+      enum:
+      - CHECKED
+      - CABIN
+      - SPECIAL
+    BaggageStatus:
+      type: string
+      enum:
+      - REGISTERED
+      - SECURITY
+      - LOADED
+      - IN_TRANSIT
+      - ARRIVED
+      - LOST
+    Money:
+      type: number
+      minimum: 0
+      description: Beløb med to decimaler (Java BigDecimal).
+    FlightCreatedPayload:
+      type: object
+      description: Record `FlightEvents.Created`.
+      required:
+      - flightId
+      - flightNumber
+      - airlineCode
+      - origin
+      - destination
+      - scheduledDeparture
+      - scheduledArrival
+      - status
+      properties:
+        flightId:
+          type: integer
+        flightNumber:
+          type: string
+          examples:
+          - SK9999
+        airlineCode:
+          type: string
+          description: Flyselskabets IATA-kode.
+          examples:
+          - SK
+        origin:
+          type: string
+          description: IATA-lufthavnskode
+        destination:
+          type: string
+          description: IATA-lufthavnskode
+        scheduledDeparture:
+          type: string
+          format: date-time
+        scheduledArrival:
+          type: string
+          format: date-time
+        gate:
+          type:
+          - string
+          - 'null'
+          description: null, hvis flyet endnu ikke har fået en gate.
+        status:
+          $ref: '#/components/schemas/FlightStatus'
+    FlightStatusChangedPayload:
+      type: object
+      description: Record `FlightEvents.StatusChanged`.
+      required:
+      - flightId
+      - flightNumber
+      - oldStatus
+      - newStatus
+      - scheduledDeparture
+      properties:
+        flightId:
+          type: integer
+        flightNumber:
+          type: string
+        oldStatus:
+          $ref: '#/components/schemas/FlightStatus'
+        newStatus:
+          $ref: '#/components/schemas/FlightStatus'
+        scheduledDeparture:
+          type: string
+          format: date-time
+        gate:
+          type:
+          - string
+          - 'null'
+          description: Flyets gate på tidspunktet – booking-service opdaterer også sit gate-snapshot fra den, hvis den er
+            sat.
+    FlightGateChangedPayload:
+      type: object
+      description: Record `FlightEvents.GateChanged`.
+      required:
+      - flightId
+      - flightNumber
+      - newGate
+      - scheduledDeparture
+      properties:
+        flightId:
+          type: integer
+        flightNumber:
+          type: string
+        oldGate:
+          type:
+          - string
+          - 'null'
+          description: null, hvis flyet ikke havde en gate.
+        newGate:
+          type: string
+          description: Trimmet og med store bogstaver.
+        scheduledDeparture:
+          type: string
+          format: date-time
+    FlightCancelledPayload:
+      type: object
+      description: Record `FlightEvents.Cancelled`.
+      required:
+      - flightId
+      - flightNumber
+      - scheduledDeparture
+      - reason
+      properties:
+        flightId:
+          type: integer
+        flightNumber:
+          type: string
+        scheduledDeparture:
+          type: string
+          format: date-time
+        reason:
+          type: string
+          examples:
+          - Flight cancelled by airline
+    BookingPassenger:
+      type: object
+      description: Record `BookingEvents.PassengerPayload`.
+      required:
+      - firstName
+      - lastName
+      - email
+      properties:
+        firstName:
+          type: string
+        lastName:
+          type: string
+        email:
+          type: string
+          format: email
+          description: Gemt med små bogstaver.
+    BookingPayload:
+      type: object
+      description: Record `BookingEvents.BookingPayload` – fælles payload for booking.created, booking.confirmed, booking.cancelled
+        og booking.checkedin. `status` er bookingens status efter ændringen.
+      required:
+      - bookingId
+      - bookingReference
+      - flightId
+      - flightNumber
+      - departureTime
+      - seatNumber
+      - price
+      - currency
+      - status
+      - passenger
+      properties:
+        bookingId:
+          type: integer
+        bookingReference:
+          type: string
+          pattern: ^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$
+          description: 6 tegn uden 0/O/1/I.
+        flightId:
+          type: integer
+        flightNumber:
+          type: string
+        departureTime:
+          type: string
+          format: date-time
+        seatNumber:
+          type: string
+          pattern: ^[0-9]{1,3}[A-Z]$
+          examples:
+          - 12C
+        price: &id001
+          $ref: '#/components/schemas/Money'
+        currency:
+          type: string
+          examples:
+          - DKK
+        status:
+          $ref: '#/components/schemas/BookingStatus'
+        passenger:
+          $ref: '#/components/schemas/BookingPassenger'
+        reason:
+          type:
+          - string
+          - 'null'
+          description: 'Kun sat på booking.cancelled: `Cancelled by passenger`, `Flight cancelled` eller `Payment failed:
+            <failureReason>`; ellers null.'
+    PaymentCompletedPayload:
+      type: object
+      description: Record `PaymentEvents.Completed`.
+      required:
+      - paymentId
+      - bookingReference
+      - amount
+      - currency
+      - cardLast4
+      properties:
+        paymentId:
+          type: integer
+        bookingReference:
+          type: string
+        amount: *id001
+        currency:
+          type: string
+        cardLast4:
+          type: string
+          pattern: ^[0-9]{4}$
+          description: Kun de sidste fire cifre – kortnummeret gemmes aldrig.
+    PaymentFailedPayload:
+      type: object
+      description: Record `PaymentEvents.Failed`.
+      required:
+      - paymentId
+      - bookingReference
+      - amount
+      - currency
+      - cardLast4
+      - failureReason
+      properties:
+        paymentId:
+          type: integer
+        bookingReference:
+          type: string
+        amount: *id001
+        currency:
+          type: string
+        cardLast4:
+          type: string
+          pattern: ^[0-9]{4}$
+        failureReason:
+          type: string
+          examples:
+          - Insufficient funds
+          - Card expired
+    PaymentRefundedPayload:
+      type: object
+      description: Record `PaymentEvents.Refunded`.
+      required:
+      - paymentId
+      - bookingReference
+      - amount
+      - currency
+      properties:
+        paymentId:
+          type: integer
+        bookingReference:
+          type: string
+        amount: *id001
+        currency:
+          type: string
+    BaggageRegisteredPayload:
+      type: object
+      description: Record `BaggageEvents.Registered`.
+      required:
+      - tagNumber
+      - bookingReference
+      - passengerName
+      - flightNumber
+      - weightKg
+      - type
+      - status
+      properties:
+        tagNumber:
+          type: string
+          pattern: ^BAG-[A-Z0-9]{8}$
+        bookingReference:
+          type: string
+        passengerName:
+          type: string
+        flightNumber:
+          type: string
+        weightKg:
+          type: number
+          exclusiveMinimum: 0
+          maximum: 32
+        type:
+          $ref: '#/components/schemas/BaggageType'
+        status:
+          $ref: '#/components/schemas/BaggageStatus'
+    BaggageStatusChangedPayload:
+      type: object
+      description: Record `BaggageEvents.StatusChanged`.
+      required:
+      - tagNumber
+      - bookingReference
+      - flightNumber
+      - oldStatus
+      - newStatus
+      properties:
+        tagNumber:
+          type: string
+          pattern: ^BAG-[A-Z0-9]{8}$
+        bookingReference:
+          type: string
+        flightNumber:
+          type: string
+        oldStatus:
+          $ref: '#/components/schemas/BaggageStatus'
+        newStatus:
+          $ref: '#/components/schemas/BaggageStatus'
+        location:
+          type:
+          - string
+          - 'null'
+          description: Ny lokation, fx `Belt 4`, eller `RETURN_DESK` ved aflyst fly; uden ny lokation den hidtidige.
+  messages:
+    FlightCreated:
+      name: flight.created
+      title: Fly oprettet
+      summary: Et nyt fly med sæder er oprettet (`createFlight`).
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/EventId'
+      tags:
+      - name: flight-service
+      bindings:
+        amqp:
+          contentEncoding: UTF-8
+          messageType: flight.created
+          bindingVersion: 0.3.0
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            eventType:
+              const: flight.created
+            producer:
+              const: flight-service
+            payload:
+              $ref: '#/components/schemas/FlightCreatedPayload'
+      examples:
+      - name: flightCreated
+        payload:
+          eventId: 3f1c2a8e-8d0e-4f3c-9a6b-1d2e3f4a5b6c
+          eventType: flight.created
+          occurredAt: '2026-09-11T10:15:30.123Z'
+          producer: flight-service
+          payload:
+            flightId: 11
+            flightNumber: SK9999
+            airlineCode: SK
+            origin: CPH
+            destination: AAL
+            scheduledDeparture: '2026-09-14T09:00:00Z'
+            scheduledArrival: '2026-09-14T09:45:00Z'
+            gate: A1
+            status: SCHEDULED
+    FlightStatusChanged:
+      name: flight.status.changed
+      title: Flystatus ændret
+      summary: Status er ændret (`updateFlightStatus`). Ved CANCELLED publiceres også flight.cancelled.
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/EventId'
+      tags:
+      - name: flight-service
+      bindings:
+        amqp:
+          contentEncoding: UTF-8
+          messageType: flight.status.changed
+          bindingVersion: 0.3.0
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            eventType:
+              const: flight.status.changed
+            producer:
+              const: flight-service
+            payload:
+              $ref: '#/components/schemas/FlightStatusChangedPayload'
+      examples:
+      - name: flightStatusChanged
+        payload:
+          eventId: 3f1c2a8e-8d0e-4f3c-9a6b-1d2e3f4a5b6c
+          eventType: flight.status.changed
+          occurredAt: '2026-09-11T10:15:30.123Z'
+          producer: flight-service
+          payload:
+            flightId: 7
+            flightNumber: DY1050
+            oldStatus: SCHEDULED
+            newStatus: DELAYED
+            scheduledDeparture: '2026-09-11T17:00:00Z'
+            gate: B15
+    FlightGateChanged:
+      name: flight.gate.changed
+      title: Gate ændret
+      summary: Gaten er ændret (`updateGate`).
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/EventId'
+      tags:
+      - name: flight-service
+      bindings:
+        amqp:
+          contentEncoding: UTF-8
+          messageType: flight.gate.changed
+          bindingVersion: 0.3.0
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            eventType:
+              const: flight.gate.changed
+            producer:
+              const: flight-service
+            payload:
+              $ref: '#/components/schemas/FlightGateChangedPayload'
+      examples:
+      - name: flightGateChanged
+        payload:
+          eventId: 3f1c2a8e-8d0e-4f3c-9a6b-1d2e3f4a5b6c
+          eventType: flight.gate.changed
+          occurredAt: '2026-09-11T10:15:30.123Z'
+          producer: flight-service
+          payload:
+            flightId: 7
+            flightNumber: DY1050
+            oldGate: B15
+            newGate: B17
+            scheduledDeparture: '2026-09-11T17:00:00Z'
+    FlightCancelled:
+      name: flight.cancelled
+      title: Fly aflyst
+      summary: Flyet er aflyst. Publiceres ud over flight.status.changed, når status sættes til CANCELLED; et aflyst fly kan
+        ikke ændre status igen.
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/EventId'
+      tags:
+      - name: flight-service
+      bindings:
+        amqp:
+          contentEncoding: UTF-8
+          messageType: flight.cancelled
+          bindingVersion: 0.3.0
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            eventType:
+              const: flight.cancelled
+            producer:
+              const: flight-service
+            payload:
+              $ref: '#/components/schemas/FlightCancelledPayload'
+      examples:
+      - name: flightCancelled
+        payload:
+          eventId: 3f1c2a8e-8d0e-4f3c-9a6b-1d2e3f4a5b6c
+          eventType: flight.cancelled
+          occurredAt: '2026-09-11T10:15:30.123Z'
+          producer: flight-service
+          payload:
+            flightId: 7
+            flightNumber: DY1050
+            scheduledDeparture: '2026-09-11T17:00:00Z'
+            reason: Flight cancelled by airline
+    BookingCreated:
+      name: booking.created
+      title: Booking oprettet
+      summary: Et sæde er reserveret (`createBooking`); bookingen afventer betaling (PENDING_PAYMENT).
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/EventId'
+      tags:
+      - name: booking-service
+      bindings:
+        amqp:
+          contentEncoding: UTF-8
+          messageType: booking.created
+          bindingVersion: 0.3.0
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            eventType:
+              const: booking.created
+            producer:
+              const: booking-service
+            payload:
+              allOf:
+              - $ref: '#/components/schemas/BookingPayload'
+              - type: object
+                properties:
+                  status:
+                    const: PENDING_PAYMENT
+      examples:
+      - name: bookingCreated
+        payload:
+          eventId: 3f1c2a8e-8d0e-4f3c-9a6b-1d2e3f4a5b6c
+          eventType: booking.created
+          occurredAt: '2026-09-11T10:15:30.123Z'
+          producer: booking-service
+          payload:
+            bookingId: 1
+            bookingReference: K7Q2ZP
+            flightId: 1
+            flightNumber: SK1501
+            departureTime: '2026-09-11T14:00:00Z'
+            seatNumber: 12C
+            price: 899.0
+            currency: DKK
+            status: PENDING_PAYMENT
+            passenger:
+              firstName: Anna
+              lastName: Jensen
+              email: anna@example.com
+            reason: null
+    BookingConfirmed:
+      name: booking.confirmed
+      title: Booking bekræftet
+      summary: 'Betalingen er modtaget (efter payment.completed): PENDING_PAYMENT → CONFIRMED.'
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/EventId'
+      tags:
+      - name: booking-service
+      bindings:
+        amqp:
+          contentEncoding: UTF-8
+          messageType: booking.confirmed
+          bindingVersion: 0.3.0
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            eventType:
+              const: booking.confirmed
+            producer:
+              const: booking-service
+            payload:
+              allOf:
+              - $ref: '#/components/schemas/BookingPayload'
+              - type: object
+                properties:
+                  status:
+                    const: CONFIRMED
+      examples:
+      - name: bookingConfirmed
+        payload:
+          eventId: 3f1c2a8e-8d0e-4f3c-9a6b-1d2e3f4a5b6c
+          eventType: booking.confirmed
+          occurredAt: '2026-09-11T10:15:30.123Z'
+          producer: booking-service
+          payload:
+            bookingId: 1
+            bookingReference: K7Q2ZP
+            flightId: 1
+            flightNumber: SK1501
+            departureTime: '2026-09-11T14:00:00Z'
+            seatNumber: 12C
+            price: 899.0
+            currency: DKK
+            status: CONFIRMED
+            passenger:
+              firstName: Anna
+              lastName: Jensen
+              email: anna@example.com
+            reason: null
+    BookingCancelled:
+      name: booking.cancelled
+      title: Booking aflyst
+      summary: Bookingen er aflyst af passageren (`cancelBooking`), pga. afvist betaling (payment.failed) eller aflyst fly
+        (flight.cancelled). Frigiver sædet; payment-service refunderer gennemførte betalinger.
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/EventId'
+      tags:
+      - name: booking-service
+      bindings:
+        amqp:
+          contentEncoding: UTF-8
+          messageType: booking.cancelled
+          bindingVersion: 0.3.0
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            eventType:
+              const: booking.cancelled
+            producer:
+              const: booking-service
+            payload:
+              allOf:
+              - $ref: '#/components/schemas/BookingPayload'
+              - type: object
+                properties:
+                  status:
+                    const: CANCELLED
+      examples:
+      - name: bookingCancelled
+        payload:
+          eventId: 3f1c2a8e-8d0e-4f3c-9a6b-1d2e3f4a5b6c
+          eventType: booking.cancelled
+          occurredAt: '2026-09-11T10:15:30.123Z'
+          producer: booking-service
+          payload:
+            bookingId: 1
+            bookingReference: K7Q2ZP
+            flightId: 1
+            flightNumber: SK1501
+            departureTime: '2026-09-11T14:00:00Z'
+            seatNumber: 12C
+            price: 899.0
+            currency: DKK
+            status: CANCELLED
+            passenger:
+              firstName: Anna
+              lastName: Jensen
+              email: anna@example.com
+            reason: Cancelled by passenger
+    BookingCheckedIn:
+      name: booking.checkedin
+      title: Passager checket ind
+      summary: 'Bookingen er checket ind (`checkIn`): CONFIRMED → CHECKED_IN.'
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/EventId'
+      tags:
+      - name: booking-service
+      bindings:
+        amqp:
+          contentEncoding: UTF-8
+          messageType: booking.checkedin
+          bindingVersion: 0.3.0
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            eventType:
+              const: booking.checkedin
+            producer:
+              const: booking-service
+            payload:
+              allOf:
+              - $ref: '#/components/schemas/BookingPayload'
+              - type: object
+                properties:
+                  status:
+                    const: CHECKED_IN
+      examples:
+      - name: bookingCheckedIn
+        payload:
+          eventId: 3f1c2a8e-8d0e-4f3c-9a6b-1d2e3f4a5b6c
+          eventType: booking.checkedin
+          occurredAt: '2026-09-11T10:15:30.123Z'
+          producer: booking-service
+          payload:
+            bookingId: 1
+            bookingReference: K7Q2ZP
+            flightId: 1
+            flightNumber: SK1501
+            departureTime: '2026-09-11T14:00:00Z'
+            seatNumber: 12C
+            price: 899.0
+            currency: DKK
+            status: CHECKED_IN
+            passenger:
+              firstName: Anna
+              lastName: Jensen
+              email: anna@example.com
+            reason: null
+    PaymentCompleted:
+      name: payment.completed
+      title: Betaling gennemført
+      summary: Kortet er godkendt af den simulerede gateway (`pay`).
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/EventId'
+      tags:
+      - name: payment-service
+      bindings:
+        amqp:
+          contentEncoding: UTF-8
+          messageType: payment.completed
+          bindingVersion: 0.3.0
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            eventType:
+              const: payment.completed
+            producer:
+              const: payment-service
+            payload:
+              $ref: '#/components/schemas/PaymentCompletedPayload'
+      examples:
+      - name: paymentCompleted
+        payload:
+          eventId: 3f1c2a8e-8d0e-4f3c-9a6b-1d2e3f4a5b6c
+          eventType: payment.completed
+          occurredAt: '2026-09-11T10:15:30.123Z'
+          producer: payment-service
+          payload:
+            paymentId: 1
+            bookingReference: K7Q2ZP
+            amount: 899.0
+            currency: DKK
+            cardLast4: '4242'
+    PaymentFailed:
+      name: payment.failed
+      title: Betaling afvist
+      summary: 'Kortet er afvist af den simulerede gateway (`pay`): kortnummer der ender på 0000, eller udløbet kort.'
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/EventId'
+      tags:
+      - name: payment-service
+      bindings:
+        amqp:
+          contentEncoding: UTF-8
+          messageType: payment.failed
+          bindingVersion: 0.3.0
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            eventType:
+              const: payment.failed
+            producer:
+              const: payment-service
+            payload:
+              $ref: '#/components/schemas/PaymentFailedPayload'
+      examples:
+      - name: paymentFailed
+        payload:
+          eventId: 3f1c2a8e-8d0e-4f3c-9a6b-1d2e3f4a5b6c
+          eventType: payment.failed
+          occurredAt: '2026-09-11T10:15:30.123Z'
+          producer: payment-service
+          payload:
+            paymentId: 2
+            bookingReference: K7Q2ZP
+            amount: 899.0
+            currency: DKK
+            cardLast4: '0000'
+            failureReason: Insufficient funds
+    PaymentRefunded:
+      name: payment.refunded
+      title: Betaling refunderet
+      summary: 'En gennemført betaling er refunderet: automatisk ved booking.cancelled eller manuelt (`refund`).'
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/EventId'
+      tags:
+      - name: payment-service
+      bindings:
+        amqp:
+          contentEncoding: UTF-8
+          messageType: payment.refunded
+          bindingVersion: 0.3.0
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            eventType:
+              const: payment.refunded
+            producer:
+              const: payment-service
+            payload:
+              $ref: '#/components/schemas/PaymentRefundedPayload'
+      examples:
+      - name: paymentRefunded
+        payload:
+          eventId: 3f1c2a8e-8d0e-4f3c-9a6b-1d2e3f4a5b6c
+          eventType: payment.refunded
+          occurredAt: '2026-09-11T10:15:30.123Z'
+          producer: payment-service
+          payload:
+            paymentId: 1
+            bookingReference: K7Q2ZP
+            amount: 899.0
+            currency: DKK
+    BaggageRegistered:
+      name: baggage.registered
+      title: Bagage registreret
+      summary: Et stykke bagage er registreret (`registerBaggage`) på en booking, der er CONFIRMED eller CHECKED_IN.
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/EventId'
+      tags:
+      - name: baggage-service
+      bindings:
+        amqp:
+          contentEncoding: UTF-8
+          messageType: baggage.registered
+          bindingVersion: 0.3.0
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            eventType:
+              const: baggage.registered
+            producer:
+              const: baggage-service
+            payload:
+              $ref: '#/components/schemas/BaggageRegisteredPayload'
+      examples:
+      - name: baggageRegistered
+        payload:
+          eventId: 3f1c2a8e-8d0e-4f3c-9a6b-1d2e3f4a5b6c
+          eventType: baggage.registered
+          occurredAt: '2026-09-11T10:15:30.123Z'
+          producer: baggage-service
+          payload:
+            tagNumber: BAG-7F3K9Q2M
+            bookingReference: K7Q2ZP
+            passengerName: Anna Jensen
+            flightNumber: SK1501
+            weightKg: 23.0
+            type: CHECKED
+            status: REGISTERED
+    BaggageStatusChanged:
+      name: baggage.status.changed
+      title: Bagagestatus ændret
+      summary: Bagagen har skiftet status og/eller lokation (`updateBaggageStatus`, eller RETURN_DESK ved flight.cancelled).
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/EventId'
+      tags:
+      - name: baggage-service
+      bindings:
+        amqp:
+          contentEncoding: UTF-8
+          messageType: baggage.status.changed
+          bindingVersion: 0.3.0
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            eventType:
+              const: baggage.status.changed
+            producer:
+              const: baggage-service
+            payload:
+              $ref: '#/components/schemas/BaggageStatusChangedPayload'
+      examples:
+      - name: baggageStatusChanged
+        payload:
+          eventId: 3f1c2a8e-8d0e-4f3c-9a6b-1d2e3f4a5b6c
+          eventType: baggage.status.changed
+          occurredAt: '2026-09-11T10:15:30.123Z'
+          producer: baggage-service
+          payload:
+            tagNumber: BAG-7F3K9Q2M
+            bookingReference: K7Q2ZP
+            flightNumber: SK1501
+            oldStatus: REGISTERED
+            newStatus: LOADED
+            location: Belt 4
+    DeadLetteredEvent:
+      name: dead-lettered
+      title: Afvist besked
+      summary: En hvilken som helst besked fra airport.events, som en consumer har afvist – typisk en af de øvrige messages,
+        men den kan også være ulæselig.
+      contentType: application/json
+      headers:
+        type: object
+        properties:
+          x-death:
+            type: array
+            description: 'Sat af RabbitMQ: kø, årsag (`rejected`), antal og tidspunkt.'
+      payload: {}
+  correlationIds:
+    EventId:
+      description: Eventets id; også AMQP message-id og dedup-nøgle.
+      location: $message.payload#/eventId
+  securitySchemes:
+    rabbitUser:
+      type: userPassword
+      description: RabbitMQ-bruger (RABBITMQ_USERNAME/RABBITMQ_PASSWORD).

@@ -10,11 +10,22 @@ type Query {
   navEdges(terminal: String): [NavEdge!]!
   "Shortest route (Dijkstra over nav_edge). accessibleOnly=true skips stairs etc."
   route(fromNodeId: ID!, toNodeId: ID!, accessibleOnly: Boolean = false): Route!
+  """
+  Ask in Danish or English, e.g. "hvor kan jeg købe kaffe på vej til gate B12?". A local LLM (Ollama) picks a shop
+  and a destination from closed lists; Dijkstra computes the route start -> shop -> destination.
+  Falls back to keyword matching when the AI is disabled, unavailable or answers invalidly.
+  """
+  askRoute(question: String!, fromNodeId: ID!, accessibleOnly: Boolean = false): AskRouteAnswer!
 }
 
 type Mutation {
-  createShop(input: ShopInput!): Shop!
+  createShop(
+    input: ShopInput!,
+    "Optional, max 64 characters (e.g. a UUID per form). Repeating the call with the same key returns the shop the first call created instead of a duplicate."
+    idempotencyKey: String
+  ): Shop!
   updateShop(id: ID!, input: ShopInput!): Shop!
+  "Soft delete: the row keeps a tombstone (deleted_at) and the shop disappears from every query"
   deleteShop(id: ID!): Boolean!
 }
 
@@ -67,6 +78,19 @@ type Route {
   estimatedMinutes: Int!
   "Shops located at a node that is part of the route"
   shopsAlongRoute: [Shop!]!
+}
+
+type AskRouteAnswer {
+  "The chosen shop (null when no shop matched the question)"
+  shop: Shop
+  "The destination named in the question (gate, security, entrance), if any"
+  destination: NavNode
+  "Start -> shop -> destination (start -> destination when no shop matched; null when neither)"
+  route: Route
+  "true: the LLM's answer was used. false: the keyword fallback answered"
+  aiUsed: Boolean!
+  "Why the fallback was used (null when aiUsed)"
+  fallbackReason: String
 }
 
 input ShopFilter {

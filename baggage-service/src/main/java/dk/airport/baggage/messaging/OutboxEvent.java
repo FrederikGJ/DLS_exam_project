@@ -48,13 +48,18 @@ public class OutboxEvent {
     @Column(name = "last_error")
     private String lastError;
 
+    @Column(name = "traceparent", length = 55)
+    private String traceparent;
+
     protected OutboxEvent() {}
 
-    public OutboxEvent(String eventId, String eventType, String payload, OffsetDateTime createdAt) {
+    public OutboxEvent(String eventId, String eventType, String payload, OffsetDateTime createdAt,
+                       String traceparent) {
         this.eventId = eventId;
         this.eventType = eventType;
         this.payload = payload;
         this.createdAt = createdAt;
+        this.traceparent = traceparent;
     }
 
     /**
@@ -78,5 +83,6 @@ public class OutboxEvent {
     public OffsetDateTime getCreatedAt() { return createdAt; }
     public OffsetDateTime getPublishedAt() { return publishedAt; }
     public int getAttempts() { return attempts; }
+    public String getTraceparent() { return traceparent; }
     public String getLastError() { return lastError; }
 }

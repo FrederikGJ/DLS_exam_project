@@ -3,6 +3,9 @@
 Alle services kommunikerer asynkront via **én topic exchange** `airport.events`.
 Routing key = eventnavn (fx `booking.confirmed`).
 
+Den maskinlæsbare udgave af kontrakten er [`asyncapi.yaml`](asyncapi.yaml) (AsyncAPI 3.1), som valideres i CI
+med AsyncAPI CLI og `scripts/check-asyncapi.sh`.
+
 ## Envelope
 
 Alle events er JSON med samme envelope. `payload` er event-specifik (se nedenfor).
@@ -28,6 +31,7 @@ Hver service har én durable kø pr. interesse og én DLQ:
 |-----------------|------------------------------------|-----------------|------------------------|
 | flight-service  | `flight-service.booking-events`    | `booking.#`     | `flight-service.dlq`   |
 | booking-service | `booking-service.payment-events`   | `payment.#`     | `booking-service.dlq`  |
+| booking-service | `booking-service.baggage-events`   | `baggage.#`     | `booking-service.dlq`  |
 | booking-service | `booking-service.flight-events`    | `flight.#`      | `booking-service.dlq`  |
 | payment-service | `payment-service.booking-events`   | `booking.#`     | `payment-service.dlq`  |
 | baggage-service | `baggage-service.booking-events`   | `booking.#`     | `baggage-service.dlq`  |
@@ -180,7 +184,7 @@ Lyttere: flight-service (sæde `is_available=false`), baggage-service (opretter/
 
 ### `booking.cancelled`
 Samme payload med `"status": "CANCELLED"` og et ekstra felt `"reason"`, fx `"Flight cancelled"`
-eller `"Cancelled by passenger"` eller `"Payment failed"`.
+eller `"Cancelled by passenger"` eller `"Payment failed: <failureReason>"` (fx `"Payment failed: Insufficient funds"`).
 Lyttere: flight-service (sæde frigives), payment-service (automatisk refund hvis COMPLETED payment findes),
 baggage-service (snapshot → CANCELLED), notification-job (annulleringsmail).
 
@@ -199,7 +203,7 @@ Lyttere: baggage-service (snapshot → CHECKED_IN).
   "amount": 899.00, "currency": "DKK", "cardLast4": "4242"
 }
 ```
-Lyttere: booking-service (booking → CONFIRMED, publicerer `booking.confirmed`).
+Lyttere: booking-service (booking → CONFIRMED, publicerer `booking.confirmed`, opdaterer `booking_overview`).
 
 ### `payment.failed`
 ```json
@@ -209,7 +213,7 @@ Lyttere: booking-service (booking → CONFIRMED, publicerer `booking.confirmed`)
   "failureReason": "Insufficient funds"
 }
 ```
-Lyttere: booking-service (booking → CANCELLED, publicerer `booking.cancelled`).
+Lyttere: booking-service (booking → CANCELLED, publicerer `booking.cancelled`, opdaterer `booking_overview`).
 
 ### `payment.refunded`
 ```json
@@ -218,7 +222,7 @@ Lyttere: booking-service (booking → CANCELLED, publicerer `booking.cancelled`)
   "amount": 899.00, "currency": "DKK"
 }
 ```
-Lyttere: notification-job (refund-mail). Vises også under "Min booking" via `paymentsByBooking`.
+Lyttere: booking-service (opdaterer betalingsstatus i `booking_overview`), notification-job (refund-mail).
 
 ---
 
@@ -233,6 +237,8 @@ Lyttere: notification-job (refund-mail). Vises også under "Min booking" via `pa
 }
 ```
 
+Lyttere: booking-service (tilføjer bagagetag i `booking_overview`).
+
 ### `baggage.status.changed`
 ```json
 {
@@ -240,7 +246,7 @@ Lyttere: notification-job (refund-mail). Vises også under "Min booking" via `pa
   "oldStatus": "REGISTERED", "newStatus": "LOADED", "location": "Belt 4"
 }
 ```
-Lyttere: ingen krævede.
+Lyttere: booking-service (opdaterer bagagelinjens status og lokation i `booking_overview`).
 
 ---
 

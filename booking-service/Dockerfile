@@ -9,7 +9,8 @@ RUN mvn -q -B -DskipTests package && cp target/*.jar /build/app.jar
 
 # ---- runtime stage ---------------------------------------------------------
 FROM eclipse-temurin:21-jre-alpine
-RUN addgroup -S app && adduser -S app -G app
+# apk upgrade: the base image lags behind Alpine's security fixes; Trivy scans the result in CI.
+RUN apk upgrade --no-cache && addgroup -S app && adduser -S app -G app
 WORKDIR /app
 COPY --from=build /build/app.jar app.jar
 USER app

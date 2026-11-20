@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
-# End-to-end smoke test of Flow A-D against a running "docker compose up" stack.
+# End-to-end smoke test of Flow A-D against a running "docker compose up" stack (or kind, see k8s/README.md).
 # Requires: curl, jq. Usage: ./scripts/e2e-smoke.sh
+#
+# Login: mutations and every booking/payment/baggage read need a Keycloak token (ticket 2). The script fetches one
+# for the test users anna/anna (PASSENGER: Flow A + B) and ops/ops (OPERATIONS: Flow C + baggage status) with the
+# password grant, which the public client airport-frontend allows for exactly this purpose. A passenger owns the
+# bookings made with the e-mail of their token, so anna books as anna@example.com. KEYCLOAK_URL is the browser-facing
+# base URL (compose http://localhost:8180, kind http://localhost:8090/auth) - the tokens are validated by the
+# services against that issuer.
+#
+# TRACE_BOOKING=1 runs the successful booking flow with one W3C traceparent and checks in the Docker Compose logs
+# that every service logged it under the same traceId (ticket 14).
 set -euo pipefail
 
 FLIGHT=${FLIGHT_URL:-http://localhost:8081/api/flights/graphql}
@@ -8,10 +18,19 @@ BOOKING=${BOOKING_URL:-http://localhost:8082/api/bookings/graphql}
 PAYMENT=${PAYMENT_URL:-http://localhost:8083/api/payments/graphql}
 BAGGAGE=${BAGGAGE_URL:-http://localhost:8084/api/baggage/graphql}
 SHOP=${SHOP_URL:-http://localhost:8085/api/shops/graphql}
+KEYCLOAK=${KEYCLOAK_URL:-http://localhost:8180}
+REALM=${KEYCLOAK_REALM:-airport}
 
-gql() { # gql <url> <query> [variables-json]
-  local url=$1 query=$2 vars=${3:-'{}'}
-  curl -sS -H 'Content-Type: application/json' "$url" \
+token() { # token <username> <password> -> access token (password grant on the public client airport-frontend)
+  curl -sS -d client_id=airport-frontend -d grant_type=password -d "username=$1" -d "password=$2" \
+       "$KEYCLOAK/realms/$REALM/protocol/openid-connect/token" | jq -r '.access_token // empty'
+}
+gql() { # gql <url> <query> [variables-json] [token] [trace-id]
+  local url=$1 query=$2 vars=${3:-'{}'} tok=${4:-} trace=${5:-}
+  local args=()
+  [[ -n "$tok" ]] && args+=(-H "Authorization: Bearer $tok")
+  [[ -n "$trace" ]] && args+=(-H "traceparent: 00-$trace-$(openssl rand -hex 8)-01")
+  curl -sS -H 'Content-Type: application/json' ${args[@]+"${args[@]}"} "$url" \
        --data "$(jq -cn --arg q "$query" --argjson v "$vars" '{query:$q, variables:$v}')"
 }
 expect() { # expect <description> <actual> <expected>
@@ -27,58 +46,107 @@ wait_for() { # wait_for <description> <cmd producing value> <expected> [seconds]
   echo "  FAIL $desc: expected '$expected' got '$val'"; exit 1
 }
 
-echo "== Flow A: booking og betaling =="
+trace_seen() { # trace_seen <service> <message fragment>
+  local service=$1 fragment=$2
+  if docker compose logs --no-color --no-log-prefix "$service" |
+     jq -Rse --arg id "$TRACE_ID" --arg fragment "$fragment" '
+       any(split("\n")[] | fromjson?; .traceId == $id and (.message // "" | contains($fragment)))
+     ' >/dev/null; then
+    echo "  ok   $service: $fragment"
+  else
+    echo "  FAIL $service: trace $TRACE_ID not found for $fragment"
+    return 1
+  fi
+}
+
+TRACE_ID=""
+if [[ "${TRACE_BOOKING:-0}" == "1" ]]; then
+  TRACE_ID=$(openssl rand -hex 16)
+  echo "== Booking traceId: $TRACE_ID =="
+fi
+
+echo "== Login: tokens fra Keycloak ($KEYCLOAK, realm $REALM) =="
+TOKEN_ANNA=$(token anna anna); TOKEN_OPS=$(token ops ops)
+[[ -n "$TOKEN_ANNA" && -n "$TOKEN_OPS" ]] && echo "  ok   tokens for anna (PASSENGER) og ops (OPERATIONS)" \
+  || { echo "  FAIL kunne ikke hente tokens fra $KEYCLOAK/realms/$REALM"; exit 1; }
+
+echo "== Sikkerhed: uden token / forkert rolle =="
+NOTOKEN=$(gql "$BOOKING" 'mutation{ checkIn(reference:"ZZZZZZ"){ id } }')
+expect "mutation uden token -> code" "$(echo "$NOTOKEN" | jq -r '.errors[0].extensions.code')" "UNAUTHORIZED"
+ANNAOPS=$(gql "$FLIGHT" 'mutation{ updateGate(flightId:1, gate:"A1"){ id } }' '{}' "$TOKEN_ANNA")
+expect "anna (PASSENGER) på OPERATIONS-mutation -> code" "$(echo "$ANNAOPS" | jq -r '.errors[0].extensions.code')" "FORBIDDEN"
+expect "afgange uden token" "$(gql "$FLIGHT" '{ flights { id } }' | jq -r '.data.flights | length > 0')" "true"
+NOREAD=$(gql "$BOOKING" '{ bookingByReference(reference:"ZZZZZZ"){ id } }')
+expect "booking-opslag uden token -> code" "$(echo "$NOREAD" | jq -r '.errors[0].extensions.code')" "UNAUTHORIZED"
+
+echo "== Flow A: booking og betaling (anna) =="
 FLIGHT_ID=$(gql "$FLIGHT" '{ flights(filter:{status:SCHEDULED}) { id flightNumber gate } }' | jq -r '.data.flights[0].id')
 FLIGHT_NO=$(gql "$FLIGHT" '{ flights(filter:{status:SCHEDULED}) { id flightNumber } }' | jq -r '.data.flights[0].flightNumber')
 SEAT=$(gql "$FLIGHT" "query(\$id:ID!){ availableSeats(flightId:\$id){ seatNumber } }" "{\"id\":\"$FLIGHT_ID\"}" | jq -r '.data.availableSeats[-1].seatNumber')
 echo "  flight $FLIGHT_NO (id $FLIGHT_ID), seat $SEAT"
-EMAIL="smoke-$(date +%s)@example.com"
+EMAIL="anna@example.com"   # = the e-mail claim of anna's token (a passenger may only book for themselves)
 CREATE=$(gql "$BOOKING" 'mutation($f:ID!,$s:String!,$p:PassengerInput!){ createBooking(flightId:$f, seatNumber:$s, passenger:$p){ bookingReference status price flightNumber } }' \
-  "{\"f\":\"$FLIGHT_ID\",\"s\":\"$SEAT\",\"p\":{\"firstName\":\"Smoke\",\"lastName\":\"Tester\",\"email\":\"$EMAIL\",\"passportNumber\":\"P1234567\"}}")
+  "{\"f\":\"$FLIGHT_ID\",\"s\":\"$SEAT\",\"p\":{\"firstName\":\"Smoke\",\"lastName\":\"Tester\",\"email\":\"$EMAIL\",\"passportNumber\":\"P1234567\"}}" "$TOKEN_ANNA" "$TRACE_ID")
 REF=$(echo "$CREATE" | jq -r '.data.createBooking.bookingReference')
 PRICE=$(echo "$CREATE" | jq -r '.data.createBooking.price')
 expect "booking.status" "$(echo "$CREATE" | jq -r '.data.createBooking.status')" "PENDING_PAYMENT"
 echo "  reference $REF price $PRICE"
 
 DUP=$(gql "$BOOKING" 'mutation($f:ID!,$s:String!,$p:PassengerInput!){ createBooking(flightId:$f, seatNumber:$s, passenger:$p){ bookingReference } }' \
-  "{\"f\":\"$FLIGHT_ID\",\"s\":\"$SEAT\",\"p\":{\"firstName\":\"Other\",\"lastName\":\"Person\",\"email\":\"other-$EMAIL\",\"passportNumber\":\"P7654321\"}}")
+  "{\"f\":\"$FLIGHT_ID\",\"s\":\"$SEAT\",\"p\":{\"firstName\":\"Other\",\"lastName\":\"Person\",\"email\":\"other@example.com\",\"passportNumber\":\"P7654321\"}}" "$TOKEN_OPS")
 expect "duplicate seat -> code" "$(echo "$DUP" | jq -r '.errors[0].extensions.code')" "SEAT_TAKEN"
 
-PAY=$(gql "$PAYMENT" 'mutation($r:String!,$a:BigDecimal!){ pay(bookingReference:$r, amount:$a, cardNumber:"4242 4242 4242 4242", expiry:"12/30", cvv:"123"){ id status cardLast4 } }' "{\"r\":\"$REF\",\"a\":$PRICE}")
+PAY=$(gql "$PAYMENT" 'mutation($r:String!,$a:BigDecimal!){ pay(bookingReference:$r, amount:$a, cardNumber:"4242 4242 4242 4242", expiry:"12/30", cvv:"123"){ id status cardLast4 } }' "{\"r\":\"$REF\",\"a\":$PRICE}" "$TOKEN_ANNA" "$TRACE_ID")
 expect "payment.status" "$(echo "$PAY" | jq -r '.data.pay.status')" "COMPLETED"
 expect "payment.cardLast4" "$(echo "$PAY" | jq -r '.data.pay.cardLast4')" "4242"
 
-wait_for "booking CONFIRMED" "gql '$BOOKING' 'query(\$r:String!){ bookingByReference(reference:\$r){ status } }' '{\"r\":\"$REF\"}' | jq -r '.data.bookingByReference.status'" "CONFIRMED"
+wait_for "booking CONFIRMED" "gql '$BOOKING' 'query(\$r:String!){ bookingByReference(reference:\$r){ status } }' '{\"r\":\"$REF\"}' '$TOKEN_ANNA' | jq -r '.data.bookingByReference.status'" "CONFIRMED"
 wait_for "seat taken in flight-service" "gql '$FLIGHT' 'query(\$id:ID!,\$s:String!){ flight(id:\$id){ seat(seatNumber:\$s){ isAvailable } } }' '{\"id\":\"$FLIGHT_ID\",\"s\":\"$SEAT\"}' | jq -r '.data.flight.seat.isAvailable'" "false"
-wait_for "baggage snapshot CONFIRMED" "gql '$BAGGAGE' 'query(\$r:String!){ bookingSnapshot(reference:\$r){ status } }' '{\"r\":\"$REF\"}' | jq -r '.data.bookingSnapshot.status'" "CONFIRMED"
+wait_for "baggage snapshot CONFIRMED" "gql '$BAGGAGE' 'query(\$r:String!){ bookingSnapshot(reference:\$r){ status } }' '{\"r\":\"$REF\"}' '$TOKEN_ANNA' | jq -r '.data.bookingSnapshot.status'" "CONFIRMED"
 
-echo "== Flow A (negativ): kort der slutter på 0000 =="
-SEAT2=$(gql "$FLIGHT" "query(\$id:ID!){ availableSeats(flightId:\$id){ seatNumber } }" "{\"id\":\"$FLIGHT_ID\"}" | jq -r '.data.availableSeats[-1].seatNumber')
-REF2=$(gql "$BOOKING" 'mutation($f:ID!,$s:String!,$p:PassengerInput!){ createBooking(flightId:$f, seatNumber:$s, passenger:$p){ bookingReference } }' \
-  "{\"f\":\"$FLIGHT_ID\",\"s\":\"$SEAT2\",\"p\":{\"firstName\":\"Poor\",\"lastName\":\"Payer\",\"email\":\"poor-$EMAIL\",\"passportNumber\":\"P0000001\"}}" | jq -r '.data.createBooking.bookingReference')
-FAILPAY=$(gql "$PAYMENT" 'mutation($r:String!,$a:BigDecimal!){ pay(bookingReference:$r, amount:$a, cardNumber:"4000000000000000", expiry:"12/30", cvv:"123"){ status failureReason } }' "{\"r\":\"$REF2\",\"a\":$PRICE}")
-expect "payment FAILED" "$(echo "$FAILPAY" | jq -r '.data.pay.status')" "FAILED"
-expect "failureReason" "$(echo "$FAILPAY" | jq -r '.data.pay.failureReason')" "Insufficient funds"
-wait_for "booking CANCELLED after failed payment" "gql '$BOOKING' 'query(\$r:String!){ bookingByReference(reference:\$r){ status } }' '{\"r\":\"$REF2\"}' | jq -r '.data.bookingByReference.status'" "CANCELLED"
+if [[ -z "$TRACE_ID" ]]; then
+  echo "== Flow A (negativ): kort der slutter på 0000 =="
+  SEAT2=$(gql "$FLIGHT" "query(\$id:ID!){ availableSeats(flightId:\$id){ seatNumber } }" "{\"id\":\"$FLIGHT_ID\"}" | jq -r '.data.availableSeats[-1].seatNumber')
+  REF2=$(gql "$BOOKING" 'mutation($f:ID!,$s:String!,$p:PassengerInput!){ createBooking(flightId:$f, seatNumber:$s, passenger:$p){ bookingReference } }' \
+    "{\"f\":\"$FLIGHT_ID\",\"s\":\"$SEAT2\",\"p\":{\"firstName\":\"Smoke\",\"lastName\":\"Tester\",\"email\":\"$EMAIL\",\"passportNumber\":\"P1234567\"}}" "$TOKEN_ANNA" | jq -r '.data.createBooking.bookingReference')
+  FAILPAY=$(gql "$PAYMENT" 'mutation($r:String!,$a:BigDecimal!){ pay(bookingReference:$r, amount:$a, cardNumber:"4000000000000000", expiry:"12/30", cvv:"123"){ status failureReason } }' "{\"r\":\"$REF2\",\"a\":$PRICE}" "$TOKEN_ANNA")
+  expect "payment FAILED" "$(echo "$FAILPAY" | jq -r '.data.pay.status')" "FAILED"
+  expect "failureReason" "$(echo "$FAILPAY" | jq -r '.data.pay.failureReason')" "Insufficient funds"
+  wait_for "booking CANCELLED after failed payment" "gql '$BOOKING' 'query(\$r:String!){ bookingByReference(reference:\$r){ status } }' '{\"r\":\"$REF2\"}' '$TOKEN_ANNA' | jq -r '.data.bookingByReference.status'" "CANCELLED"
+fi
 
-echo "== Flow B: bagage =="
-BAG=$(gql "$BAGGAGE" 'mutation($r:String!){ registerBaggage(bookingReference:$r, weightKg:23, type:CHECKED){ tagNumber status lastLocation } }' "{\"r\":\"$REF\"}")
+echo "== Flow B: bagage (anna registrerer, ops opdaterer status) =="
+BAG=$(gql "$BAGGAGE" 'mutation($r:String!){ registerBaggage(bookingReference:$r, weightKg:23, type:CHECKED){ tagNumber status lastLocation } }' "{\"r\":\"$REF\"}" "$TOKEN_ANNA" "$TRACE_ID")
 TAG=$(echo "$BAG" | jq -r '.data.registerBaggage.tagNumber')
 expect "baggage.status" "$(echo "$BAG" | jq -r '.data.registerBaggage.status')" "REGISTERED"
 [[ "$TAG" =~ ^BAG-[A-Z0-9]{8}$ ]] && echo "  ok   tag $TAG" || { echo "  FAIL tag format $TAG"; exit 1; }
-UPD=$(gql "$BAGGAGE" 'mutation($t:String!){ updateBaggageStatus(tagNumber:$t, status:LOADED, location:"Belt 4"){ status lastLocation } }' "{\"t\":\"$TAG\"}")
+ANNAUPD=$(gql "$BAGGAGE" 'mutation($t:String!){ updateBaggageStatus(tagNumber:$t, status:LOADED){ status } }' "{\"t\":\"$TAG\"}" "$TOKEN_ANNA")
+expect "anna må ikke opdatere bagagestatus -> code" "$(echo "$ANNAUPD" | jq -r '.errors[0].extensions.code')" "FORBIDDEN"
+UPD=$(gql "$BAGGAGE" 'mutation($t:String!){ updateBaggageStatus(tagNumber:$t, status:LOADED, location:"Belt 4"){ status lastLocation } }' "{\"t\":\"$TAG\"}" "$TOKEN_OPS")
 expect "baggage LOADED" "$(echo "$UPD" | jq -r '.data.updateBaggageStatus.status')" "LOADED"
 expect "baggage location" "$(echo "$UPD" | jq -r '.data.updateBaggageStatus.lastLocation')" "Belt 4"
-TOOHEAVY=$(gql "$BAGGAGE" 'mutation($r:String!){ registerBaggage(bookingReference:$r, weightKg:33, type:CHECKED){ tagNumber } }' "{\"r\":\"$REF\"}")
+TOOHEAVY=$(gql "$BAGGAGE" 'mutation($r:String!){ registerBaggage(bookingReference:$r, weightKg:33, type:CHECKED){ tagNumber } }' "{\"r\":\"$REF\"}" "$TOKEN_ANNA")
 expect "33 kg -> code" "$(echo "$TOOHEAVY" | jq -r '.errors[0].extensions.code')" "VALIDATION_ERROR"
-expect "baggageByBooking count" "$(gql "$BAGGAGE" 'query($r:String!){ baggageByBooking(reference:$r){ tagNumber } }' "{\"r\":\"$REF\"}" | jq -r '.data.baggageByBooking | length')" "1"
+expect "baggageByBooking count" "$(gql "$BAGGAGE" 'query($r:String!){ baggageByBooking(reference:$r){ tagNumber } }' "{\"r\":\"$REF\"}" "$TOKEN_ANNA" | jq -r '.data.baggageByBooking | length')" "1"
 
-echo "== Flow C: aflysning =="
-CANCEL=$(gql "$FLIGHT" 'mutation($id:ID!){ updateFlightStatus(flightId:$id, status:CANCELLED){ status } }' "{\"id\":\"$FLIGHT_ID\"}")
+if [[ -n "$TRACE_ID" ]]; then
+  echo "== Bekræft fælles traceId $TRACE_ID for $REF =="
+  trace_seen booking-service "Created booking $REF"
+  trace_seen flight-service "Seat $SEAT on flight $FLIGHT_ID is now taken"
+  trace_seen payment-service "for booking $REF COMPLETED"
+  trace_seen booking-service "Booking $REF confirmed after payment"
+  trace_seen baggage-service "Booking snapshot $REF -> CONFIRMED"
+  trace_seen baggage-service "Registered baggage $TAG"
+  echo "BOOKING TRACE OK"
+  exit 0
+fi
+
+echo "== Flow C: aflysning (ops) =="
+CANCEL=$(gql "$FLIGHT" 'mutation($id:ID!){ updateFlightStatus(flightId:$id, status:CANCELLED){ status } }' "{\"id\":\"$FLIGHT_ID\"}" "$TOKEN_OPS")
 expect "flight CANCELLED" "$(echo "$CANCEL" | jq -r '.data.updateFlightStatus.status')" "CANCELLED"
-wait_for "booking CANCELLED" "gql '$BOOKING' 'query(\$r:String!){ bookingByReference(reference:\$r){ status flightStatus } }' '{\"r\":\"$REF\"}' | jq -r '.data.bookingByReference.status'" "CANCELLED"
-wait_for "payment REFUNDED" "gql '$PAYMENT' 'query(\$r:String!){ paymentsByBooking(reference:\$r){ status } }' '{\"r\":\"$REF\"}' | jq -r '.data.paymentsByBooking[0].status'" "REFUNDED"
-wait_for "baggage at RETURN_DESK" "gql '$BAGGAGE' 'query(\$t:String!){ baggage(tagNumber:\$t){ status lastLocation } }' '{\"t\":\"$TAG\"}' | jq -r '.data.baggage.lastLocation'" "RETURN_DESK"
+wait_for "booking CANCELLED" "gql '$BOOKING' 'query(\$r:String!){ bookingByReference(reference:\$r){ status flightStatus } }' '{\"r\":\"$REF\"}' '$TOKEN_ANNA' | jq -r '.data.bookingByReference.status'" "CANCELLED"
+wait_for "payment REFUNDED" "gql '$PAYMENT' 'query(\$r:String!){ paymentsByBooking(reference:\$r){ status } }' '{\"r\":\"$REF\"}' '$TOKEN_ANNA' | jq -r '.data.paymentsByBooking[0].status'" "REFUNDED"
+wait_for "baggage at RETURN_DESK" "gql '$BAGGAGE' 'query(\$t:String!){ baggage(tagNumber:\$t){ status lastLocation } }' '{\"t\":\"$TAG\"}' '$TOKEN_ANNA' | jq -r '.data.baggage.lastLocation'" "RETURN_DESK"
 wait_for "seat released" "gql '$FLIGHT' 'query(\$id:ID!,\$s:String!){ flight(id:\$id){ seat(seatNumber:\$s){ isAvailable } } }' '{\"id\":\"$FLIGHT_ID\",\"s\":\"$SEAT\"}' | jq -r '.data.flight.seat.isAvailable'" "true"
 
 echo "== Flow D: navigation =="

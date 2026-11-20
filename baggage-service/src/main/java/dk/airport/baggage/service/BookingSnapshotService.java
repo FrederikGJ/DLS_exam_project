@@ -24,7 +24,8 @@ public class BookingSnapshotService {
     }
 
     @Transactional
-    public BookingSnapshot upsert(String reference, String passengerName, String flightNumber, Long flightId, String status) {
+    public BookingSnapshot upsert(String reference, String passengerName, String flightNumber, Long flightId,
+                                  String status) {
         return upsert(reference, passengerName, flightNumber, flightId, status, OffsetDateTime.now());
     }
 
@@ -35,9 +36,13 @@ public class BookingSnapshotService {
         String ref = reference.trim().toUpperCase();
         OffsetDateTime at = occurredAt == null ? OffsetDateTime.now() : occurredAt;
         BookingSnapshot snapshot = snapshots.findById(ref)
-                .map(existing -> { existing.update(passengerName, flightNumber, flightId, status, at); return existing; })
+                .map(existing -> {
+                    existing.update(passengerName, flightNumber, flightId, status, at);
+                    return existing;
+                })
                 .orElseGet(() -> new BookingSnapshot(ref, passengerName, flightNumber, flightId, status, at));
-        log.info("Booking snapshot {}: event {} (occurredAt {}) -> status now {}", ref, status, at, snapshot.getStatus());
+        log.info("Booking snapshot {}: event {} (occurredAt {}) -> status now {}",
+                ref, status, at, snapshot.getStatus());
         return snapshots.save(snapshot);
     }
 
@@ -45,7 +50,9 @@ public class BookingSnapshotService {
     public int cancelForFlight(Long flightId, String flightNumber) {
         Set<BookingSnapshot> affected = new LinkedHashSet<>();
         if (flightId != null) affected.addAll(snapshots.findByFlightId(flightId));
-        if (flightNumber != null && !flightNumber.isBlank()) affected.addAll(snapshots.findByFlightNumberIgnoreCase(flightNumber));
+        if (flightNumber != null && !flightNumber.isBlank()) {
+            affected.addAll(snapshots.findByFlightNumberIgnoreCase(flightNumber));
+        }
         affected.forEach(s -> s.setStatus("CANCELLED"));
         return affected.size();
     }

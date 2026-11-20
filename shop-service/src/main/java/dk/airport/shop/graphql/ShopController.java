@@ -1,5 +1,7 @@
 package dk.airport.shop.graphql;
 
+import dk.airport.shop.ai.AskRouteAnswer;
+import dk.airport.shop.ai.AskRouteService;
 import dk.airport.shop.domain.*;
 import dk.airport.shop.graphql.input.ShopFilter;
 import dk.airport.shop.graphql.input.ShopInput;
@@ -10,10 +12,12 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
 import org.springframework.graphql.data.method.annotation.Argument;
 import org.springframework.graphql.data.method.annotation.MutationMapping;
 import org.springframework.graphql.data.method.annotation.QueryMapping;
 import org.springframework.graphql.data.method.annotation.SchemaMapping;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.stereotype.Controller;
 import org.springframework.validation.annotation.Validated;
 
@@ -25,10 +29,12 @@ public class ShopController {
 
     private final ShopService shopService;
     private final RouteService routeService;
+    private final AskRouteService askRouteService;
 
-    public ShopController(ShopService shopService, RouteService routeService) {
+    public ShopController(ShopService shopService, RouteService routeService, AskRouteService askRouteService) {
         this.shopService = shopService;
         this.routeService = routeService;
+        this.askRouteService = askRouteService;
     }
 
     // ---------------------------------------------------------- queries
@@ -65,6 +71,13 @@ public class ShopController {
         return routeService.route(fromNodeId, toNodeId, Boolean.TRUE.equals(accessibleOnly));
     }
 
+    /** Max 300 characters: enough for a question, and keeps the prompt (and the CPU time) small. */
+    @QueryMapping
+    public AskRouteAnswer askRoute(@Argument @NotBlank @Size(max = 300) String question, @Argument Long fromNodeId,
+                                   @Argument Boolean accessibleOnly) {
+        return askRouteService.askRoute(question, fromNodeId, Boolean.TRUE.equals(accessibleOnly));
+    }
+
     // ---------------------------------------------------------- nested fields
 
     @SchemaMapping(typeName = "Shop")
@@ -72,8 +85,8 @@ public class ShopController {
         return shopService.isOpenNow(shop);
     }
 
-    @SchemaMapping(typeName = "NavNode")
-    public List<Shop> shops(NavNode node) {
+    @SchemaMapping(typeName = "NavNode", field = "shops")
+    public List<Shop> shopsAtNode(NavNode node) {
         return shopService.shopsAtNode(node.getId());
     }
 
@@ -90,16 +103,21 @@ public class ShopController {
     // ---------------------------------------------------------- mutations
 
     @MutationMapping
-    public Shop createShop(@Argument @Valid ShopInput input) {
-        return shopService.createShop(input);
+    @PreAuthorize("hasRole('OPERATIONS')")
+    public Shop createShop(@Argument @Valid ShopInput input,
+                           @Argument @Size(max = 64, message = "idempotencyKey must be at most 64 characters")
+                           String idempotencyKey) {
+        return shopService.createShop(input, idempotencyKey);
     }
 
     @MutationMapping
+    @PreAuthorize("hasRole('OPERATIONS')")
     public Shop updateShop(@Argument Long id, @Argument @Valid ShopInput input) {
         return shopService.updateShop(id, input);
     }
 
     @MutationMapping
+    @PreAuthorize("hasRole('OPERATIONS')")
     public boolean deleteShop(@Argument Long id) {
         return shopService.deleteShop(id);
     }

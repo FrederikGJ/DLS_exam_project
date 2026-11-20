@@ -37,25 +37,27 @@ public class FlightClient {
 
     private final RestClient restClient;
 
-    public FlightClient(@Value("${app.flight-service.url}") String url,
+    public FlightClient(RestClient.Builder builder, @Value("${app.flight-service.url}") String url,
                         @Value("${app.flight-service.timeout:5s}") Duration timeout) {
         JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory();
         requestFactory.setReadTimeout(timeout);
-        this.restClient = RestClient.builder()
+        this.restClient = builder
                 .baseUrl(url)
                 .requestFactory(requestFactory)
                 .build();
     }
 
     /**
-     * Fetches flight + seat info. Throws ApiException with NOT_FOUND / INVALID_STATE / SEAT_TAKEN / UPSTREAM_UNAVAILABLE.
+     * Fetches flight + seat info.
+     * Throws ApiException with NOT_FOUND / INVALID_STATE / SEAT_TAKEN / UPSTREAM_UNAVAILABLE.
      */
     public FlightSeatInfo fetchFlightSeat(Long flightId, String seatNumber) {
         JsonNode response;
         try {
             response = restClient.post()
                     .contentType(MediaType.APPLICATION_JSON)
-                    .body(Map.of("query", QUERY, "variables", Map.of("id", String.valueOf(flightId), "seat", seatNumber)))
+                    .body(Map.of("query", QUERY,
+                            "variables", Map.of("id", String.valueOf(flightId), "seat", seatNumber)))
                     .retrieve()
                     .body(JsonNode.class);
         } catch (RestClientException e) {

@@ -16,6 +16,7 @@ import org.springframework.graphql.data.method.annotation.Argument;
 import org.springframework.graphql.data.method.annotation.MutationMapping;
 import org.springframework.graphql.data.method.annotation.QueryMapping;
 import org.springframework.graphql.data.method.annotation.SchemaMapping;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.stereotype.Controller;
 import org.springframework.validation.annotation.Validated;
 
@@ -77,8 +78,8 @@ public class FlightController {
         return flightService.aircraftByAirline(airline.getId());
     }
 
-    @SchemaMapping(typeName = "Airline")
-    public List<Flight> flights(Airline airline) {
+    @SchemaMapping(typeName = "Airline", field = "flights")
+    public List<Flight> flightsOfAirline(Airline airline) {
         return flightService.flightsByAirline(airline.getId());
     }
 
@@ -107,29 +108,34 @@ public class FlightController {
         return seat.isAvailable();
     }
 
-    // ---------------------------------------------------------- mutations
+    // ---------------------------------------------------------- mutations (OPERATIONS only)
 
     @MutationMapping
+    @PreAuthorize("hasRole('OPERATIONS')")
     public Airline createAirline(@Argument @Valid CreateAirlineInput input) {
         return flightService.createAirline(input);
     }
 
     @MutationMapping
+    @PreAuthorize("hasRole('OPERATIONS')")
     public Aircraft createAircraft(@Argument @Valid CreateAircraftInput input) {
         return flightService.createAircraft(input);
     }
 
     @MutationMapping
+    @PreAuthorize("hasRole('OPERATIONS')")
     public Flight createFlight(@Argument @Valid CreateFlightInput input) {
         return flightService.createFlight(input);
     }
 
     @MutationMapping
+    @PreAuthorize("hasRole('OPERATIONS')")
     public Flight updateFlightStatus(@Argument Long flightId, @Argument FlightStatus status) {
         return flightService.updateStatus(flightId, status);
     }
 
     @MutationMapping
+    @PreAuthorize("hasRole('OPERATIONS')")
     public Flight updateGate(@Argument Long flightId, @Argument @NotBlank String gate) {
         return flightService.updateGate(flightId, gate);
     }

@@ -66,7 +66,8 @@ class CommutativeSnapshotHandlerIntegrationTest {
 
     private String publish(String type, OffsetDateTime occurredAt, String ref, String status) throws Exception {
         String eventId = UUID.randomUUID().toString();
-        EventEnvelope env = new EventEnvelope(eventId, type, occurredAt, "booking-service", objectMapper.valueToTree(Map.of(
+        EventEnvelope env = new EventEnvelope(eventId, type, occurredAt, "booking-service",
+                objectMapper.valueToTree(Map.of(
                 "bookingId", 1, "bookingReference", ref, "flightId", 1, "flightNumber", "SK1501",
                 "seatNumber", "12C", "status", status,
                 "passenger", Map.of("firstName", "Anna", "lastName", "Jensen", "email", "anna@example.com"))));

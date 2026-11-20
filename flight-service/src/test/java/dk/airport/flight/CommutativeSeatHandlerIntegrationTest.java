@@ -82,7 +82,8 @@ class CommutativeSeatHandlerIntegrationTest {
         return seatRepository.findByFlightIdAndSeatNumberIgnoreCase(flightId, seatNumber).orElseThrow();
     }
 
-    private String publish(String type, OffsetDateTime occurredAt, Long flightId, String seat, String ref) throws Exception {
+    private String publish(String type, OffsetDateTime occurredAt, Long flightId, String seat, String ref)
+            throws Exception {
         String eventId = UUID.randomUUID().toString();
         EventEnvelope env = new EventEnvelope(eventId, type, occurredAt, "booking-service", objectMapper.valueToTree(
                 Map.of("bookingReference", ref, "flightId", flightId, "seatNumber", seat)));

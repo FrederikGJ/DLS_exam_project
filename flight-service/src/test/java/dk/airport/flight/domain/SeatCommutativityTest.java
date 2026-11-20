@@ -20,8 +20,13 @@ class SeatCommutativityTest {
 
     record Event(String name, Consumer<Seat> apply) {}
 
-    static Event confirmed(String ref, OffsetDateTime at) { return new Event(ref + " confirmed", s -> s.takeFor(ref, at)); }
-    static Event cancelled(String ref, OffsetDateTime at) { return new Event(ref + " cancelled", s -> s.releaseFor(ref, at)); }
+    static Event confirmed(String ref, OffsetDateTime at) {
+        return new Event(ref + " confirmed", s -> s.takeFor(ref, at));
+    }
+
+    static Event cancelled(String ref, OffsetDateTime at) {
+        return new Event(ref + " cancelled", s -> s.releaseFor(ref, at));
+    }
 
     @Test
     void confirmedThenCancelledInAnyOrderFreesTheSeat() {

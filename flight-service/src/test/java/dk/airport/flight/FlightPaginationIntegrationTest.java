@@ -55,7 +55,8 @@ class FlightPaginationIntegrationTest {
 
     @Test
     void limitOutsideOneToHundredIsAValidationError() {
-        for (String query : List.of("{ flights(limit: 101) { id } }", "{ flights(limit: 0) { id } }", "{ flights(offset: -1) { id } }")) {
+        for (String query : List.of("{ flights(limit: 101) { id } }", "{ flights(limit: 0) { id } }",
+                "{ flights(offset: -1) { id } }")) {
             graphQlTester.document(query).execute().errors().satisfy(errors -> {
                 assertThat(errors).hasSize(1);
                 assertThat(errors.get(0).getExtensions()).containsEntry("code", "VALIDATION_ERROR");

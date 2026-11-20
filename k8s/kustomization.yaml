@@ -20,5 +20,22 @@ resources:
   - services/shop-service.yaml
   - services/autoscaling.yaml   # HPA: 2-5 pods per backend service at 70 % CPU (needs metrics-server, see README)
   - frontend/frontend.yaml
-  - tools/pgadmin.yaml   # dev/demo: pgAdmin at /pgadmin - remove this line to deploy without it
+  - keycloak/keycloak.yaml
   - ingress.yaml
+  # pgAdmin (dev/demo, no login of its own) is deliberately NOT here - opt in with `kubectl apply -k k8s/tools/`
+
+# Both generated ConfigMaps use the same files docker-compose.yml mounts:
+#   rabbitmq-plugins - enables rabbitmq_prometheus (scraped by k8s/observability)
+#   keycloak-realm   - the Keycloak realm (roles, client, test users)
+configMapGenerator:
+  - name: rabbitmq-plugins
+    files:
+      - rabbitmq/enabled_plugins
+  - name: keycloak-realm
+    files:
+      - keycloak/realm-airport.json
+    options:
+      disableNameSuffixHash: true
+      labels:
+        app.kubernetes.io/name: keycloak
+        app.kubernetes.io/part-of: airport

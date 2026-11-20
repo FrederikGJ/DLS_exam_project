@@ -14,6 +14,7 @@ import dk.airport.flight.repository.OffsetLimit;
 import dk.airport.flight.repository.SeatRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.data.domain.Limit;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -102,12 +103,14 @@ public class FlightService {
 
     public Optional<Flight> flightByNumber(String flightNumber, LocalDate date) {
         OffsetDateTime from = date.atStartOfDay().atOffset(ZoneOffset.UTC);
-        return flights.findFirstByFlightNumberIgnoreCaseAndScheduledDepartureGreaterThanEqualAndScheduledDepartureLessThanOrderByScheduledDeparture(
-                flightNumber.trim(), from, from.plusDays(1));
+        return flights.findByFlightNumberDepartingBetween(flightNumber.trim(), from, from.plusDays(1), Limit.of(1))
+                .stream().findFirst();
     }
 
     public List<Seat> seats(Long flightId, boolean onlyAvailable) {
-        return onlyAvailable ? seats.findAvailableByFlightIdOrdered(flightId) : seats.findAllByFlightIdOrdered(flightId);
+        return onlyAvailable
+                ? seats.findAvailableByFlightIdOrdered(flightId)
+                : seats.findAllByFlightIdOrdered(flightId);
     }
 
     public Optional<Seat> seat(Long flightId, String seatNumber) {
@@ -131,8 +134,10 @@ public class FlightService {
 
     @Transactional
     public Aircraft createAircraft(CreateAircraftInput in) {
-        Airline airline = airlines.findById(in.airlineId()).orElseThrow(() -> ApiException.notFound("Airline", in.airlineId()));
-        return aircraft.save(new Aircraft(in.registration().trim().toUpperCase(), in.model().trim(), in.totalSeats(), airline));
+        Airline airline = airlines.findById(in.airlineId())
+                .orElseThrow(() -> ApiException.notFound("Airline", in.airlineId()));
+        return aircraft.save(
+                new Aircraft(in.registration().trim().toUpperCase(), in.model().trim(), in.totalSeats(), airline));
     }
 
     @Transactional
@@ -140,8 +145,10 @@ public class FlightService {
         if (!in.scheduledArrival().isAfter(in.scheduledDeparture())) {
             throw new ApiException(ErrorCode.VALIDATION_ERROR, "scheduledArrival must be after scheduledDeparture");
         }
-        Airline airline = airlines.findById(in.airlineId()).orElseThrow(() -> ApiException.notFound("Airline", in.airlineId()));
-        Aircraft ac = aircraft.findById(in.aircraftId()).orElseThrow(() -> ApiException.notFound("Aircraft", in.aircraftId()));
+        Airline airline = airlines.findById(in.airlineId())
+                .orElseThrow(() -> ApiException.notFound("Airline", in.airlineId()));
+        Aircraft ac = aircraft.findById(in.aircraftId())
+                .orElseThrow(() -> ApiException.notFound("Aircraft", in.aircraftId()));
 
         Flight flight = flights.save(new Flight(in.flightNumber().trim().toUpperCase(), airline, ac,
                 in.origin().trim().toUpperCase(), in.destination().trim().toUpperCase(),
@@ -163,7 +170,8 @@ public class FlightService {
         Flight flight = requireFlight(flightId);
         FlightStatus old = flight.getStatus();
         if (old == FlightStatus.CANCELLED) {
-            throw new ApiException(ErrorCode.INVALID_STATE, "Flight " + flight.getFlightNumber() + " is already cancelled");
+            throw new ApiException(ErrorCode.INVALID_STATE,
+                    "Flight " + flight.getFlightNumber() + " is already cancelled");
         }
         if (old == newStatus) {
             return flight;
@@ -191,14 +199,14 @@ public class FlightService {
         return flight;
     }
 
-    /** Called from booking events: mark a seat taken/free. Idempotent by nature (sets a flag). */
-    @Transactional
     /**
-     * booking.confirmed / booking.cancelled. Commutative (ticket 10): see {@link Seat#takeFor} and {@link Seat#releaseFor}.
+     * Called from booking events (booking.confirmed / booking.cancelled): mark a seat taken/free. Commutative
+     * (ticket 10): see {@link Seat#takeFor} and {@link Seat#releaseFor}.
      *
      * @param available  true for booking.cancelled (free the seat), false for booking.confirmed (take it)
      * @param occurredAt the event's envelope occurredAt; {@code null} (legacy event) counts as "now"
      */
+    @Transactional
     public void setSeatAvailability(Long flightId, String seatNumber, String bookingReference, boolean available,
                                     OffsetDateTime occurredAt) {
         Seat seat = seats.findByFlightIdAndSeatNumberIgnoreCase(flightId, seatNumber)
@@ -209,8 +217,9 @@ public class FlightService {
             log.info("Seat {} on flight {} is now {} (booking {}, event at {})", seatNumber, flightId,
                     available ? "available" : "taken", bookingReference, at);
         } else {
-            log.info("Seat {} on flight {}: {} for booking {} ignored - seat is held by {} since {}", seatNumber, flightId,
-                    available ? "release" : "take", bookingReference, seat.getHeldByBooking(), seat.getAvailabilityEventAt());
+            log.info("Seat {} on flight {}: {} for booking {} ignored - seat is held by {} since {}",
+                    seatNumber, flightId, available ? "release" : "take", bookingReference,
+                    seat.getHeldByBooking(), seat.getAvailabilityEventAt());
         }
     }
 }

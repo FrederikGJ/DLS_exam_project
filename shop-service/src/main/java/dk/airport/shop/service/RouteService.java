@@ -44,12 +44,14 @@ public class RouteService {
         for (NavEdge e : allEdges) {
             nodeById.put(e.getFromNode().getId(), e.getFromNode());
             nodeById.put(e.getToNode().getId(), e.getToNode());
-            graph.add(new Dijkstra.Edge(e.getFromNode().getId(), e.getToNode().getId(), e.getDistanceM(), e.isAccessible()));
+            graph.add(new Dijkstra.Edge(e.getFromNode().getId(), e.getToNode().getId(), e.getDistanceM(),
+                    e.isAccessible()));
         }
 
         Dijkstra.Path path = new Dijkstra(graph).shortestPath(from.getId(), to.getId(), accessibleOnly)
                 .orElseThrow(() -> new ApiException(ErrorCode.ROUTE_NOT_FOUND,
-                        "No " + (accessibleOnly ? "accessible " : "") + "route from " + from.getName() + " to " + to.getName()));
+                        "No " + (accessibleOnly ? "accessible " : "") + "route from " + from.getName()
+                                + " to " + to.getName()));
 
         List<RouteStep> steps = new ArrayList<>(path.nodeIds().size());
         NavNode previous = null;
@@ -71,10 +73,35 @@ public class RouteService {
         Map<Long, List<Shop>> shopsByNode = shops.findByNodeIdIn(path.nodeIds()).stream()
                 .collect(Collectors.groupingBy(s -> s.getNode().getId()));
         List<Shop> along = path.nodeIds().stream()
-                .flatMap(id -> shopsByNode.getOrDefault(id, List.of()).stream().sorted(Comparator.comparing(Shop::getName)))
+                .flatMap(id -> shopsByNode.getOrDefault(id, List.of()).stream()
+                        .sorted(Comparator.comparing(Shop::getName)))
                 .toList();
 
         return new Route(steps, total, minutes, along);
+    }
+
+    /**
+     * Route from → via → to, used by askRoute (via = the shop's node). Two Dijkstra legs joined into one route;
+     * the "you have arrived" step of the first leg becomes a stop. {@code toNodeId} may be null (route ends at via).
+     */
+    public Route routeVia(Long fromNodeId, Long viaNodeId, Long toNodeId, boolean accessibleOnly) {
+        Route first = route(fromNodeId, viaNodeId, accessibleOnly);
+        if (toNodeId == null || toNodeId.equals(viaNodeId)) {
+            return first;
+        }
+        Route second = route(viaNodeId, toNodeId, accessibleOnly);
+
+        List<RouteStep> steps = new ArrayList<>(first.steps());
+        RouteStep stop = steps.remove(steps.size() - 1);
+        steps.add(new RouteStep(stop.node(), "Stop ved " + stop.node().getName(), stop.distance()));
+        steps.addAll(second.steps().subList(1, second.steps().size()));   // skip the second "Start ved"
+
+        int total = first.totalDistanceM() + second.totalDistanceM();
+        int minutes = (int) Math.max(1, Math.ceil(total / METRES_PER_MINUTE));
+        Map<Long, Shop> along = new LinkedHashMap<>();                       // both legs, without duplicates
+        first.shopsAlongRoute().forEach(s -> along.putIfAbsent(s.getId(), s));
+        second.shopsAlongRoute().forEach(s -> along.putIfAbsent(s.getId(), s));
+        return new Route(steps, total, minutes, List.copyOf(along.values()));
     }
 
     static String instruction(NavNode previous, NavNode node, Dijkstra.Edge used, boolean last) {

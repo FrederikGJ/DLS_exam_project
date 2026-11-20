@@ -39,7 +39,8 @@ public class BookingSnapshot {
 
     protected BookingSnapshot() {}
 
-    public BookingSnapshot(String bookingReference, String passengerName, String flightNumber, Long flightId, String status) {
+    public BookingSnapshot(String bookingReference, String passengerName, String flightNumber, Long flightId,
+                           String status) {
         this(bookingReference, passengerName, flightNumber, flightId, status, OffsetDateTime.now());
     }
 
@@ -71,14 +72,17 @@ public class BookingSnapshot {
      * Applies a booking event. Commutative (ticket 10):
      * <ul>
      *   <li>CANCELLED is terminal: once cancelled, nothing changes the status back, and a cancel always wins,
-     *       even if it is older than the status we have (booking.cancelled before booking.confirmed ends CANCELLED).</li>
-     *   <li>Otherwise the newest event wins: an event older than {@code eventOccurredAt} does not change the status.</li>
+     *       even if it is older than the status we have (booking.cancelled before booking.confirmed ends
+     *       CANCELLED).</li>
+     *   <li>Otherwise the newest event wins: an event older than {@code eventOccurredAt} does not change the
+     *       status.</li>
      * </ul>
      * Descriptive fields (name, flight) are the same in every booking event and are always filled in.
      *
      * @param occurredAt the event's envelope occurredAt; {@code null} (legacy event) counts as "now"
      */
-    public void update(String passengerName, String flightNumber, Long flightId, String status, OffsetDateTime occurredAt) {
+    public void update(String passengerName, String flightNumber, Long flightId, String status,
+                       OffsetDateTime occurredAt) {
         OffsetDateTime at = occurredAt == null ? OffsetDateTime.now() : occurredAt;
         if (passengerName != null && !passengerName.isBlank()) this.passengerName = passengerName;
         if (flightNumber != null && !flightNumber.isBlank()) this.flightNumber = flightNumber;

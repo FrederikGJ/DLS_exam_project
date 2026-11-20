@@ -17,13 +17,48 @@ public record OffsetLimit(long offset, int limit, Sort sort) implements Pageable
         return new OffsetLimit(offset == null ? 0 : offset, limit == null ? DEFAULT_LIMIT : limit, sort);
     }
 
-    @Override public int getPageNumber() { return (int) (offset / limit); }
-    @Override public int getPageSize() { return limit; }
-    @Override public long getOffset() { return offset; }
-    @Override public Sort getSort() { return sort; }
-    @Override public Pageable next() { return new OffsetLimit(offset + limit, limit, sort); }
-    @Override public Pageable previousOrFirst() { return hasPrevious() ? new OffsetLimit(Math.max(0, offset - limit), limit, sort) : first(); }
-    @Override public Pageable first() { return new OffsetLimit(0, limit, sort); }
-    @Override public Pageable withPage(int pageNumber) { return new OffsetLimit((long) pageNumber * limit, limit, sort); }
-    @Override public boolean hasPrevious() { return offset > 0; }
+    @Override
+    public int getPageNumber() {
+        return (int) (offset / limit);
+    }
+
+    @Override
+    public int getPageSize() {
+        return limit;
+    }
+
+    @Override
+    public long getOffset() {
+        return offset;
+    }
+
+    @Override
+    public Sort getSort() {
+        return sort;
+    }
+
+    @Override
+    public Pageable next() {
+        return new OffsetLimit(offset + limit, limit, sort);
+    }
+
+    @Override
+    public Pageable previousOrFirst() {
+        return hasPrevious() ? new OffsetLimit(Math.max(0, offset - limit), limit, sort) : first();
+    }
+
+    @Override
+    public Pageable first() {
+        return new OffsetLimit(0, limit, sort);
+    }
+
+    @Override
+    public Pageable withPage(int pageNumber) {
+        return new OffsetLimit((long) pageNumber * limit, limit, sort);
+    }
+
+    @Override
+    public boolean hasPrevious() {
+        return offset > 0;
+    }
 }

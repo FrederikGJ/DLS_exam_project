@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SpotBugs + find-sec-bugs exclusions for all airport services. Used by the `ci` Maven profile:
+      mvn -Pci verify        (spotbugs:check, effort=Max, threshold=Medium, failOnError=true)
+
+  Rule: every <Match> has a reason. Nothing is silenced with @SuppressFBWarnings in the code - a false positive is
+  either fixed in the code or documented here, so the list of what we consciously do not act on stays reviewable
+  in one place.
+
+  To check that an exclusion is still needed: replace this file with an empty <FindBugsFilter/>, run
+      mvn -Pci -DskipTests -Dcheckstyle.skip=true compile spotbugs:spotbugs
+  in a service directory and read target/spotbugsXml.xml.
+-->
+<FindBugsFilter>
+
+  <!-- EI_EXPOSE_REP / EI_EXPOSE_REP2: "may expose internal representation by returning/storing a mutable object".
+       Since SpotBugs 4.3 this fires on every JPA entity getter that returns a child entity or a collection, and on
+       every Spring bean that stores an injected collaborator (RabbitTemplate, ObjectMapper, repositories) in a
+       field. Entities are persistence models that are only mutated through the service layer, and injected beans
+       are shared singletons by design. Copying them would add code without removing a risk. -->
+  <Match>
+    <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+  </Match>
+
+  <!-- CRLF_INJECTION_LOGS (find-sec-bugs): "log injection" when a value that came from a request is logged.
+       At threshold=Medium nothing is reported today, because GraphQL @Argument values are not a taint source
+       find-sec-bugs knows; it would be reported as soon as a logged value came from a Spring MVC
+       @PathVariable/@RequestParam/@RequestBody. The decision is recorded here so it is not taken again ad hoc:
+         * request values that are logged are whitelist-validated with Bean Validation first (booking references,
+           seat numbers, passport numbers, e-mail addresses - see @Pattern/@Email in the graphql inputs), and
+         * the prod profile writes structured JSON logs (logging.structured.format.console=logstash in every
+           application.yml), where a newline inside a value is escaped, so a forged log line cannot be injected
+           where the logs are collected.
+       If an endpoint ever logs an unvalidated free-text value, validate it instead of relying on this. -->
+  <Match>
+    <Bug pattern="CRLF_INJECTION_LOGS"/>
+  </Match>
+
+</FindBugsFilter>

@@ -20,7 +20,9 @@ class FlightSnapshotCommutativityTest {
 
     record Event(String name, String status, String gate, OffsetDateTime at) {}
 
-    static Event statusChanged(String status, String gate, OffsetDateTime at) { return new Event("status " + status, status, gate, at); }
+    static Event statusChanged(String status, String gate, OffsetDateTime at) {
+        return new Event("status " + status, status, gate, at);
+    }
     static Event gateChanged(String gate, OffsetDateTime at) { return new Event("gate " + gate, null, gate, at); }
 
     @Test
@@ -50,7 +52,8 @@ class FlightSnapshotCommutativityTest {
         List<Event> events = List.of(
                 statusChanged("DELAYED", null, T1),
                 statusChanged("CANCELLED", null, T1.plusMinutes(1)),
-                statusChanged("BOARDING", null, T1.plusMinutes(2)));   // cannot happen in flight-service, but must not un-cancel
+                // cannot happen in flight-service, but must not un-cancel
+                statusChanged("BOARDING", null, T1.plusMinutes(2)));
         for (List<Event> order : permutations(events)) {
             assertThat(apply(order).getFlightStatus()).as("order %s", names(order)).isEqualTo("CANCELLED");
         }

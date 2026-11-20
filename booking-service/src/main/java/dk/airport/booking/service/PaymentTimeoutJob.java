@@ -19,10 +19,11 @@ public class PaymentTimeoutJob {
     private static final Logger log = LoggerFactory.getLogger(PaymentTimeoutJob.class);
     private static final int BATCH_SIZE = 100;
 
-    private final BookingService bookingService;
+    private final BookingCommandService bookingService;
     private final Duration timeout;
 
-    public PaymentTimeoutJob(BookingService bookingService, @Value("${app.saga.payment-timeout}") Duration timeout) {
+    public PaymentTimeoutJob(BookingCommandService bookingService,
+                             @Value("${app.saga.payment-timeout}") Duration timeout) {
         this.bookingService = bookingService;
         this.timeout = timeout;
     }

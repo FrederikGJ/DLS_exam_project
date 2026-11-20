@@ -51,6 +51,8 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monosp
 .nav a { color: var(--header-text); text-decoration: none; padding: 8px 12px; border-radius: 8px; font-weight: 500; opacity: .85; }
 .nav a:hover { background: rgba(255,255,255,.08); opacity: 1; }
 .nav a.active { background: rgba(255,255,255,.14); opacity: 1; }
+.auth { display: flex; align-items: center; gap: 10px; color: var(--header-text); font-size: .9rem; }
+.auth .user { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; }
 
 .footer { color: var(--muted); font-size: .8rem; padding: 16px 0; border-top: 1px solid var(--border); background: #fff; }
 
@@ -80,6 +82,8 @@ input[type="checkbox"] { width: auto; min-height: 0; margin-right: 6px; vertical
 .check { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; color: var(--text); cursor: pointer; }
 .field { margin-bottom: 12px; }
 .help { font-size: .8rem; color: var(--muted); margin-top: 4px; }
+.help.field-error { color: #b91c1c; font-weight: 600; }
+select.invalid, input.invalid { border-color: #dc2626; outline: 2px solid rgba(220,38,38,.35); background: #fef2f2; }
 
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
