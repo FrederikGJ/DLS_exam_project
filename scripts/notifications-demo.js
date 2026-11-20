@@ -8,7 +8,7 @@
 //
 //   k6 run scripts/notifications-demo.js
 //   k6 run -e COUNT=10 -e BASE_URL=http://localhost:8090 scripts/notifications-demo.js
-//   k6 run -e KEYCLOAK_URL=http://localhost:8090/auth -e USERNAME=ops -e PASSWORD=ops scripts/notifications-demo.js
+//   k6 run -e KEYCLOAK_URL=http://localhost:8090/auth -e KEYCLOAK_USER=ops -e KEYCLOAK_PASSWORD=ops scripts/notifications-demo.js
 //
 // Watch the Jobs in another terminal:  kubectl -n airport get jobs -l app.kubernetes.io/name=notification-job -w
 // See k8s/README.md, section "Serverless: notifikationer med KEDA".
@@ -18,8 +18,8 @@ import { check, fail } from 'k6';
 const BASE_URL = __ENV.BASE_URL || 'http://localhost:8090';
 const COUNT = Number(__ENV.COUNT || 5);
 const KEYCLOAK_URL = __ENV.KEYCLOAK_URL || `${BASE_URL}/auth`;
-const USERNAME = __ENV.USERNAME || 'ops';
-const PASSWORD = __ENV.PASSWORD || 'ops';
+const USERNAME = __ENV.KEYCLOAK_USER || 'ops';
+const PASSWORD = __ENV.KEYCLOAK_PASSWORD || 'ops';
 
 export const options = {
   scenarios: {

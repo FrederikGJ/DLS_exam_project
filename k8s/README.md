@@ -92,9 +92,11 @@ og der er ikke brug for port-forward. Skal du bruge andre porte, så ret `hostPo
 så Spring ser browserens origin `http://localhost:8090` som cross-origin, og den skal derfor være tilladt eksplicit.
 
 **Alt på én gang:** `scripts/kind-up.sh` kører trinene nedenfor (opretter clusteret eller genbruger det, loader
-images, installerer ingress-nginx, deployer `k8s/` og venter, til alle Deployments er Available). Tilvalg kan
-kombineres: `--build` (byg images først), `--ai` (Ollama), `--observability` og `--tools` (pgAdmin), fx
-`scripts/kind-up.sh --build --ai`. Trin for trin:
+images, installerer ingress-nginx og metrics-server (CPU-målinger til HPA'erne), deployer `k8s/` og venter, til alle
+Deployments er Available). Tilvalg kan kombineres: `--build` (byg images først), `--ai` (Ollama), `--observability`,
+`--tools` (pgAdmin) og `--notifications` (KEDA + den serverless notification-job, se
+[Serverless: notifikationer med KEDA](#serverless-notifikationer-med-keda)), fx
+`scripts/kind-up.sh --build --ai --notifications`. Kræver Helm (fx `winget install Helm.Helm`). Trin for trin:
 
 ```bash
 kind create cluster --config k8s/kind-config.yaml
