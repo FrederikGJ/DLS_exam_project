@@ -249,10 +249,6 @@ Tests: `PaymentSagaIntegrationTest` (booking-service) dækker timeout, betaling 
 
 ## Skalering
 
-![Sådan skalerer systemet](diagrams/scaling.png)
-
-*Redigérbar kilde: [diagrams/scaling.drawio](diagrams/scaling.drawio) (draw.io).*
-
 Systemet skalerer vandret: flere pods af den samme service, ikke større maskiner. Det virker, fordi:
 
 * **Stateless pods.** Ingen service holder tilstand i hukommelsen mellem requests: al tilstand ligger i servicens
