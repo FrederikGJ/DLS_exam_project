@@ -14,6 +14,7 @@ import org.springframework.graphql.data.method.annotation.Argument;
 import org.springframework.graphql.data.method.annotation.MutationMapping;
 import org.springframework.graphql.data.method.annotation.QueryMapping;
 import org.springframework.graphql.data.method.annotation.SchemaMapping;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.stereotype.Controller;
 import org.springframework.validation.annotation.Validated;
 
@@ -79,8 +80,8 @@ public class ShopController {
         return shopService.isOpenNow(shop);
     }
 
-    @SchemaMapping(typeName = "NavNode")
-    public List<Shop> shops(NavNode node) {
+    @SchemaMapping(typeName = "NavNode", field = "shops")
+    public List<Shop> shopsAtNode(NavNode node) {
         return shopService.shopsAtNode(node.getId());
     }
 
@@ -97,16 +98,21 @@ public class ShopController {
     // ---------------------------------------------------------- mutations
 
     @MutationMapping
-    public Shop createShop(@Argument @Valid ShopInput input) {
-        return shopService.createShop(input);
+    @PreAuthorize("hasRole('OPERATIONS')")
+    public Shop createShop(@Argument @Valid ShopInput input,
+                           @Argument @Size(max = 64, message = "idempotencyKey must be at most 64 characters")
+                           String idempotencyKey) {
+        return shopService.createShop(input, idempotencyKey);
     }
 
     @MutationMapping
+    @PreAuthorize("hasRole('OPERATIONS')")
     public Shop updateShop(@Argument Long id, @Argument @Valid ShopInput input) {
         return shopService.updateShop(id, input);
     }
 
     @MutationMapping
+    @PreAuthorize("hasRole('OPERATIONS')")
     public boolean deleteShop(@Argument Long id) {
         return shopService.deleteShop(id);
     }

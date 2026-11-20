@@ -10,6 +10,7 @@ import dk.airport.flight.repository.SeatRepository;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.core.*;
@@ -18,10 +19,13 @@ import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.graphql.tester.AutoConfigureGraphQlTester;
+import org.springframework.boot.test.autoconfigure.graphql.tester.AutoConfigureHttpGraphQlTester;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.context.annotation.Import;
 import org.springframework.graphql.test.tester.GraphQlTester;
+import org.springframework.graphql.test.tester.HttpGraphQlTester;
+import org.springframework.http.HttpHeaders;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -41,16 +45,17 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doThrow;
 
 /**
  * End-to-end test against real PostgreSQL + RabbitMQ (Testcontainers):
  * Flyway migrations + seed, GraphQL queries/mutations, event publishing through the transactional outbox
- * and idempotent consumption.
+ * and idempotent consumption. Requests go over HTTP through the security filter chain; mutations are sent with
+ * a test token from {@link TestTokens} (queries need none).
  */
-@SpringBootTest
-@AutoConfigureGraphQlTester
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@AutoConfigureHttpGraphQlTester
+@Import(TestTokens.class)
 @Testcontainers
 class FlightServiceIntegrationTest {
 
@@ -64,7 +69,10 @@ class FlightServiceIntegrationTest {
 
     static final String TEST_QUEUE = "test.flight-events";
 
-    @Autowired GraphQlTester graphQlTester;
+    /** Anonymous client - enough for every query. */
+    @Autowired HttpGraphQlTester graphQlTester;
+    /** Same client with an OPERATIONS token - mutations require that role. */
+    GraphQlTester asOperations;
     /** Spy so a single test can make the outbox relay's publish attempt fail (reset after every test). */
     @MockitoSpyBean RabbitTemplate rabbitTemplate;
     @Autowired ConnectionFactory connectionFactory;
@@ -81,7 +89,8 @@ class FlightServiceIntegrationTest {
     static SimpleMessageListenerContainer testListener;
 
     @BeforeAll
-    static void startTestListener(@Autowired ConnectionFactory connectionFactory, @Autowired ObjectMapper objectMapper) {
+    static void startTestListener(@Autowired ConnectionFactory connectionFactory,
+                                  @Autowired ObjectMapper objectMapper) {
         RabbitAdmin admin = new RabbitAdmin(connectionFactory);
         Queue queue = new Queue(TEST_QUEUE, false, false, false);
         admin.declareQueue(queue);
@@ -106,13 +115,19 @@ class FlightServiceIntegrationTest {
         }
     }
 
+    @BeforeEach
+    void authenticatedClients() {
+        asOperations = graphQlTester.mutate().header(HttpHeaders.AUTHORIZATION, TestTokens.operations()).build();
+    }
+
     @Test
     void seedDataIsLoadedByFlyway() {
         graphQlTester.document("{ airlines { id iataCode name } }")
                 .execute()
                 .path("airlines").entityList(Object.class).hasSizeGreaterThan(2);
 
-        graphQlTester.document("{ flights { id flightNumber destination status gate availableSeatCount airline { iataCode } } }")
+        graphQlTester.document("{ flights { id flightNumber destination status gate availableSeatCount "
+                        + "airline { iataCode } } }")
                 .execute()
                 .path("flights").entityList(Object.class).hasSizeGreaterThan(9);
     }
@@ -123,7 +138,8 @@ class FlightServiceIntegrationTest {
                 .execute()
                 .path("flights[0].id").entity(Long.class).get();
 
-        graphQlTester.document("query($id: ID!) { flight(id: $id) { seat(seatNumber: \"1A\") { seatClass price isAvailable } } }")
+        graphQlTester.document("query($id: ID!) { flight(id: $id) { seat(seatNumber: \"1A\") "
+                        + "{ seatClass price isAvailable } } }")
                 .variable("id", flightId)
                 .execute()
                 .path("flight.seat.seatClass").entity(String.class).isEqualTo("BUSINESS")
@@ -144,7 +160,8 @@ class FlightServiceIntegrationTest {
                 "bookingReference", "ABC123", "flightId", flightId, "seatNumber", "5C"));
 
         await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
-                assertThat(seatRepository.findByFlightIdAndSeatNumberIgnoreCase(flightId, "5C").orElseThrow().isAvailable()).isFalse());
+                assertThat(seatRepository.findByFlightIdAndSeatNumberIgnoreCase(flightId, "5C").orElseThrow()
+                        .isAvailable()).isFalse());
         await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
                 assertThat(processedEventRepository.existsById(eventId)).isTrue());
 
@@ -156,7 +173,8 @@ class FlightServiceIntegrationTest {
         publish(UUID.randomUUID().toString(), "booking.cancelled", Map.of(
                 "bookingReference", "ABC123", "flightId", flightId, "seatNumber", "5C"));
         await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
-                assertThat(seatRepository.findByFlightIdAndSeatNumberIgnoreCase(flightId, "5C").orElseThrow().isAvailable()).isTrue());
+                assertThat(seatRepository.findByFlightIdAndSeatNumberIgnoreCase(flightId, "5C").orElseThrow()
+                        .isAvailable()).isTrue());
     }
 
     @Test
@@ -164,7 +182,8 @@ class FlightServiceIntegrationTest {
         Long flightId = graphQlTester.document("{ flights(filter: { destination: \"HEL\" }) { id } }")
                 .execute().path("flights[0].id").entity(Long.class).get();
 
-        graphQlTester.document("mutation($id: ID!) { updateFlightStatus(flightId: $id, status: CANCELLED) { id status } }")
+        asOperations.document(
+                        "mutation($id: ID!) { updateFlightStatus(flightId: $id, status: CANCELLED) { id status } }")
                 .variable("id", flightId)
                 .execute()
                 .path("updateFlightStatus.status").entity(String.class).isEqualTo("CANCELLED");
@@ -172,7 +191,8 @@ class FlightServiceIntegrationTest {
         List<EventEnvelope> received = awaitEvents(e -> e.payload().path("flightNumber").asText().equals("DY1050"), 2);
         assertThat(received).extracting(EventEnvelope::eventType)
                 .containsExactlyInAnyOrder("flight.status.changed", "flight.cancelled");
-        EventEnvelope cancelled = received.stream().filter(e -> e.eventType().equals("flight.cancelled")).findFirst().orElseThrow();
+        EventEnvelope cancelled = received.stream()
+                .filter(e -> e.eventType().equals("flight.cancelled")).findFirst().orElseThrow();
         assertThat(cancelled.eventId()).isNotBlank();
         assertThat(cancelled.producer()).isEqualTo("flight-service");
         assertThat(cancelled.occurredAt()).isNotNull();
@@ -180,7 +200,7 @@ class FlightServiceIntegrationTest {
         assertThat(cancelled.payload().get("flightNumber").asText()).isEqualTo("DY1050");
 
         // second cancel is an INVALID_STATE error
-        graphQlTester.document("mutation($id: ID!) { updateFlightStatus(flightId: $id, status: CANCELLED) { id } }")
+        asOperations.document("mutation($id: ID!) { updateFlightStatus(flightId: $id, status: CANCELLED) { id } }")
                 .variable("id", flightId)
                 .execute()
                 .errors().satisfy(errors -> {
@@ -192,7 +212,7 @@ class FlightServiceIntegrationTest {
     @Test
     void createFlightGeneratesSeatsAndPublishesEvent() throws Exception {
         OffsetDateTime dep = OffsetDateTime.now().plusDays(3).withNano(0);
-        graphQlTester.document("""
+        asOperations.document("""
                 mutation($dep: DateTime!, $arr: DateTime!) {
                   createFlight(input: { flightNumber: "SK9999", airlineId: 1, aircraftId: 5, origin: "CPH",
                                         destination: "AAL", scheduledDeparture: $dep, scheduledArrival: $arr,
@@ -217,7 +237,8 @@ class FlightServiceIntegrationTest {
         assertThat(row.getPayload()).contains("SK9999");
         assertThat(row.getAttempts()).isZero();
         await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
-                assertThat(outboxEventRepository.findByEventId(row.getEventId()).orElseThrow().getPublishedAt()).isNotNull());
+                assertThat(outboxEventRepository.findByEventId(row.getEventId()).orElseThrow().getPublishedAt())
+                        .isNotNull());
     }
 
     // ------------------------------------------------------------------ outbox guarantees
@@ -271,7 +292,8 @@ class FlightServiceIntegrationTest {
     // ------------------------------------------------------------------ helpers
 
     private void publish(String eventId, String type, Map<String, Object> payload) throws Exception {
-        EventEnvelope env = new EventEnvelope(eventId, type, OffsetDateTime.now(), "booking-service", objectMapper.valueToTree(payload));
+        EventEnvelope env = new EventEnvelope(eventId, type, OffsetDateTime.now(), "booking-service",
+                objectMapper.valueToTree(payload));
         MessageProperties props = new MessageProperties();
         props.setContentType(MessageProperties.CONTENT_TYPE_JSON);
         rabbitTemplate.send("airport.events", type, new Message(objectMapper.writeValueAsBytes(env), props));

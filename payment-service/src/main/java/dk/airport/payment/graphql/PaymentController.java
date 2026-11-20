@@ -10,6 +10,7 @@ import jakarta.validation.constraints.NotBlank;
 import org.springframework.graphql.data.method.annotation.Argument;
 import org.springframework.graphql.data.method.annotation.MutationMapping;
 import org.springframework.graphql.data.method.annotation.QueryMapping;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.stereotype.Controller;
 import org.springframework.validation.annotation.Validated;
 
@@ -29,12 +30,15 @@ public class PaymentController {
         this.validator = validator;
     }
 
+    /** By id: ids are sequential and payments carry no owner, so only OPERATIONS may look them up this way. */
     @QueryMapping
+    @PreAuthorize("hasRole('OPERATIONS')")
     public Payment payment(@Argument Long id) {
         return paymentService.payment(id).orElse(null);
     }
 
     @QueryMapping
+    @PreAuthorize("hasAnyRole('PASSENGER', 'OPERATIONS')")
     public List<Payment> paymentsByBooking(@Argument @NotBlank String reference) {
         return paymentService.paymentsByBooking(reference);
     }
@@ -44,6 +48,7 @@ public class PaymentController {
      * record that carries the Bean Validation constraints and validated explicitly.
      */
     @MutationMapping
+    @PreAuthorize("hasAnyRole('PASSENGER', 'OPERATIONS')")
     public Payment pay(@Argument String bookingReference, @Argument BigDecimal amount,
                        @Argument String cardNumber, @Argument String expiry, @Argument String cvv) {
         PayInput input = new PayInput(bookingReference, amount, cardNumber, expiry, cvv);
@@ -55,6 +60,7 @@ public class PaymentController {
     }
 
     @MutationMapping
+    @PreAuthorize("hasRole('OPERATIONS')")
     public Payment refund(@Argument Long paymentId) {
         return paymentService.refund(paymentId);
     }

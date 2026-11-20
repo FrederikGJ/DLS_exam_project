@@ -72,7 +72,8 @@ public class PaymentService {
         Payment payment = payments.findById(paymentId).orElseThrow(() -> ApiException.notFound("Payment", paymentId));
         if (payment.getStatus() != PaymentStatus.COMPLETED) {
             throw new ApiException(ErrorCode.INVALID_STATE,
-                    "Only COMPLETED payments can be refunded (payment " + paymentId + " is " + payment.getStatus() + ")");
+                    "Only COMPLETED payments can be refunded (payment " + paymentId + " is "
+                            + payment.getStatus() + ")");
         }
         doRefund(payment);
         return payment;

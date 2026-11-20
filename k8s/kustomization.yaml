@@ -19,5 +19,17 @@ resources:
   - services/baggage-service.yaml
   - services/shop-service.yaml
   - frontend/frontend.yaml
-  - tools/pgadmin.yaml   # dev/demo: pgAdmin at /pgadmin - remove this line to deploy without it
+  - keycloak/keycloak.yaml
   - ingress.yaml
+  # pgAdmin (dev/demo, no login of its own) is deliberately NOT here - opt in with `kubectl apply -k k8s/tools/`
+
+# The Keycloak realm (roles, client, test users) is imported from the same JSON file docker-compose.yml mounts.
+configMapGenerator:
+  - name: keycloak-realm
+    files:
+      - keycloak/realm-airport.json
+    options:
+      disableNameSuffixHash: true
+      labels:
+        app.kubernetes.io/name: keycloak
+        app.kubernetes.io/part-of: airport

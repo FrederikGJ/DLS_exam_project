@@ -44,12 +44,14 @@ public class RouteService {
         for (NavEdge e : allEdges) {
             nodeById.put(e.getFromNode().getId(), e.getFromNode());
             nodeById.put(e.getToNode().getId(), e.getToNode());
-            graph.add(new Dijkstra.Edge(e.getFromNode().getId(), e.getToNode().getId(), e.getDistanceM(), e.isAccessible()));
+            graph.add(new Dijkstra.Edge(e.getFromNode().getId(), e.getToNode().getId(), e.getDistanceM(),
+                    e.isAccessible()));
         }
 
         Dijkstra.Path path = new Dijkstra(graph).shortestPath(from.getId(), to.getId(), accessibleOnly)
                 .orElseThrow(() -> new ApiException(ErrorCode.ROUTE_NOT_FOUND,
-                        "No " + (accessibleOnly ? "accessible " : "") + "route from " + from.getName() + " to " + to.getName()));
+                        "No " + (accessibleOnly ? "accessible " : "") + "route from " + from.getName()
+                                + " to " + to.getName()));
 
         List<RouteStep> steps = new ArrayList<>(path.nodeIds().size());
         NavNode previous = null;
@@ -71,7 +73,8 @@ public class RouteService {
         Map<Long, List<Shop>> shopsByNode = shops.findByNodeIdIn(path.nodeIds()).stream()
                 .collect(Collectors.groupingBy(s -> s.getNode().getId()));
         List<Shop> along = path.nodeIds().stream()
-                .flatMap(id -> shopsByNode.getOrDefault(id, List.of()).stream().sorted(Comparator.comparing(Shop::getName)))
+                .flatMap(id -> shopsByNode.getOrDefault(id, List.of()).stream()
+                        .sorted(Comparator.comparing(Shop::getName)))
                 .toList();
 
         return new Route(steps, total, minutes, along);

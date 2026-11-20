@@ -1,5 +1,8 @@
 // GraphQL client + one small API module per backend service.
-// URLs come from js/config.js (window.AIRPORT_CONFIG).
+// URLs come from js/config.js (window.AIRPORT_CONFIG). Every request carries the Keycloak access token when the
+// user is logged in (auth.js); UNAUTHORIZED/FORBIDDEN answers from the services are turned into Danish messages,
+// and UNAUTHORIZED also sends the user to the login page and back to the current route.
+import { getToken, login, username } from './auth.js';
 
 const cfg = window.AIRPORT_CONFIG || {};
 
@@ -13,19 +16,33 @@ export class GraphQLError extends Error {
 }
 
 /**
+ * A fresh idempotency key (UUID v4) for one intended creation (registerBaggage). The page keeps it while the same
+ * form is retried, so a double click or a retry after a lost response never creates the thing twice.
+ * crypto.randomUUID() only exists in secure contexts (https or localhost); over plain http (http://airport.local)
+ * a UUID v4 is built from crypto.getRandomValues(), which works everywhere.
+ */
+export function newIdempotencyKey() {
+  if (globalThis.crypto && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6] & 0x0f) | 0x40;                     // version 4
+  b[8] = (b[8] & 0x3f) | 0x80;                     // variant 10xx
+  const hex = [...b].map(x => x.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/**
  * POST a GraphQL document. Resolves with `data`.
  * Throws GraphQLError with `.code` taken from errors[0].extensions.code.
  */
 export async function gql(url, query, variables = {}, serviceName = 'servicen') {
   if (!url) throw new GraphQLError(`Ingen URL konfigureret for ${serviceName} (se js/config.js)`, 'CONFIG_ERROR');
+  const headers = { 'Content-Type': 'application/json', Accept: 'application/json' };
+  const token = await getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
   let res;
   try {
-    res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ query, variables }),
-    });
-  } catch (e) {
+    res = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ query, variables }) });
+  } catch (_) {
     throw new GraphQLError(`Kan ikke nå ${serviceName}`, 'NETWORK_ERROR');
   }
   let body = null;
@@ -33,7 +50,18 @@ export async function gql(url, query, variables = {}, serviceName = 'servicen') 
   if (body && Array.isArray(body.errors) && body.errors.length) {
     const first = body.errors[0];
     const code = (first.extensions && first.extensions.code) || 'UNKNOWN';
+    if (code === 'UNAUTHORIZED') {
+      login();   // to Keycloak and back to this route; the user repeats the action once logged in
+      throw new GraphQLError('Log ind for at fortsætte', code, body.errors);
+    }
+    if (code === 'FORBIDDEN') {
+      throw new GraphQLError(`${username() || 'Din bruger'} har ikke rettighed til denne handling`, code, body.errors);
+    }
     throw new GraphQLError(first.message || 'Ukendt fejl', code, body.errors);
+  }
+  if (res.status === 401) {
+    login();   // the service rejected the token itself (expired, wrong issuer): a fresh login fixes it
+    throw new GraphQLError('Din session er udløbet - log ind igen', 'UNAUTHORIZED');
   }
   if (!res.ok) {
     throw new GraphQLError(`${serviceName} svarede HTTP ${res.status}`, 'HTTP_' + res.status);
@@ -131,10 +159,11 @@ export const paymentApi = {
 const BAGGAGE_FIELDS = `id tagNumber bookingReference passengerName flightNumber weightKg type status lastLocation updatedAt`;
 
 export const baggageApi = {
-  registerBaggage: (bookingReference, weightKg, type) => gql(cfg.BAGGAGE_URL, `
-    mutation($bookingReference: String!, $weightKg: BigDecimal!, $type: BaggageType!) {
-      registerBaggage(bookingReference: $bookingReference, weightKg: $weightKg, type: $type) { ${BAGGAGE_FIELDS} }
-    }`, { bookingReference, weightKg, type }, 'baggage-service').then(d => d.registerBaggage),
+  registerBaggage: (bookingReference, weightKg, type, idempotencyKey = null) => gql(cfg.BAGGAGE_URL, `
+    mutation($bookingReference: String!, $weightKg: BigDecimal!, $type: BaggageType!, $idempotencyKey: String) {
+      registerBaggage(bookingReference: $bookingReference, weightKg: $weightKg, type: $type,
+                      idempotencyKey: $idempotencyKey) { ${BAGGAGE_FIELDS} }
+    }`, { bookingReference, weightKg, type, idempotencyKey }, 'baggage-service').then(d => d.registerBaggage),
 
   updateBaggageStatus: (tagNumber, status, location) => gql(cfg.BAGGAGE_URL, `
     mutation($tagNumber: String!, $status: BaggageStatus!, $location: String) {

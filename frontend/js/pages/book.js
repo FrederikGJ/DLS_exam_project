@@ -1,5 +1,6 @@
 // Book: choose flight -> passenger details -> seat map -> createBooking (PENDING_PAYMENT) -> payment page.
 import { flightApi, bookingApi } from '../api.js';
+import { email, hasRole } from '../auth.js';
 import { esc, formatDateTime, formatMoney, badge, toast, showError, busy, navigate, state, qs } from '../app.js';
 
 export async function render(container, params) {
@@ -69,6 +70,15 @@ export async function render(container, params) {
   const confirmBtn = container.querySelector('#confirm-btn');
   const result = container.querySelector('#result');
   const form = container.querySelector('#passenger-form');
+  // A booking belongs to the e-mail it is made with, and booking-service only lets a PASSENGER book with the
+  // e-mail of their own login (FORBIDDEN otherwise) - so the field is filled in and locked. OPERATIONS may book
+  // for any passenger.
+  const emailInput = container.querySelector('#p-email');
+  if (email()) emailInput.value = email();
+  if (!hasRole('OPERATIONS')) {
+    emailInput.readOnly = true;
+    emailInput.title = 'Din login-e-mail – bookingen knyttes til den';
+  }
 
   let flight = null;
   let selectedSeat = null;

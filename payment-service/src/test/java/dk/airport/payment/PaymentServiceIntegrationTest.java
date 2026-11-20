@@ -12,6 +12,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.springframework.amqp.AmqpException;
@@ -21,10 +22,13 @@ import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.graphql.tester.AutoConfigureGraphQlTester;
+import org.springframework.boot.test.autoconfigure.graphql.tester.AutoConfigureHttpGraphQlTester;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.context.annotation.Import;
 import org.springframework.graphql.test.tester.GraphQlTester;
+import org.springframework.graphql.test.tester.HttpGraphQlTester;
+import org.springframework.http.HttpHeaders;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -45,15 +49,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doThrow;
 
 /**
  * End-to-end test against real PostgreSQL + RabbitMQ (Testcontainers):
  * Flyway migrations, GraphQL pay/refund, event publishing and idempotent consumption of booking.cancelled.
+ * Requests go over HTTP through the security filter chain; mutations carry a test token from {@link TestTokens}.
  */
-@SpringBootTest
-@AutoConfigureGraphQlTester
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@AutoConfigureHttpGraphQlTester
+@Import(TestTokens.class)
 @Testcontainers
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class PaymentServiceIntegrationTest {
@@ -74,7 +79,11 @@ class PaymentServiceIntegrationTest {
     static final List<EventEnvelope> RECEIVED = new CopyOnWriteArrayList<>();
     static SimpleMessageListenerContainer testListener;
 
-    @Autowired GraphQlTester graphQlTester;
+    /** Anonymous client - enough for public queries. */
+    @Autowired HttpGraphQlTester graphQlTester;
+    /** Same client with a PASSENGER (anna) / OPERATIONS (ops) token. */
+    GraphQlTester asPassenger;
+    GraphQlTester asOperations;
     /** Spy so a single test can make the outbox relay's publish attempt fail (reset after every test). */
     @MockitoSpyBean RabbitTemplate rabbitTemplate;
     @Autowired ObjectMapper objectMapper;
@@ -87,7 +96,8 @@ class PaymentServiceIntegrationTest {
     @Autowired JdbcTemplate jdbcTemplate;
 
     @BeforeAll
-    static void startTestListener(@Autowired ConnectionFactory connectionFactory, @Autowired ObjectMapper objectMapper) {
+    static void startTestListener(@Autowired ConnectionFactory connectionFactory,
+                                  @Autowired ObjectMapper objectMapper) {
         RabbitAdmin admin = new RabbitAdmin(connectionFactory);
         Queue queue = new Queue(TEST_QUEUE, false, false, false);
         admin.declareQueue(queue);
@@ -112,6 +122,12 @@ class PaymentServiceIntegrationTest {
         }
     }
 
+    @BeforeEach
+    void authenticatedClients() {
+        asPassenger = graphQlTester.mutate().header(HttpHeaders.AUTHORIZATION, TestTokens.passenger()).build();
+        asOperations = graphQlTester.mutate().header(HttpHeaders.AUTHORIZATION, TestTokens.operations()).build();
+    }
+
     private static final String PAY = """
             mutation($ref: String!, $amount: BigDecimal!, $card: String!, $expiry: String!, $cvv: String!) {
               pay(bookingReference: $ref, amount: $amount, cardNumber: $card, expiry: $expiry, cvv: $cvv) {
@@ -122,7 +138,7 @@ class PaymentServiceIntegrationTest {
     @Test
     @Order(1)
     void successfulPaymentIsCompletedAndPublished() {
-        GraphQlTester.Response response = graphQlTester.document(PAY)
+        GraphQlTester.Response response = asPassenger.document(PAY)
                 .variable("ref", REF_OK).variable("amount", 899.00)
                 .variable("card", "4242 4242 4242 4242").variable("expiry", "12/30").variable("cvv", "123")
                 .execute();
@@ -152,7 +168,7 @@ class PaymentServiceIntegrationTest {
     @Test
     @Order(2)
     void payingTwiceIsRejectedWithAlreadyPaid() {
-        graphQlTester.document(PAY)
+        asPassenger.document(PAY)
                 .variable("ref", REF_OK).variable("amount", 899.00)
                 .variable("card", "4242424242424242").variable("expiry", "12/30").variable("cvv", "123")
                 .execute()
@@ -165,7 +181,7 @@ class PaymentServiceIntegrationTest {
     @Test
     @Order(3)
     void declinedCardGivesFailedPaymentAndEvent() {
-        graphQlTester.document(PAY)
+        asPassenger.document(PAY)
                 .variable("ref", REF_FAIL).variable("amount", 549.00)
                 .variable("card", "4111111111110000").variable("expiry", "12/30").variable("cvv", "999")
                 .execute()
@@ -201,8 +217,10 @@ class PaymentServiceIntegrationTest {
                 && e.payload().path("bookingReference").asText().equals(REF_OK)).count()).isEqualTo(1);
 
         // a cancelled booking that was never paid refunds nothing and does not fail
-        publish(UUID.randomUUID().toString(), "booking.cancelled", Map.of("bookingReference", "NOPAY1", "status", "CANCELLED"));
-        publish(UUID.randomUUID().toString(), "booking.confirmed", Map.of("bookingReference", REF_FAIL, "status", "CONFIRMED"));
+        publish(UUID.randomUUID().toString(), "booking.cancelled",
+                Map.of("bookingReference", "NOPAY1", "status", "CANCELLED"));
+        publish(UUID.randomUUID().toString(), "booking.confirmed",
+                Map.of("bookingReference", REF_FAIL, "status", "CONFIRMED"));
         Thread.sleep(1000);
         assertThat(paymentRepository.findByBookingReferenceOrderByCreatedAt(REF_FAIL))
                 .extracting(p -> p.getStatus().name()).containsExactly("FAILED");
@@ -211,13 +229,13 @@ class PaymentServiceIntegrationTest {
     @Test
     @Order(5)
     void paymentsByBookingListsHistory() {
-        graphQlTester.document("query($ref: String!) { paymentsByBooking(reference: $ref) { id status amount } }")
+        asPassenger.document("query($ref: String!) { paymentsByBooking(reference: $ref) { id status amount } }")
                 .variable("ref", REF_OK)
                 .execute()
                 .path("paymentsByBooking").entityList(Object.class).hasSize(1)
                 .path("paymentsByBooking[0].status").entity(String.class).isEqualTo("REFUNDED");
 
-        graphQlTester.document("query($ref: String!) { paymentsByBooking(reference: $ref) { id status } }")
+        asPassenger.document("query($ref: String!) { paymentsByBooking(reference: $ref) { id status } }")
                 .variable("ref", "ZZZZZZ")
                 .execute()
                 .path("paymentsByBooking").entityList(Object.class).hasSize(0);
@@ -227,7 +245,7 @@ class PaymentServiceIntegrationTest {
     @Order(6)
     void refundOfFailedPaymentIsInvalidState() {
         Long failedId = paymentRepository.findByBookingReferenceOrderByCreatedAt(REF_FAIL).get(0).getId();
-        graphQlTester.document("mutation($id: ID!) { refund(paymentId: $id) { id status } }")
+        asOperations.document("mutation($id: ID!) { refund(paymentId: $id) { id status } }")
                 .variable("id", failedId)
                 .execute()
                 .errors().satisfy(errors -> {
@@ -235,22 +253,23 @@ class PaymentServiceIntegrationTest {
                     assertThat(errors.get(0).getExtensions()).containsEntry("code", "INVALID_STATE");
                 });
 
-        graphQlTester.document("mutation { refund(paymentId: 999999) { id } }")
+        asOperations.document("mutation { refund(paymentId: 999999) { id } }")
                 .execute()
-                .errors().satisfy(errors -> assertThat(errors.get(0).getExtensions()).containsEntry("code", "NOT_FOUND"));
+                .errors().satisfy(errors ->
+                        assertThat(errors.get(0).getExtensions()).containsEntry("code", "NOT_FOUND"));
     }
 
     @Test
     @Order(7)
     void manualRefundOfCompletedPaymentWorks() {
-        Long id = graphQlTester.document(PAY)
+        Long id = asPassenger.document(PAY)
                 .variable("ref", "REFUND").variable("amount", 100.00)
                 .variable("card", "5555555555554444").variable("expiry", "01/2031").variable("cvv", "0000")
                 .execute()
                 .path("pay.status").entity(String.class).isEqualTo("COMPLETED")
                 .path("pay.id").entity(Long.class).get();
 
-        graphQlTester.document("mutation($id: ID!) { refund(paymentId: $id) { id status } }")
+        asOperations.document("mutation($id: ID!) { refund(paymentId: $id) { id status } }")
                 .variable("id", id)
                 .execute()
                 .path("refund.status").entity(String.class).isEqualTo("REFUNDED");
@@ -261,7 +280,7 @@ class PaymentServiceIntegrationTest {
     @Test
     @Order(8)
     void invalidInputIsValidationError() {
-        graphQlTester.document(PAY)
+        asPassenger.document(PAY)
                 .variable("ref", "ABC123").variable("amount", 10.00)
                 .variable("card", "4242424242424242").variable("expiry", "2030-12").variable("cvv", "123")
                 .execute()
@@ -271,14 +290,15 @@ class PaymentServiceIntegrationTest {
                     assertThat(errors.get(0).getMessage()).contains("expiry");
                 });
 
-        graphQlTester.document(PAY)
+        asPassenger.document(PAY)
                 .variable("ref", "TOOLONGREF").variable("amount", -1)
                 .variable("card", "1234").variable("expiry", "12/30").variable("cvv", "12")
                 .execute()
                 .errors().satisfy(errors -> {
                     assertThat(errors).hasSize(1);
                     assertThat(errors.get(0).getExtensions()).containsEntry("code", "VALIDATION_ERROR");
-                    assertThat(errors.get(0).getMessage()).contains("bookingReference").contains("amount").contains("cardNumber").contains("cvv");
+                    assertThat(errors.get(0).getMessage())
+                            .contains("bookingReference").contains("amount").contains("cardNumber").contains("cvv");
                 });
         // nothing was persisted for the invalid attempts
         assertThat(paymentRepository.findByBookingReferenceOrderByCreatedAt("ABC123")).isEmpty();
@@ -335,7 +355,8 @@ class PaymentServiceIntegrationTest {
     // ------------------------------------------------------------------ helpers
 
     private void publish(String eventId, String type, Map<String, Object> payload) throws Exception {
-        EventEnvelope env = new EventEnvelope(eventId, type, OffsetDateTime.now(), "booking-service", objectMapper.valueToTree(payload));
+        EventEnvelope env = new EventEnvelope(eventId, type, OffsetDateTime.now(), "booking-service",
+                objectMapper.valueToTree(payload));
         MessageProperties props = new MessageProperties();
         props.setContentType(MessageProperties.CONTENT_TYPE_JSON);
         rabbitTemplate.send("airport.events", type, new Message(objectMapper.writeValueAsBytes(env), props));

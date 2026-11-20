@@ -18,8 +18,13 @@ type Query {
 }
 
 type Mutation {
-  createShop(input: ShopInput!): Shop!
+  createShop(
+    input: ShopInput!,
+    "Optional, max 64 characters (e.g. a UUID per form). Repeating the call with the same key returns the shop the first call created instead of a duplicate."
+    idempotencyKey: String
+  ): Shop!
   updateShop(id: ID!, input: ShopInput!): Shop!
+  "Soft delete: the row keeps a tombstone (deleted_at) and the shop disappears from every query"
   deleteShop(id: ID!): Boolean!
 }
 

@@ -51,7 +51,8 @@ public class Flight {
     protected Flight() {}
 
     public Flight(String flightNumber, Airline airline, Aircraft aircraft, String origin, String destination,
-                  OffsetDateTime scheduledDeparture, OffsetDateTime scheduledArrival, String gate, BigDecimal basePrice) {
+                  OffsetDateTime scheduledDeparture, OffsetDateTime scheduledArrival, String gate,
+                  BigDecimal basePrice) {
         this.flightNumber = flightNumber;
         this.airline = airline;
         this.aircraft = aircraft;
